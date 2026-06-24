@@ -1,0 +1,14 @@
+[Unit]
+Description=mydoorcamera capture daemon (hardware H.264 -> indexed NAL store)
+After=multi-user.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/mydoorcamera
+ExecStart=/usr/bin/node -r /root/mydoorcamera/node_modules/typenode/index.js /root/mydoorcamera/src/capture.ts
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

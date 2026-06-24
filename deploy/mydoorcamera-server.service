@@ -1,0 +1,15 @@
+[Unit]
+Description=mydoorcamera HTTPS/WSS server (serves indexed video over cbor-x RPC)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/mydoorcamera
+ExecStart=/usr/bin/node -r /root/mydoorcamera/node_modules/typenode/index.js /root/mydoorcamera/src/server.ts
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
