@@ -1562,10 +1562,10 @@ slash@^3.0.0:
   resolved "https://registry.yarnpkg.com/slash/-/slash-3.0.0.tgz#6539be870c165adbd5240220dbe361f1bc4d4634"
   integrity sha512-g9Q1haeby36OSStwb4ntCGGGaKsaVSjQ68fBxoQcutl5fS1vuY18H3wSt3jFyFtrkx+Kz0V1G85A4MyAdDMi2Q==
 
-sliftutils@^1.4.64:
-  version "1.4.64"
-  resolved "https://registry.yarnpkg.com/sliftutils/-/sliftutils-1.4.64.tgz#8dfbe9d2ced9d74e12afb6bd460a48b3ac26e79b"
-  integrity sha512-hsz1eChHobYvdpGR4ktK+NUUoCprGIrznLr5Dw3lZiz8z5EA2guaxyE/9ixnUmLV7ZPL/yDJAhQSKVChKtcZ0g==
+sliftutils@^1.4.65:
+  version "1.4.65"
+  resolved "https://registry.yarnpkg.com/sliftutils/-/sliftutils-1.4.65.tgz#a82d1cb0d30b5fe2f806ce4b59c2d78e93d34d67"
+  integrity sha512-JdPM0kY6kn/59SZ+Dc6/GE+5avC08IxTLIbGAmoGUAnEzlifuWrKdYs4sWAuHt5Ed1t8sz4Udy8C4em1gxbi+Q==
   dependencies:
     "@types/chrome" "^0.0.237"
     "@types/node-forge" "^1.3.11"

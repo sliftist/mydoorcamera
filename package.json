@@ -15,7 +15,7 @@
     "dependencies": {
         "mobx": "^6.13.3",
         "preact": "10.24.3",
-        "sliftutils": "^1.4.64",
+        "sliftutils": "^1.4.65",
         "socket-function": "1.1.43",
         "typenode": "^6.0.1",
         "typesafecss": "*"
