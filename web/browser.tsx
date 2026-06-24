@@ -1,3 +1,10 @@
+// Storage setup MUST run before any other import initializes storage. Module
+// init order is preserved through bundling, so we import only these two
+// functions and call them immediately, ahead of every other import below.
+import { setFileAPIKey, usePrivateFileSystem } from "sliftutils/storage/FileFolderAPI";
+setFileAPIKey("mydoorcamera");
+usePrivateFileSystem();
+
 import * as preact from "preact";
 import { observable, runInAction } from "mobx";
 import { observer } from "sliftutils/render-utils/observer";
