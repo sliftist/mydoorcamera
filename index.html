@@ -1,12 +1,28 @@
 <!DOCTYPE html>
-<html lang="en">
+<html>
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>mydoorcamera</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <title>mydoorcamera</title>
+    <style>
+        *, *::before, *::after {
+            box-sizing: border-box;
+        }
+        html, body {
+            margin: 0;
+            padding: 0;
+            background: hsl(220, 15%, 10%);
+            color: hsl(0, 0%, 95%);
+            font-family: system-ui, -apple-system, Segoe UI, Roboto, 'Helvetica Neue', Arial, sans-serif;
+        }
+        input:focus, textarea:focus, select:focus {
+            outline: none;
+            border-color: hsl(220, 90%, 62%);
+        }
+    </style>
 </head>
 <body>
-  <h1>Hello, world 👋</h1>
-  <p>GitHub Pages is live for <strong>mydoorcamera</strong>.</p>
+    <div id="app"></div>
+    <script src="./browser.js" crossorigin="anonymous"></script>
 </body>
 </html>
