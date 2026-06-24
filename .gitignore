@@ -1,0 +1,35 @@
+# --- Secrets / keys — NEVER commit (public repo) ---
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+id_rsa*
+id_ed25519*
+*_rsa
+*_ed25519
+.env
+.env.*
+*.secret
+secrets.*
+credentials*
+*.credentials
+*token*
+*.local
+
+# --- OS / editor cruft ---
+.DS_Store
+Thumbs.db
+*.swp
+*~
+.idea/
+.vscode/
+
+# --- Build / dependencies ---
+node_modules/
+__pycache__/
+*.pyc
+.venv/
+venv/
+dist/
+build/
