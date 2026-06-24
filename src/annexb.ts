@@ -81,3 +81,17 @@ export function frameNal(nal: Buffer): Buffer {
     len.writeUInt32BE(nal.length, 0);
     return Buffer.concat([len, nal]);
 }
+
+// Inverse of frameNal: read length-prefixed NAL payloads back out of a GOP blob.
+export function splitFramedNals(buf: Buffer): Buffer[] {
+    const out: Buffer[] = [];
+    let i = 0;
+    while (i + 4 <= buf.length) {
+        const len = buf.readUInt32BE(i);
+        i += 4;
+        if (len <= 0 || i + len > buf.length) break;
+        out.push(buf.subarray(i, i + len));
+        i += len;
+    }
+    return out;
+}
