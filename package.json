@@ -5,7 +5,7 @@
     "license": "UNLICENSED",
     "scripts": {
         "type": "yarn tsc --noEmit",
-        "build-web": "node scripts/writeBuildVersion.js && build-web --indexHtml ./index.html",
+        "build-web": "node scripts/writeBuildVersion.js && build-web --indexHtml ./index.html && node scripts/cacheBust.js",
         "watch-web": "slift-watch --port 9888 \"web/**/*.ts\" \"web/**/*.tsx\" \"yarn build-web\"",
         "watch": "yarn watch-web",
         "build": "yarn build-web",
