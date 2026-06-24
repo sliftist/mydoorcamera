@@ -4,10 +4,21 @@
 
 import * as https from "https";
 import * as fs from "fs";
+import * as os from "os";
 import * as path from "path";
 import { execSync } from "child_process";
 import { WebSocketServer } from "ws";
-import { SERVER_PORT, CERT_DIR, PASSWORD_WORD_COUNT, firstLanIp } from "./config";
+import { SERVER_PORT, CERT_DIR, PASSWORD_WORD_COUNT } from "./config";
+
+function firstLanIp(): string {
+    const ifaces = os.networkInterfaces();
+    for (const name of Object.keys(ifaces)) {
+        for (const i of ifaces[name] || []) {
+            if (i.family === "IPv4" && !i.internal) return i.address;
+        }
+    }
+    return "127.0.0.1";
+}
 import { createRpc, Channel } from "./rpc";
 import { listChildren, readHourIndex, readGopBytes } from "./storage";
 import { getPassword, checkPassword, isBlacklisted, recordFailedAttempt } from "./auth";
