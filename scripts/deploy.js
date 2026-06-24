@@ -11,6 +11,8 @@ const { execSync } = require("child_process");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
+const crypto = require("crypto");
+const { buildOverlaySnippet } = require("./errorOverlay");
 
 const REPO_ROOT = path.resolve(__dirname, "..");
 const BUILD_DIR = path.join(REPO_ROOT, "build-web");
@@ -47,6 +49,16 @@ function cleanupWorktree(dir) {
     fs.rmSync(dir, { recursive: true, force: true });
 }
 
+function stripAnsi(s) {
+    return String(s).replace(/\x1b\[[0-9;]*m/g, "");
+}
+
+function injectBeforeBodyEnd(html, snippet) {
+    return html.includes("</body>")
+        ? html.replace("</body>", `${snippet}\n</body>`)
+        : html + snippet;
+}
+
 function main() {
     // Refuse to deploy a dirty tree — that would put code on gh-pages that
     // doesn't correspond to any commit anyone can later check out.
@@ -67,9 +79,39 @@ function main() {
     // ahead of the public source-of-truth branch.
     run(`git push origin ${branch}`);
 
-    run("yarn build-web");
+    // Build, but capture failure instead of aborting, so we can still publish a
+    // page that surfaces the error (bottom bar + expandable stack) rather than
+    // leaving the deploy silently broken.
+    let buildError = "";
+    console.log("==> yarn build-web");
+    try {
+        const out = execSync("yarn build-web", { cwd: REPO_ROOT, stdio: "pipe", encoding: "utf8" });
+        process.stdout.write(out);
+    } catch (e) {
+        const combined = `${e.stdout || ""}${e.stderr || ""}`;
+        process.stdout.write(combined);
+        buildError = stripAnsi(combined).trim() || stripAnsi(String(e.message || "Build failed"));
+    }
 
-    if (!fs.existsSync(path.join(BUILD_DIR, "index.html")) || !fs.existsSync(path.join(BUILD_DIR, "browser.js"))) {
+    const indexPath = path.join(BUILD_DIR, "index.html");
+    const jsPath = path.join(BUILD_DIR, "browser.js");
+
+    if (buildError) {
+        // Compose the served page from the source index.html (so the last good
+        // bundle, if present, still loads), cache-busted to the current bundle,
+        // with the error overlay injected.
+        let html = fs.existsSync(indexPath)
+            ? fs.readFileSync(indexPath, "utf8")
+            : fs.readFileSync(path.join(REPO_ROOT, "index.html"), "utf8");
+        if (fs.existsSync(jsPath)) {
+            const hash = crypto.createHash("sha256").update(fs.readFileSync(jsPath)).digest("hex").slice(0, 12);
+            html = html.replace(/(\.\/browser\.js)(\?v=[^"']*)?/g, `$1?v=${hash}`);
+        }
+        html = injectBeforeBodyEnd(html, buildOverlaySnippet(buildError));
+        fs.mkdirSync(BUILD_DIR, { recursive: true });
+        fs.writeFileSync(indexPath, html);
+        console.error("\n*** Build FAILED — deploying a page that surfaces the error. ***\n");
+    } else if (!fs.existsSync(indexPath) || !fs.existsSync(jsPath)) {
         console.error("Build output missing — expected build-web/index.html and build-web/browser.js.");
         process.exit(1);
     }
@@ -121,7 +163,7 @@ function main() {
         run("git add -A", worktreeDir);
         if (tryRun("git diff --cached --quiet", worktreeDir)) {
             console.log("==> No changes to deploy.");
-            return;
+            return buildError;
         }
 
         const timestamp = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
@@ -136,6 +178,12 @@ function main() {
     } finally {
         cleanupWorktree(worktreeDir);
     }
+
+    return buildError;
 }
 
-main();
+// Exit non-zero when the build failed, even though we still published the
+// error-surfacing page, so CI / callers know the deploy wasn't clean.
+if (main()) {
+    process.exit(1);
+}
