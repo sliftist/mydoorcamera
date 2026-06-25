@@ -25,7 +25,7 @@ function pipelineArgs(): string[] {
         "queue", "!", "jpegdec", "!",
         "queue", "!", "videoconvert", "n-threads=4", "!",
         `video/x-raw,format=I420,width=${WIDTH},height=${HEIGHT}`, "!",
-        "clockoverlay", "time-format=%Y-%m-%d %H:%M:%S %Z", "font-desc=Sans Bold 18", "!",
+        "clockoverlay", "time-format=%Y-%m-%d %I:%M:%S %p %Z", "font-desc=Sans Bold 18", "!",
         "queue", "!",
         "v4l2h264enc", `extra-controls=encode,video_bitrate=${BITRATE},h264_i_frame_period=${GOP}`, "!",
         "video/x-h264,level=(string)4,profile=main", "!",
