@@ -67,6 +67,7 @@ async function connect(): Promise<void> {
         const initial = (urlDay && days.includes(urlDay)) ? urlDay : (days[days.length - 1] || "");
         if (initial) await selectDay(initial, false);
         else runInAction(() => { state.calMonth = thisMonth(); });
+        if (getUrlLive()) void enterLive(); // resume live mode across refresh
     } catch (e: any) {
         runInAction(() => { state.error = e?.message || String(e); state.showCertLink = !!e?.needsCert; });
         if (e?.needsCert) retryTimer = setTimeout(() => void connect(), 2000);
@@ -81,9 +82,14 @@ function thisMonth(): string { const d = new Date(); return `${d.getFullYear()}-
 function getUrlDay(): string { try { return new URLSearchParams(location.search).get("day") || ""; } catch { return ""; } }
 function setUrlDay(day: string): void { try { history.pushState({}, "", day ? `?day=${day}` : location.pathname); } catch { /* ignore */ } }
 function getUrlT(): number | null { try { const v = new URLSearchParams(location.search).get("t"); return v == null || v === "" ? null : Number(v); } catch { return null; } }
-// Persist the current position as seconds-of-day in ?t (replaceState, no history spam).
+function getUrlLive(): boolean { try { return new URLSearchParams(location.search).get("live") === "1"; } catch { return false; } }
+function setUrlLive(on: boolean): void {
+    if (!state.day) return;
+    try { history.replaceState({}, "", on ? `?day=${state.day}&live=1` : `?day=${state.day}`); } catch { /* ignore */ }
+}
+// Persist the current position as seconds-of-day in ?t (replaceState, no history spam). Skipped in live mode.
 function saveUrlPosition(wall: number): void {
-    if (!state.day || !state.coverage) return;
+    if (state.live || !state.day || !state.coverage) return;
     const t = Math.max(0, Math.round((wall - state.coverage.dayStartMs) / 1000));
     try { history.replaceState({}, "", `?day=${state.day}&t=${t}`); } catch { /* ignore */ }
 }
@@ -124,12 +130,14 @@ async function enterLive(): Promise<void> {
     if (state.day !== today) await selectDay(today, true);
     if (!player) return;
     runInAction(() => { state.live = true; });
+    setUrlLive(true);
     try { await player.startLive(); }
-    catch (e) { runInAction(() => { state.live = false; }); console.error("[live] start failed:", e); }
+    catch (e) { runInAction(() => { state.live = false; }); setUrlLive(false); console.error("[live] start failed:", e); }
 }
 
 async function exitLive(): Promise<void> {
     runInAction(() => { state.live = false; });
+    setUrlLive(false);
     if (player) await player.stopLive();
     if (player && state.coverage && state.coverage.ranges.length) {
         const wall = state.coverage.ranges[state.coverage.ranges.length - 1].end;
@@ -379,7 +387,7 @@ const DayView = observer(class extends preact.Component { render() {
                 style={{ minHeight: "100vh", justifyContent: "center", padding: "8px 12px", boxSizing: "border-box" }}>
                 <video ref={(el: any) => { videoEl = el; if (el) maybeStartDayPlayer(); }} playsInline muted
                     style={{ width: "100%", maxWidth: "1200px", maxHeight: "calc(100vh - 150px)", aspectRatio: "16 / 9", background: "#000", objectFit: "contain", cursor: "pointer" }}
-                    onMouseDown={(e: any) => { e.preventDefault(); player?.togglePlay(); saveUrlPosition(state.playWall); }} />
+                    onMouseDown={(e: any) => { e.preventDefault(); if (!state.live) { player?.togglePlay(); saveUrlPosition(state.playWall); } }} />
                 {state.live
                     ? <div className={css.hbox(14).alignItems("center").width("100%")}>
                         <span className={css.color("hsl(0,85%,62%)").fontSize(15)}>● LIVE</span>
