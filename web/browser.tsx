@@ -18,7 +18,9 @@ function onKeyDown(e: KeyboardEvent): void {
     if (e.key === "ArrowRight" || e.key === "ArrowLeft") {
         e.preventDefault();
         const base = state.desiredWall || player.currentWall();
-        const step = 5000 * (player.compression || 1);
+        const viewSpan = (state.viewStart && state.viewEnd) ? (state.viewEnd - state.viewStart)
+            : (state.coverage ? state.coverage.dayEndMs - state.coverage.dayStartMs : 60000);
+        const step = viewSpan / 400; // 1/400th of the current trackbar zoom span
         const w = base + (e.key === "ArrowRight" ? step : -step);
         runInAction(() => { state.desiredWall = w; });
         player.seekTo(w);

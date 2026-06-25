@@ -13,8 +13,9 @@ import { splitFramedNals } from "./annexb";
 const W = 64, H = 36, FRAME = W * H;   // tiny grayscale frame
 const NOISE = 16;                       // per-pixel change below this is treated as sensor noise
 // Ignore the burned-in timestamp (top-left) so its ticking digits aren't read as
-// activity. Generous box over the clock overlay in the downscaled WxH frame.
-const MASK_ROWS = 4, MASK_COLS = 18;
+// activity. The clock text spans ~cols 0-40 of the 64-wide frame; box covers it
+// generously (the changing time digits measured out to col ~39).
+const MASK_ROWS = 4, MASK_COLS = 48;
 const PENDING_LIMIT = 12;               // records examined per pass
 const PERIOD_MS = 1000;
 const SAMPLE_INTERVAL_MS = 3000;        // only decode/diff one keyframe every ~3s (the rest get 0)
