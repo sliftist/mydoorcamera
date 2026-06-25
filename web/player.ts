@@ -95,6 +95,9 @@ export class DayPlayer {
 
     get playStatus(): PlayStatus { return this.status; }
     get wantsPlay(): boolean { return this.intent === "play"; }
+    // Real seconds per playback second at this level (30^level) — used to scale the
+    // arrow-key seek step so it moves a sensible amount at every thinning level.
+    get compression(): number { return this.comp; }
 
     // ---- intent ----
     togglePlay(): void { if (this.intent === "play") this.pause(); else this.play(); }
@@ -254,8 +257,18 @@ export class DayPlayer {
         return splitFramedNals(Buffer.from(data));
     }
 
+    // True if the MSE timeline second `sec` currently holds data.
+    private isBuffered(sec: number): boolean {
+        const b = this.sb?.buffered;
+        if (!b) return false;
+        for (let i = 0; i < b.length; i++) if (sec >= b.start(i) - 0.05 && sec < b.end(i) + 0.1) return true;
+        return false;
+    }
+
     private async appendGop(hh: string, g: GopEntry, nals?: Buffer[]): Promise<void> {
-        if (this.appended.has(g.t)) return;
+        // Re-append if we marked it appended but it was since evicted from the
+        // SourceBuffer — otherwise a seek back to it freezes (no data, no re-fetch).
+        if (this.appended.has(g.t) && this.isBuffered(this.internalSec(g.t))) return;
         this.appended.add(g.t);
         try {
             const ns = nals || await this.fetchNals(hh, g);

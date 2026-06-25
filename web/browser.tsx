@@ -42,6 +42,8 @@ const state = observable({
     levels: [] as LevelInfo[],       // discovery info for the levels panel
     loadedBytes: 0,                  // total bytes received from the server this session
     loadRateBps: 0,                  // avg inbound bytes/sec over the last 60s
+    viewStart: 0,                    // trackbar zoom window (ms); 0 => full day
+    viewEnd: 0,
 }, undefined, { deep: false });
 
 let api: CameraApi | undefined;
@@ -125,7 +127,7 @@ function fmtDur(sec: number): string {
 // Level label by time-PER-FRAME — i.e. how much real time each shown frame
 // represents (what you'd miss between frames). L1 = 1 frame/sec (you see where
 // someone was), L2 = 1 frame / 30s (you only catch lingering things), etc.
-function tpfLabel(l: LevelInfo): string { return l.level === 0 ? "full · real-time" : `${fmtDur(l.timePerSec / 30)} / frame`; }
+function tpfLabel(l: LevelInfo): string { return l.level === 0 ? "full · real-time" : `${fmtDur(Math.pow(30, l.level - 1))} / frame`; }
 function levelOptions(): LevelInfo[] {
     const ls = state.levels.filter(l => l.level === 0 || l.usedBytes > 0);
     return ls.length ? ls : [{ level: 0, timePerSec: 1, gopSpanSec: 1, budgetBytes: 0, usedBytes: 0, earliestMs: 0, latestMs: 0 }];
@@ -163,6 +165,7 @@ async function selectDay(dayStr: string, push = true): Promise<void> {
         state.coverage = cov;
         state.calMonth = dayStr.slice(0, 7).replace("/", "-");
         state.playWall = startWall; state.desiredWall = startWall; state.hoverWall = null;
+        state.viewStart = cov.dayStartMs; state.viewEnd = cov.dayEndMs; // reset trackbar zoom
     });
     maybeStartDayPlayer();
     // Live-grow watch only makes sense for the full-res day index.
@@ -245,11 +248,40 @@ async function onReconnected(): Promise<void> {
 // dragging, and the player's seek-pump throttles + shows frames.
 let trackEl: HTMLElement | null = null;
 let dragging = false;
+// The visible trackbar window (zoomable). Falls back to the full day.
+function viewBounds(): { vs: number; ve: number } {
+    const c = state.coverage!;
+    return { vs: state.viewStart || c.dayStartMs, ve: state.viewEnd || c.dayEndMs };
+}
 function clientToWall(clientX: number): number | undefined {
     if (!trackEl || !state.coverage) return undefined;
     const r = trackEl.getBoundingClientRect();
     const f = Math.min(1, Math.max(0, (clientX - r.left) / r.width));
-    return state.coverage.dayStartMs + f * (state.coverage.dayEndMs - state.coverage.dayStartMs);
+    const { vs, ve } = viewBounds();
+    return vs + f * (ve - vs);
+}
+function resetZoom(): void {
+    if (!state.coverage) return;
+    runInAction(() => { state.viewStart = state.coverage!.dayStartMs; state.viewEnd = state.coverage!.dayEndMs; });
+}
+// Scroll wheel zooms in/out around the cursor, keeping the time under the cursor fixed.
+function onTrackWheel(e: WheelEvent): void {
+    if (!state.coverage) return;
+    e.preventDefault();
+    const c = state.coverage;
+    const { vs, ve } = viewBounds();
+    const span = ve - vs;
+    const cursor = clientToWall(e.clientX);
+    if (cursor == null) return;
+    const daySpan = c.dayEndMs - c.dayStartMs;
+    let newSpan = span * (e.deltaY < 0 ? 0.8 : 1.25);     // up = zoom in, down = zoom out
+    newSpan = Math.max(2000, Math.min(daySpan, newSpan)); // 2s min, full day max
+    const f = (cursor - vs) / span;                       // keep cursor's time under the cursor
+    let ns = cursor - f * newSpan;
+    let ne = ns + newSpan;
+    if (ns < c.dayStartMs) { ns = c.dayStartMs; ne = ns + newSpan; }
+    if (ne > c.dayEndMs) { ne = c.dayEndMs; ns = ne - newSpan; }
+    runInAction(() => { state.viewStart = Math.max(c.dayStartMs, ns); state.viewEnd = ne; });
 }
 function seekToWall(wall: number): void {
     runInAction(() => { state.desiredWall = wall; });
@@ -335,49 +367,81 @@ const ConnectView = observer(class extends preact.Component { render() {
     );
 } });
 
+// Attach a NON-passive wheel listener so we can preventDefault the page scroll.
+function setTrackRef(el: HTMLElement | null): void {
+    if (trackEl && trackEl !== el) trackEl.removeEventListener("wheel", onTrackWheel as any);
+    trackEl = el;
+    if (el) el.addEventListener("wheel", onTrackWheel as any, { passive: false });
+}
+
 const Trackbar = observer(class extends preact.Component { render() {
     const c = state.coverage;
     if (!c) return <div />;
-    const span = c.dayEndMs - c.dayStartMs;
-    const pct = (w: number) => (Math.min(1, Math.max(0, (w - c.dayStartMs) / span)) * 100).toFixed(3) + "%";
-    const wpct = (a: number, b: number) => (Math.max(0, (b - a) / span) * 100).toFixed(3) + "%";
+    const vs = state.viewStart || c.dayStartMs, ve = state.viewEnd || c.dayEndMs;
+    const span = Math.max(1, ve - vs);
+    const daySpan = c.dayEndMs - c.dayStartMs;
+    const zoomed = span < daySpan - 1000;
+    const clamp01 = (x: number) => Math.min(1, Math.max(0, x));
+    const pct = (w: number) => (clamp01((w - vs) / span) * 100).toFixed(3) + "%";
+    const wpct = (a: number, b: number) => ((clamp01((b - vs) / span) - clamp01((a - vs) / span)) * 100).toFixed(3) + "%";
+    const inView = (a: number, b: number) => b > vs && a < ve;
+    const TICKS = [1, 2, 3, 4]; // interior label positions (fractions of /5)
     return (
         <div className={css.vbox(4).width("100%")}>
-            <div ref={(el: any) => { trackEl = el; }}
+            <div ref={setTrackRef as any}
                 className={css.relative.width("100%").height(56).hsl(220, 15, 12).border("1px solid hsl(220,15%,28%)")}
-                style={{ cursor: "pointer", userSelect: "none" }}
+                style={{ cursor: "pointer", userSelect: "none", overflow: "hidden" }}
                 onMouseDown={onTrackDown}
                 onMouseMove={(e: any) => { const w = clientToWall(e.clientX); if (w != null) runInAction(() => { state.hoverWall = w; }); }}
                 onMouseLeave={() => { if (!dragging) runInAction(() => { state.hoverWall = null; }); }}>
-                {c.ranges.map((r, i) => (
+                {c.ranges.filter(r => inView(r.start, r.end)).map((r, i) => (
                     <div key={i} style={{ position: "absolute", top: 0, bottom: 0, left: pct(r.start), width: wpct(r.start, r.end), background: "hsl(150,45%,30%)" }} />
                 ))}
-                {c.badRanges.map((r, i) => (
+                {c.badRanges.filter(r => inView(r.start, r.end)).map((r, i) => (
                     <div key={"b" + i} title="conflicting / bad data" style={{ position: "absolute", top: 0, bottom: 0, left: pct(r.start), width: wpct(r.start, r.end), background: "repeating-linear-gradient(45deg, hsl(0,70%,42%), hsl(0,70%,42%) 6px, hsl(0,70%,26%) 6px, hsl(0,70%,26%) 12px)" }} />
                 ))}
-                {/* Activity line chart: max activity per minute, scaled to the day's peak. */}
+                {/* Activity line chart: max activity per minute, mapped into the zoom window. */}
                 {(() => {
                     const act = c.activity || [];
                     const scale = Math.max(0.05, ...act, 0);
-                    const pts = act.map((v, i) => `${i},${(100 - Math.min(1, v / scale) * 100).toFixed(1)}`).join(" ");
+                    const pts: string[] = [];
+                    for (let i = 0; i < act.length; i++) {
+                        const xf = (c.dayStartMs + i * 60000 - vs) / span;
+                        if (xf < -0.02 || xf > 1.02) continue;
+                        pts.push(`${(xf * 1000).toFixed(1)},${(100 - Math.min(1, act[i] / scale) * 100).toFixed(1)}`);
+                    }
                     return (
-                        <svg viewBox="0 0 1440 100" preserveAspectRatio="none" style={{ position: "absolute", inset: 0, width: "100%", height: "100%", pointerEvents: "none" }}>
-                            <polyline points={pts} fill="none" stroke="hsl(50,100%,65%)" strokeWidth={1} vectorEffect="non-scaling-stroke" opacity={0.9} />
+                        <svg viewBox="0 0 1000 100" preserveAspectRatio="none" style={{ position: "absolute", inset: 0, width: "100%", height: "100%", pointerEvents: "none" }}>
+                            <polyline points={pts.join(" ")} fill="none" stroke="hsl(50,100%,65%)" strokeWidth={1} vectorEffect="non-scaling-stroke" opacity={0.9} />
                         </svg>
                     );
                 })()}
+                {/* Interior time labels, each on its own tick line. */}
+                {TICKS.map(k => {
+                    const wall = vs + (k / 5) * span;
+                    return (
+                        <div key={"tk" + k} style={{ position: "absolute", top: 0, bottom: 0, left: ((k / 5) * 100).toFixed(2) + "%", width: "1px", background: "rgba(255,255,255,0.22)", pointerEvents: "none" }}>
+                            <div style={{ position: "absolute", top: "1px", left: "3px", fontSize: "9px", color: "rgba(255,255,255,0.75)", whiteSpace: "nowrap", textShadow: "0 0 3px #000, 0 0 3px #000" }}>{clockHMS(wall)}</div>
+                        </div>
+                    );
+                })}
                 <div style={{ position: "absolute", top: 0, bottom: 0, left: pct(state.desiredWall), width: "2px", background: "hsl(45,100%,58%)" }} title="seek target" />
                 <div style={{ position: "absolute", top: 0, bottom: 0, left: pct(state.playWall), width: "2px", background: "hsl(210,100%,66%)" }} title="playing" />
-                {state.hoverWall != null && (
+                {state.hoverWall != null && inView(state.hoverWall, state.hoverWall) && (
                     <div style={{ position: "absolute", top: 0, bottom: 0, left: pct(state.hoverWall), width: "1px", background: "rgba(255,255,255,0.65)" }}>
-                        <div style={{ position: "absolute", bottom: "100%", transform: "translateX(-50%)", background: "#000", padding: "2px 6px", fontSize: "11px", whiteSpace: "nowrap", border: "1px solid hsl(220,15%,35%)" }}>{clockHMS(state.hoverWall)}</div>
+                        <div style={{ position: "absolute", bottom: "2px", transform: "translateX(-50%)", background: "#000", padding: "2px 6px", fontSize: "11px", whiteSpace: "nowrap", border: "1px solid hsl(220,15%,35%)" }}>{clockHMS(state.hoverWall)}</div>
                     </div>
                 )}
             </div>
-            <div className={css.hbox(8).fontSize(11).opacity(0.75)} style={{ justifyContent: "space-between" }}>
-                <span>{clockHM(c.dayStartMs)}</span>
-                <span className={css.opacity(1)}>{clockHMS(state.hoverWall != null ? state.hoverWall : state.playWall)}</span>
-                <span>{clockHM(c.dayEndMs - 1)}</span>
+            <div className={css.hbox(8).fontSize(11).opacity(0.85).alignItems("center")} style={{ justifyContent: "space-between" }}>
+                <span style={{ whiteSpace: "nowrap" }}>{formatDateTime(vs)}</span>
+                <span className={css.hbox(8).alignItems("center")}>
+                    <span style={{ whiteSpace: "nowrap" }}>{clockHMS(state.hoverWall != null ? state.hoverWall : state.playWall)}</span>
+                    {zoomed
+                        ? <button className={navBtnCss} style={{ fontSize: "11px", padding: "2px 8px" }} onClick={resetZoom} title="Reset zoom (show whole day)">⤢ reset</button>
+                        : <span className={css.opacity(0.5)}>· scroll to zoom</span>}
+                </span>
+                <span style={{ whiteSpace: "nowrap" }}>{formatDateTime(ve)}</span>
             </div>
         </div>
     );
@@ -407,7 +471,7 @@ const Controls = observer(class extends preact.Component { render() {
                 {playing ? "❚❚" : "►"}
             </button>
             <span className={css.fontSize(13).width(110)} style={{ color: statusColor(state.playStatus) }}>{statusLabel(state.playStatus)}</span>
-            <span className={css.fontSize(12).opacity(0.6).flexGrow(1)}>← → seek 5s</span>
+            <span className={css.fontSize(12).opacity(0.6).flexGrow(1)}>← → seek {fmtDur(5 * Math.pow(30, state.level))}</span>
             <span className={css.fontSize(13).opacity(0.7)} title="Thinning level — real time each frame represents (what you'd miss between frames)">🔍</span>
             <select className={selectCss} value={String(state.level)} title="Thinning level"
                 onChange={(e: any) => void setLevel(Number(e.target.value))}>
@@ -565,7 +629,8 @@ function onKeyDown(e: KeyboardEvent): void {
     if (e.key === "ArrowRight" || e.key === "ArrowLeft") {
         e.preventDefault();
         const base = state.desiredWall || player.currentWall();
-        const w = base + (e.key === "ArrowRight" ? 5000 : -5000);
+        const step = 5000 * (player.compression || 1); // scale by the level's time density
+        const w = base + (e.key === "ArrowRight" ? step : -step);
         runInAction(() => { state.desiredWall = w; });
         player.seekTo(w);
     } else if (e.key === " ") {
