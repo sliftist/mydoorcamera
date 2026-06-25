@@ -38,7 +38,7 @@ export async function connect(): Promise<void> {
         startStatsPoll();
         if (!loadTimer) loadTimer = setInterval(() => {
             if (!api) return;
-            runInAction(() => { state.loadedBytes = api!.loadedBytes; state.loadRateBps = api!.loadRateBps(); if (player) state.bufferedRanges = player.bufferedWallRanges(); });
+            runInAction(() => { state.loadedBytes = api!.loadedBytes; state.loadedGops = api!.loadedGops; state.loadRateBps = api!.loadRateBps(); if (player) state.bufferedRanges = player.bufferedWallRanges(); });
         }, 1000);
         if (!posTimer) posTimer = setInterval(() => { if (state.day && state.coverage) saveUrlPosition(state.playWall); void refreshLevels(); }, 30000);
         void refreshLevels();

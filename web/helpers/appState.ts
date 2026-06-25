@@ -35,6 +35,7 @@ export const state = observable({
     level: 0,                        // thinning level being viewed (0 = full res)
     levels: [] as LevelInfo[],       // discovery info for the levels panel
     loadedBytes: 0,                  // total bytes received from the server this session
+    loadedGops: 0,                   // GOPs fetched/streamed this session
     loadRateBps: 0,                  // avg inbound bytes/sec over the last 60s
     viewStart: 0,                    // trackbar zoom window (ms); 0 => full day
     viewEnd: 0,

@@ -89,7 +89,11 @@ export async function setLevel(L: number): Promise<void> {
         if (periodHasFootage(L, ap.start)) { target = ap.start; pos = anchor; } // anchor's period has data
         else { const first = firstPeriodWithData(L, cur.start, cur.end); target = first != null ? first : ap.start; } // first with data
     }
-    if (pos != null) { const b = periodBounds(L, target); if (pos < b.start || pos >= b.end) pos = undefined; }
+    // Always keep the current playback time when it falls inside the chosen
+    // period — switching levels shouldn't move you in time.
+    const tb = periodBounds(L, target);
+    if (anchor >= tb.start && anchor < tb.end) pos = anchor;
+    else if (pos != null && (pos < tb.start || pos >= tb.end)) pos = undefined;
     await selectPeriod(target, false, pos);
     if (wasZoomed && state.coverage && state.index) {
         const ps = state.coverage.dayStartMs, pe = state.coverage.dayEndMs;
@@ -103,13 +107,13 @@ export async function setLevel(L: number): Promise<void> {
 export function getUrlDay(): string { try { return new URLSearchParams(location.search).get("day") || ""; } catch { return ""; } }
 function speedSuffix(): string { return state.speed !== 1 ? `&speed=${state.speed}` : ""; }
 function lvlSuffix(): string { return state.level !== 0 ? `&lvl=${state.level}` : ""; }
-// Trackbar zoom window as seconds-into-period: &z=start-end (omitted when not zoomed).
+// Trackbar zoom window as ms-into-period: &z=start-end (omitted when not zoomed).
 function zoomSuffix(): string {
     if (!state.coverage) return "";
     const start = state.coverage.dayStartMs, end = state.coverage.dayEndMs;
     const vs = state.viewStart || start, ve = state.viewEnd || end;
     if (vs <= start + 500 && ve >= end - 500) return "";
-    return `&z=${Math.round((vs - start) / 1000)}-${Math.round((ve - start) / 1000)}`;
+    return `&z=${Math.round(vs - start)}-${Math.round(ve - start)}`;
 }
 function extraSuffix(): string { return lvlSuffix() + speedSuffix() + zoomSuffix(); }
 export function getUrlZoom(): { vs: number; ve: number } | null {
@@ -120,7 +124,7 @@ export function applyUrlZoom(): void {
     const z = getUrlZoom();
     if (!z || !state.coverage || !state.index) return;
     const start = state.coverage.dayStartMs, end = state.coverage.dayEndMs;
-    const vs = Math.max(start, start + z.vs * 1000), ve = Math.min(end, start + z.ve * 1000);
+    const vs = Math.max(start, start + z.vs), ve = Math.min(end, start + z.ve);
     if (ve - vs < 1000) return;
     runInAction(() => { state.viewStart = vs; state.viewEnd = ve; state.viewActivity = { fromMs: vs, toMs: ve, activity: bucketActivity(state.index!, vs, ve, 1440) }; });
 }
@@ -135,7 +139,7 @@ export function setUrlLive(on: boolean): void {
 }
 export function saveUrlPosition(wall: number): void {
     if (state.live || !state.day || !state.coverage) return;
-    const t = Math.max(0, Math.round((wall - state.coverage.dayStartMs) / 1000));
+    const t = Math.max(0, Math.round(wall - state.coverage.dayStartMs)); // ms into period (full precision)
     try { history.replaceState({}, "", `?day=${state.day}&t=${t}${extraSuffix()}`); } catch { /* ignore */ }
 }
 
@@ -161,7 +165,7 @@ export async function selectPeriod(startMs: number, push = true, positionWall?: 
     try { gops = decodeIndex(await api.getRawIndex(state.level, start, end)); } catch { gops = []; }
     const ranges = deriveRanges(gops, joinMsFor(state.level));
     let pos = positionWall != null ? positionWall : (ranges.length ? ranges[0].start : start);
-    if (positionWall == null && !push) { const t = getUrlT(); if (t != null) pos = start + t * 1000; }
+    if (positionWall == null && !push) { const t = getUrlT(); if (t != null) pos = start + t; } // ms into period
     pos = Math.max(start, Math.min(end - 1, pos));
     runInAction(() => {
         state.day = key;

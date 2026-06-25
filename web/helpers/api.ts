@@ -39,6 +39,7 @@ export class CameraApi {
     // Inbound-data accounting: total bytes ever received + a 60s sliding log for rate.
     private bytesTotal = 0;
     private byteLog: { t: number; n: number }[] = [];
+    private gopsLoaded = 0; // GOPs fetched/streamed this session
 
     constructor(public ip: string, public port = 8443) {}
 
@@ -54,6 +55,7 @@ export class CameraApi {
 
     // Total bytes received from the server (monotonic) and the rolling 60s rate.
     get loadedBytes(): number { return this.bytesTotal; }
+    get loadedGops(): number { return this.gopsLoaded; }
     loadRateBps(): number {
         const cut = Date.now() - 60_000;
         let sum = 0;
@@ -87,7 +89,7 @@ export class CameraApi {
         const rpc = createRpc(browserWsChannel(ws), {
             // Server pushes live GOPs here while streaming.
             onStreamData: async (meta: any, bytes: Uint8Array) => {
-                if (this.streamCb) this.streamCb(meta, bytes);
+                if (this.streamCb) { this.gopsLoaded++; this.streamCb(meta, bytes); }
                 else this.rpc?.call("stopStream").catch(() => { /* */ }); // never get stuck streaming
             },
             // Server pushes a day's new coverage as capture grows it.
@@ -133,7 +135,7 @@ export class CameraApi {
     getDayCoverage(parts: string[]): Promise<DayCoverage> { return this.call("getDayCoverage", parts); }
     getHourIndex(parts: string[]): Promise<HourIndex> { return this.call("getHourIndex", parts); }
     getGopData(parts: string[], file: string, off: number, len: number): Promise<Uint8Array> {
-        return this.call("getGopData", parts, file, off, len);
+        return this.call<Uint8Array>("getGopData", parts, file, off, len).then(b => { this.gopsLoaded++; return b; });
     }
     getStats(): Promise<Stats> { return this.call("getStats"); }
 
@@ -146,7 +148,7 @@ export class CameraApi {
         return this.call("getLevelIndex", level, fromMs, toMs);
     }
     getLevelGopData(level: number, t: number, file: string, off: number, len: number): Promise<Uint8Array> {
-        return this.call("getLevelGopData", level, t, file, off, len);
+        return this.call<Uint8Array>("getLevelGopData", level, t, file, off, len).then(b => { this.gopsLoaded++; return b; });
     }
     // Raw on-disk index bytes for a period — parsed client-side (see indexBuffer.ts).
     getRawIndex(level: number, fromMs: number, toMs: number): Promise<Uint8Array> {
