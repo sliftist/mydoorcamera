@@ -2,10 +2,10 @@ import * as preact from "preact";
 import { runInAction } from "mobx";
 import { observer } from "sliftutils/render-utils/observer";
 import { css } from "typesafecss";
-import { state } from "../appState";
-import { selectDay, thisMonth } from "../navigation";
-import { pad2 } from "../format";
-import { navBtnCss } from "../styles";
+import { state } from "../helpers/appState";
+import { selectDay, thisMonth } from "../helpers/navigation";
+import { pad2 } from "../helpers/format";
+import { navBtnCss } from "../helpers/styles";
 
 const WEEKDAYS = ["S", "M", "T", "W", "T", "F", "S"];
 function shiftMonth(delta: number): void {

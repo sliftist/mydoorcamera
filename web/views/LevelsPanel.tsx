@@ -1,9 +1,9 @@
 import * as preact from "preact";
 import { observer } from "sliftutils/render-utils/observer";
 import { css } from "typesafecss";
-import { state } from "../appState";
-import { setLevel } from "../navigation";
-import { tpfLabel, fmtDur, gb } from "../format";
+import { state } from "../helpers/appState";
+import { setLevel } from "../helpers/navigation";
+import { tpfLabel, fmtDur, gb } from "../helpers/format";
 
 @observer
 export class LevelsPanel extends preact.Component {

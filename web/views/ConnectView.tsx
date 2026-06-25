@@ -2,9 +2,9 @@ import * as preact from "preact";
 import { runInAction } from "mobx";
 import { observer } from "sliftutils/render-utils/observer";
 import { css } from "typesafecss";
-import { state } from "../appState";
-import { connect } from "../session";
-import { inputCss, btnCss } from "../styles";
+import { state } from "../helpers/appState";
+import { connect } from "../helpers/session";
+import { inputCss, btnCss } from "../helpers/styles";
 
 @observer
 export class ConnectView extends preact.Component {

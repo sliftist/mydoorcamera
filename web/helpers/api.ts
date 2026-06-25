@@ -2,7 +2,7 @@
 // over the native WebSocket. Connecting requires the self-signed cert to have
 // been accepted (open https://<ip>:<port>/ once), otherwise the socket errors.
 
-import { createRpc, browserWsChannel, Rpc } from "../src/rpc";
+import { createRpc, browserWsChannel, Rpc } from "../../src/rpc";
 
 export type Range = { start: number; end: number };
 export type GopEntry = { t: number; e: number; f: string; o: number; l: number; n: number; a: number; aMax: number };

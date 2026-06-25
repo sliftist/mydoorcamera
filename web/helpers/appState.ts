@@ -3,7 +3,7 @@
 
 import { observable } from "mobx";
 import { DayCoverage, Stats, LevelInfo } from "./api";
-import { PlayStatus } from "./player";
+import { PlayStatus } from "./videoHelpers";
 
 export const lsGet = (k: string): string => { try { return localStorage.getItem(k) || ""; } catch { return ""; } };
 export const lsSet = (k: string, v: string): void => { try { localStorage.setItem(k, v); } catch { /* ignore */ } };

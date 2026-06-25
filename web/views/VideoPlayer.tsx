@@ -1,18 +1,18 @@
 import * as preact from "preact";
 import { observer } from "sliftutils/render-utils/observer";
 import { css } from "typesafecss";
-import { state } from "../appState";
-import { player, setVideoEl, exitLive } from "../session";
-import { saveUrlPosition } from "../navigation";
-import { rateColor, rateLabel } from "../format";
-import { playBtnCss } from "../styles";
+import { state } from "../helpers/appState";
+import { player, setVideoEl, exitLive } from "../helpers/session";
+import { saveUrlPosition } from "../helpers/navigation";
+import { rateColor, rateLabel } from "../helpers/format";
+import { playBtnCss } from "../helpers/styles";
 import { Trackbar } from "./Trackbar";
 import { Controls } from "./Controls";
 import { Calendar } from "./Calendar";
 import { LevelsPanel } from "./LevelsPanel";
 
 @observer
-export class DayView extends preact.Component {
+export class VideoPlayer extends preact.Component {
     render() {
         const noFootage = state.coverage && state.coverage.ranges.length === 0;
         return (

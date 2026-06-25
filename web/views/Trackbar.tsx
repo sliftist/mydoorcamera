@@ -2,10 +2,10 @@ import * as preact from "preact";
 import { observer } from "sliftutils/render-utils/observer";
 import { css } from "typesafecss";
 import { formatDateTime } from "socket-function/src/formatting/format";
-import { state } from "../appState";
-import { clockHMS } from "../format";
-import { navBtnCss } from "../styles";
-import { setTrackRef, onTrackDown, onTrackHover, onTrackLeave, resetZoom } from "../trackbar";
+import { state } from "../helpers/appState";
+import { clockHMS } from "../helpers/format";
+import { navBtnCss } from "../helpers/styles";
+import { setTrackRef, onTrackDown, onTrackHover, onTrackLeave, resetZoom } from "../helpers/trackbarHelpers";
 
 const TICKS = [1, 2, 3, 4]; // interior label positions (fractions of /5)
 

@@ -2,11 +2,11 @@ import * as preact from "preact";
 import { runInAction } from "mobx";
 import { observer } from "sliftutils/render-utils/observer";
 import { css } from "typesafecss";
-import { state } from "../appState";
-import { player, enterLive } from "../session";
-import { setLevel, levelOptions, saveUrlPosition } from "../navigation";
-import { fmtDur, tpfLabel, statusLabel, statusColor, speedLabel, SPEEDS } from "../format";
-import { playBtnCss, selectCss, liveBtnCss } from "../styles";
+import { state } from "../helpers/appState";
+import { player, enterLive } from "../helpers/session";
+import { setLevel, levelOptions, saveUrlPosition } from "../helpers/navigation";
+import { fmtDur, tpfLabel, statusLabel, statusColor, speedLabel, SPEEDS } from "../helpers/format";
+import { playBtnCss, selectCss, liveBtnCss } from "../helpers/styles";
 
 @observer
 export class Controls extends preact.Component {

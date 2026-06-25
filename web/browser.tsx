@@ -6,10 +6,10 @@ import * as preact from "preact";
 import { runInAction } from "mobx";
 import { configureMobxNextFrameScheduler } from "sliftutils/render-utils/mobxTyped";
 import { isNode } from "typesafecss";
-import { state } from "./appState";
+import { state } from "./helpers/appState";
 import { App } from "./views/App";
-import { connect, player } from "./session";
-import { selectDay, getUrlDay } from "./navigation";
+import { connect, player } from "./helpers/session";
+import { selectDay, getUrlDay } from "./helpers/navigation";
 
 // Arrow keys seek (step scaled by the level's time density, routed through the
 // player's throttled seek-pump); space toggles play.

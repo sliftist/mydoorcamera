@@ -1,7 +1,7 @@
 // Pure display formatters + small UI constants. No state, no side effects.
 
 import { LevelInfo, Stats } from "./api";
-import { PlayStatus } from "./player";
+import { PlayStatus } from "./videoHelpers";
 
 export const pad2 = (n: number): string => String(n).padStart(2, "0");
 export const clockHMS = (ms: number): string => new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });

@@ -9,9 +9,9 @@
 //    and the user wants to play, normal windowed buffering + playback resume.
 
 import { CameraApi, GopEntry } from "./api";
-import { splitFramedNals } from "../src/annexb";
+import { splitFramedNals } from "../../src/annexb";
 import { H264toMP4 } from "mp4-typescript";
-import { FPS } from "../src/config";
+import { FPS } from "../../src/config";
 
 export type PlayStatus = "playing" | "paused" | "waiting" | "unavailable";
 

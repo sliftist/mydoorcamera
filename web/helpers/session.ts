@@ -4,7 +4,7 @@
 
 import { runInAction } from "mobx";
 import { CameraApi } from "./api";
-import { DayPlayer } from "./player";
+import { DayPlayer } from "./videoHelpers";
 import { state, lsSet } from "./appState";
 import {
     selectDay, refreshLevels, saveUrlPosition, rewatchDay, fetchCoverage,
