@@ -4,9 +4,19 @@ import { runInAction } from "mobx";
 import { state } from "./appState";
 import { player } from "./session";
 import { saveUrlPosition } from "./navigation";
+import { bucketActivity } from "./indexBuffer";
 
 let trackEl: HTMLElement | null = null;
 let dragging = false;
+
+// Re-sample activity from the in-memory index for the current zoom window — this
+// is what reveals per-GOP detail when zooming in. Client-side and fast.
+function recomputeViewActivity(): void {
+    if (!state.index || !state.coverage) return;
+    const from = state.viewStart || state.coverage.dayStartMs;
+    const to = state.viewEnd || state.coverage.dayEndMs;
+    runInAction(() => { state.viewActivity = { fromMs: from, toMs: to, activity: bucketActivity(state.index!, from, to, 1440) }; });
+}
 
 // The visible trackbar window (zoomable). Falls back to the full day.
 export function viewBounds(): { vs: number; ve: number } {
@@ -25,6 +35,7 @@ export function clientToWall(clientX: number): number | undefined {
 export function resetZoom(): void {
     if (!state.coverage) return;
     runInAction(() => { state.viewStart = state.coverage!.dayStartMs; state.viewEnd = state.coverage!.dayEndMs; });
+    recomputeViewActivity();
 }
 
 // Scroll wheel zooms in/out around the cursor, keeping the time under the cursor fixed.
@@ -45,6 +56,7 @@ function onTrackWheel(e: WheelEvent): void {
     if (ns < c.dayStartMs) { ns = c.dayStartMs; ne = ns + newSpan; }
     if (ne > c.dayEndMs) { ne = c.dayEndMs; ns = ne - newSpan; }
     runInAction(() => { state.viewStart = Math.max(c.dayStartMs, ns); state.viewEnd = ne; });
+    recomputeViewActivity();
 }
 
 function seekToWall(wall: number): void {

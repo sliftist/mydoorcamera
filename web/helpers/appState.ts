@@ -4,6 +4,7 @@
 import { observable } from "mobx";
 import { DayCoverage, Stats, LevelInfo } from "./api";
 import { PlayStatus } from "./videoHelpers";
+import { IndexGop } from "./indexBuffer";
 
 export const lsGet = (k: string): string => { try { return localStorage.getItem(k) || ""; } catch { return ""; } };
 export const lsSet = (k: string, v: string): void => { try { localStorage.setItem(k, v); } catch { /* ignore */ } };
@@ -18,6 +19,7 @@ export const state = observable({
     availableDays: [] as string[],   // L0 day folders: "YYYY/MM/DD"
     day: "",                         // selected period key: "YYYY/MM/DD" (L0), "YYYY/MM" (L1), "YYYY" (L2+)
     coverage: null as DayCoverage | null,  // coverage over the period (dayStartMs/dayEndMs = period bounds)
+    index: null as IndexGop[] | null,      // per-GOP index for the period (raw download, parsed)
     bufferedRanges: [] as { start: number; end: number }[], // what's actually loaded into the player (wall-clock)
     pickerAnchorMs: 0,               // timestamp the date picker is centered on
     playWall: 0,                     // actual playhead (wall-clock ms)
@@ -36,4 +38,7 @@ export const state = observable({
     loadRateBps: 0,                  // avg inbound bytes/sec over the last 60s
     viewStart: 0,                    // trackbar zoom window (ms); 0 => full day
     viewEnd: 0,
+    // Activity sampled at the current view window's resolution (re-fetched on
+    // zoom) so zooming in reveals per-GOP detail instead of period-wide buckets.
+    viewActivity: null as { fromMs: number; toMs: number; activity: number[] } | null,
 }, undefined, { deep: false });

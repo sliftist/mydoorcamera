@@ -1,23 +1,24 @@
 // Navigation controller: period selection (scaled to the level's folder span),
-// thinning-level switching, and URL params.
+// thinning-level switching, URL params, and loading the per-period index.
 //
 // The navigable PERIOD scales with the thinning level, matching the on-disk
 // folder span (see storage bucketOf / config levelPeriod):
 //   L0 = a day, L1 = a month, L2+ = a year.
-// state.coverage / the trackbar span the period; the date picker picks at that
-// granularity (day, month, or year) and never finer.
+// On selecting a period we download its raw index once and derive coverage +
+// activity from it client-side (so the trackbar has full per-GOP detail).
 
 import { runInAction } from "mobx";
-import { DayCoverage, LevelInfo } from "./api";
+import { LevelInfo } from "./api";
 import { state } from "./appState";
 import { SPEEDS } from "./format";
 import { api, player, maybeStartDayPlayer, exitLive } from "./session";
-import { levelPeriod } from "../../src/config";
+import { decodeIndex, deriveRanges, bucketActivity, IndexGop } from "./indexBuffer";
+import { levelPeriod, levelGopSpanSec } from "../../src/config";
 
 function pad(n: number): string { return String(n).padStart(2, "0"); }
+function joinMsFor(level: number): number { return Math.max(2500, levelGopSpanSec(level) * 1000 * 1.5); }
 
 // ---- periods ----
-// Bounds (local time) of the period of `level` containing `ms`.
 export function periodBounds(level: number, ms: number): { start: number; end: number } {
     const d = new Date(ms);
     const p = levelPeriod(level);
@@ -25,7 +26,6 @@ export function periodBounds(level: number, ms: number): { start: number; end: n
     if (p === "month") return { start: new Date(d.getFullYear(), d.getMonth(), 1).getTime(), end: new Date(d.getFullYear(), d.getMonth() + 1, 1).getTime() };
     return { start: new Date(d.getFullYear(), 0, 1).getTime(), end: new Date(d.getFullYear() + 1, 0, 1).getTime() };
 }
-// URL/key for a period: "YYYY/MM/DD" (day), "YYYY/MM" (month), "YYYY" (year).
 export function periodKey(level: number, ms: number): string {
     const d = new Date(ms); const p = levelPeriod(level);
     const Y = d.getFullYear(), M = pad(d.getMonth() + 1), D = pad(d.getDate());
@@ -37,7 +37,6 @@ export function periodStartFromKey(key: string): number {
 }
 export function todayStart(): number { return periodBounds(0, Date.now()).start; }
 
-// Does the period at `level` containing `startMs` have any footage?
 export function periodHasFootage(level: number, startMs: number): boolean {
     if (level === 0) return state.availableDays.includes(periodKey(0, startMs));
     const li = state.levels.find(l => l.level === level);
@@ -45,31 +44,50 @@ export function periodHasFootage(level: number, startMs: number): boolean {
     const { start, end } = periodBounds(level, startMs);
     return li.earliestMs < end && li.latestMs > start;
 }
-
-// ---- thinning levels ----
-export async function fetchCoverage(start: number, end: number, level: number): Promise<DayCoverage> {
-    if (level === 0) return api!.getDayCoverage(periodKey(0, start).split("/"));
-    const c = await api!.getLevelCoverage(level, start, end, 1440);
-    return { dayStartMs: start, dayEndMs: end, ranges: c.ranges, badRanges: c.badRanges, activity: c.activity };
+// Earliest sub-period of `level` within [from, to) that has footage.
+function firstPeriodWithData(level: number, from: number, to: number): number | null {
+    let t = periodBounds(level, from).start;
+    for (let i = 0; i < 4000 && t < to; i++) {
+        if (periodHasFootage(level, t)) return t;
+        t = periodBounds(level, t).end;
+    }
+    return null;
 }
 
+// ---- thinning levels ----
 export async function refreshLevels(): Promise<void> {
     if (!api) return;
     try { const ls = await api.getLevels(); runInAction(() => { state.levels = ls; }); } catch { /* */ }
 }
 
-export async function setLevel(L: number): Promise<void> {
-    if (L === state.level) return;
-    if (state.live) await exitLive();             // live is full-res real-time only
-    const anchor = state.playWall || state.desiredWall || (state.coverage ? state.coverage.dayStartMs : Date.now());
-    runInAction(() => { state.level = L; });
-    await selectPeriod(anchor, false, anchor);    // select the new level's period around the current position
-    saveUrlPosition(state.playWall);              // persist &lvl (+t, +day key)
-}
-
 export function levelOptions(): LevelInfo[] {
     const ls = state.levels.filter(l => l.level === 0 || l.usedBytes > 0);
     return ls.length ? ls : [{ level: 0, timePerSec: 1, gopSpanSec: 1, budgetBytes: 0, usedBytes: 0, earliestMs: 0, latestMs: 0 }];
+}
+
+// Remember where we were at each level so switching levels lands sensibly.
+const lastPeriodStart: Record<number, number> = {};
+const lastPosition: Record<number, number> = {};
+
+export async function setLevel(L: number): Promise<void> {
+    if (L === state.level) return;
+    if (state.live) await exitLive();
+    const anchor = state.playWall || state.desiredWall || (state.coverage ? state.coverage.dayStartMs : Date.now());
+    const cur = state.coverage ? { start: state.coverage.dayStartMs, end: state.coverage.dayEndMs } : periodBounds(state.level, anchor);
+    runInAction(() => { state.level = L; });
+    let target: number;
+    let pos: number | undefined;
+    const remembered = lastPeriodStart[L];
+    if (remembered != null && remembered >= cur.start && remembered < cur.end) {
+        target = remembered; pos = lastPosition[L];          // restore the more specific period we had here
+    } else {
+        const ap = periodBounds(L, anchor);
+        if (periodHasFootage(L, ap.start)) { target = ap.start; pos = anchor; } // anchor's period has data
+        else { const first = firstPeriodWithData(L, cur.start, cur.end); target = first != null ? first : ap.start; } // first with data
+    }
+    if (pos != null) { const b = periodBounds(L, target); if (pos < b.start || pos >= b.end) pos = undefined; }
+    await selectPeriod(target, false, pos);
+    saveUrlPosition(state.playWall);
 }
 
 // ---- URL params ----
@@ -86,46 +104,69 @@ export function setUrlLive(on: boolean): void {
     if (!state.day) return;
     try { history.replaceState({}, "", on ? `?day=${state.day}&live=1${extraSuffix()}` : `?day=${state.day}${extraSuffix()}`); } catch { /* ignore */ }
 }
-// Persist the current position as seconds-into-period in ?t (replaceState). Skipped in live mode.
 export function saveUrlPosition(wall: number): void {
     if (state.live || !state.day || !state.coverage) return;
     const t = Math.max(0, Math.round((wall - state.coverage.dayStartMs) / 1000));
     try { history.replaceState({}, "", `?day=${state.day}&t=${t}${extraSuffix()}`); } catch { /* ignore */ }
 }
 
-// ---- period selection ----
+// ---- period selection / index loading ----
+function applyIndex(gops: IndexGop[], start: number, end: number): { start: number; end: number }[] {
+    const ranges = deriveRanges(gops, joinMsFor(state.level));
+    runInAction(() => {
+        state.index = gops;
+        state.coverage = { dayStartMs: start, dayEndMs: end, ranges, badRanges: [], activity: [] };
+        if (player) player.ranges = ranges;
+        const vs = state.viewStart || start, ve = state.viewEnd || end;
+        state.viewActivity = { fromMs: vs, toMs: ve, activity: bucketActivity(gops, vs, ve, 1440) };
+    });
+    return ranges;
+}
+
 export async function selectPeriod(startMs: number, push = true, positionWall?: number): Promise<void> {
     if (!api) return;
     const { start, end } = periodBounds(state.level, startMs);
     const key = periodKey(state.level, start);
     if (push) setUrlDay(key);
-    const cov = await fetchCoverage(start, end, state.level);
-    let pos = positionWall != null ? positionWall : (cov.ranges.length ? cov.ranges[0].start : start);
-    if (positionWall == null && !push) { const t = getUrlT(); if (t != null) pos = start + t * 1000; } // resume saved position
+    let gops: IndexGop[] = [];
+    try { gops = decodeIndex(await api.getRawIndex(state.level, start, end)); } catch { gops = []; }
+    const ranges = deriveRanges(gops, joinMsFor(state.level));
+    let pos = positionWall != null ? positionWall : (ranges.length ? ranges[0].start : start);
+    if (positionWall == null && !push) { const t = getUrlT(); if (t != null) pos = start + t * 1000; }
     pos = Math.max(start, Math.min(end - 1, pos));
     runInAction(() => {
         state.day = key;
-        state.coverage = cov;
+        state.index = gops;
+        state.coverage = { dayStartMs: start, dayEndMs: end, ranges, badRanges: [], activity: [] };
         state.pickerAnchorMs = start;
         state.playWall = pos; state.desiredWall = pos; state.hoverWall = null;
-        state.viewStart = start; state.viewEnd = end; // reset trackbar zoom to the whole period
+        state.viewStart = start; state.viewEnd = end;
+        state.viewActivity = { fromMs: start, toMs: end, activity: bucketActivity(gops, start, end, 1440) };
     });
+    lastPeriodStart[state.level] = start; lastPosition[state.level] = pos;
     maybeStartDayPlayer();
-    // Live-grow watch only makes sense for the full-res day index.
     if (state.level === 0) watchSelectedDay(key);
     else if (lastWatchedDay) { api.unwatchDay(lastWatchedDay); lastWatchedDay = ""; }
 }
 
+// Re-download the current period's index (after a reconnect, or when the live day grows).
+export async function reloadIndex(): Promise<void> {
+    if (!api || !state.coverage) return;
+    const start = state.coverage.dayStartMs, end = state.coverage.dayEndMs;
+    try { applyIndex(decodeIndex(await api.getRawIndex(state.level, start, end)), start, end); } catch { /* */ }
+}
+
 // ---- day watch (L0 live-grow) ----
 let lastWatchedDay = "";
+let watchReloadTimer: ReturnType<typeof setTimeout> | undefined;
 export function watchSelectedDay(dayKey: string): void {
     if (!api) return;
     if (lastWatchedDay && lastWatchedDay !== dayKey) api.unwatchDay(lastWatchedDay);
     lastWatchedDay = dayKey;
-    api.watchDay(dayKey, (cov) => {
+    api.watchDay(dayKey, () => {
         if (state.day !== dayKey) return;
-        runInAction(() => { state.coverage = cov; });
-        if (player) player.ranges = cov.ranges; // so coveredAt sees the freshly-added data
+        if (watchReloadTimer) clearTimeout(watchReloadTimer);
+        watchReloadTimer = setTimeout(() => void reloadIndex(), 1500); // debounced: index grows as capture appends
     }).catch(() => { /* */ });
 }
 export function rewatchDay(dayKey: string): void { lastWatchedDay = ""; watchSelectedDay(dayKey); }

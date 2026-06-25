@@ -249,6 +249,31 @@ export async function readLevelGops(level: number, fromMs: number, toMs: number)
 // Coverage + activity for a level across an arbitrary span (drives the trackbar
 // at any thinning level). Activity is the per-bucket max of aMax. Ranges are
 // joined across gaps up to ~1.5 GOPs so contiguous coverage reads as one band.
+// Time span (local) of a bucket, parsed from its dir + stem.
+function bucketTimeRange(level: number, dir: string[], stem: string): { start: number; end: number } {
+    const N = (s: string) => Number(s);
+    if (level === 0) { const [Y, MM, DD] = dir.map(N), HH = N(stem); return { start: new Date(Y, MM - 1, DD, HH).getTime(), end: new Date(Y, MM - 1, DD, HH + 1).getTime() }; }
+    if (level === 1) { const [Y, MM] = dir.map(N), DD = N(stem); return { start: new Date(Y, MM - 1, DD).getTime(), end: new Date(Y, MM - 1, DD + 1).getTime() }; }
+    const [Y] = dir.map(N), MM = N(stem); return { start: new Date(Y, MM - 1, 1).getTime(), end: new Date(Y, MM, 1).getTime() }; // L2+: month file
+}
+
+// The raw on-disk index bytes for every bucket overlapping [fromMs, toMs),
+// concatenated. Sent to the client verbatim (no processing) — it parses the same
+// framed records to learn what data exists, frame counts, and per-GOP activity.
+export async function getRawIndex(level: number, fromMs: number, toMs: number): Promise<Buffer> {
+    const root = levelRoot(level);
+    const parts: Buffer[] = [];
+    for (const b of await listLevelBuckets(level)) {
+        const r = bucketTimeRange(level, b.dir, b.stem);
+        if (r.end <= fromMs || r.start >= toMs) continue;
+        const absDir = path.join(root, ...b.dir);
+        for (const f of (await readdirSafe(absDir)).filter(x => x.startsWith(b.stem + ".") && x.endsWith(".idx")).sort()) {
+            try { parts.push(await fsp.readFile(path.join(absDir, f))); } catch { /* */ }
+        }
+    }
+    return Buffer.concat(parts);
+}
+
 export async function getLevelCoverage(level: number, fromMs: number, toMs: number, buckets = 1440): Promise<LevelCoverage> {
     const gops = await readLevelGops(level, fromMs, toMs);
     const span = Math.max(1, toMs - fromMs);

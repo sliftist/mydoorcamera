@@ -148,6 +148,10 @@ export class CameraApi {
     getLevelGopData(level: number, t: number, file: string, off: number, len: number): Promise<Uint8Array> {
         return this.call("getLevelGopData", level, t, file, off, len);
     }
+    // Raw on-disk index bytes for a period — parsed client-side (see indexBuffer.ts).
+    getRawIndex(level: number, fromMs: number, toMs: number): Promise<Uint8Array> {
+        return this.call("getRawIndex", level, fromMs, toMs);
+    }
 
     // ---- live streaming ----
     async startStream(day: string, cb: (meta: any, bytes: Uint8Array) => void): Promise<void> {

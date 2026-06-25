@@ -6,6 +6,7 @@ import { state } from "../helpers/appState";
 import { clockHMS } from "../helpers/format";
 import { navBtnCss } from "../helpers/styles";
 import { setTrackRef, onTrackDown, onTrackHover, onTrackLeave, resetZoom } from "../helpers/trackbarHelpers";
+import { frameCount } from "../helpers/indexBuffer";
 
 const TICKS = [0, 1, 2, 3, 4]; // label positions across the bar (fractions of /4), incl. both ends
 
@@ -41,14 +42,18 @@ export class Trackbar extends preact.Component {
                     {c.badRanges.filter(r => inView(r.start, r.end)).map((r, i) => (
                         <div key={"b" + i} title="conflicting / bad data" style={{ position: "absolute", top: 0, bottom: 0, left: pct(r.start), width: wpct(r.start, r.end), background: "repeating-linear-gradient(45deg, hsl(0,70%,42%), hsl(0,70%,42%) 6px, hsl(0,70%,26%) 6px, hsl(0,70%,26%) 12px)" }} />
                     ))}
-                    {/* Activity line chart (yellow): max activity per bucket, mapped into the zoom window. */}
+                    {/* Activity line chart (yellow). Sampled at the current zoom window's
+                        resolution (re-fetched on zoom) so zooming in reveals per-GOP detail. */}
                     {(() => {
-                        const act = c.activity || [];
+                        const va = state.viewActivity;
+                        const act = va ? va.activity : (c.activity || []);
+                        const from = va ? va.fromMs : c.dayStartMs, to = va ? va.toMs : c.dayEndMs;
+                        if (!act.length) return null;
                         const scale = Math.max(0.05, ...act, 0);
-                        const bucketMs = (c.dayEndMs - c.dayStartMs) / act.length;
+                        const bucketMs = (to - from) / act.length;
                         const pts: string[] = [];
                         for (let i = 0; i < act.length; i++) {
-                            const xf = (c.dayStartMs + i * bucketMs - vs) / span;
+                            const xf = (from + i * bucketMs - vs) / span;
                             if (xf < -0.02 || xf > 1.02) continue;
                             pts.push(`${(xf * 1000).toFixed(1)},${(100 - Math.min(1, act[i] / scale) * 100).toFixed(1)}`);
                         }
@@ -82,6 +87,7 @@ export class Trackbar extends preact.Component {
                 </div>
                 <div className={css.hbox(8).fontSize(11).opacity(0.8).alignItems("center")} style={{ justifyContent: "space-between" }}>
                     <span style={{ whiteSpace: "nowrap", color: "hsl(265,90%,76%)" }}>{formatDateTime(state.hoverWall != null ? state.hoverWall : state.desiredWall)}</span>
+                    {state.index && <span className={css.opacity(0.55)}>{frameCount(state.index, vs, ve).toLocaleString()} frames in view</span>}
                     {zoomed
                         ? <button className={navBtnCss} style={{ fontSize: "11px", padding: "2px 8px" }} onClick={resetZoom} title="Reset zoom (show the whole period)">⤢ reset zoom</button>
                         : <span className={css.opacity(0.5)}>scroll to zoom</span>}

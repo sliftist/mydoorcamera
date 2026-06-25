@@ -7,8 +7,8 @@ import { CameraApi } from "./api";
 import { DayPlayer } from "./videoHelpers";
 import { state, lsSet } from "./appState";
 import {
-    selectPeriod, refreshLevels, saveUrlPosition, rewatchDay, fetchCoverage,
-    periodBounds, periodStartFromKey, todayStart,
+    selectPeriod, refreshLevels, saveUrlPosition, rewatchDay, reloadIndex,
+    periodStartFromKey, todayStart,
     getUrlSpeed, getUrlLevel, getUrlDay, getUrlLive, setUrlLive,
 } from "./navigation";
 
@@ -64,12 +64,7 @@ async function onReconnected(): Promise<void> {
         const days = await api.getAvailableDays();
         runInAction(() => { state.availableDays = days; });
         void refreshLevels();
-        if (state.day) {
-            const { start, end } = periodBounds(state.level, periodStartFromKey(state.day));
-            const cov = await fetchCoverage(start, end, state.level);
-            runInAction(() => { state.coverage = cov; });
-            if (player) player.ranges = cov.ranges;
-        }
+        if (state.day) await reloadIndex();
     } catch { /* ignore */ }
     if (state.day && state.level === 0) rewatchDay(state.day);
     if (state.live && player) { try { await player.startLive(); } catch { /* */ } }
