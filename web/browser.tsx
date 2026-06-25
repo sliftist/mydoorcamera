@@ -40,6 +40,8 @@ const state = observable({
     speed: 1,
     level: 0,                        // thinning level being viewed (0 = full res)
     levels: [] as LevelInfo[],       // discovery info for the levels panel
+    loadedBytes: 0,                  // total bytes received from the server this session
+    loadRateBps: 0,                  // avg inbound bytes/sec over the last 60s
 }, undefined, { deep: false });
 
 let api: CameraApi | undefined;
@@ -49,6 +51,7 @@ let videoEl: HTMLVideoElement | null = null;
 let retryTimer: ReturnType<typeof setTimeout> | undefined;
 let statsTimer: ReturnType<typeof setInterval> | undefined;
 let posTimer: ReturnType<typeof setInterval> | undefined;
+let loadTimer: ReturnType<typeof setInterval> | undefined;
 let lastWatchedDay = "";
 
 // ---- connection ----
@@ -65,6 +68,7 @@ async function connect(): Promise<void> {
         const days = await api.getAvailableDays();
         runInAction(() => { state.view = "browse"; state.availableDays = days; });
         startStatsPoll();
+        if (!loadTimer) loadTimer = setInterval(() => { if (api) runInAction(() => { state.loadedBytes = api!.loadedBytes; state.loadRateBps = api!.loadRateBps(); }); }, 1000);
         if (!posTimer) posTimer = setInterval(() => { if (state.day && state.coverage) saveUrlPosition(state.playWall); void refreshLevels(); }, 30000);
         void refreshLevels();
         runInAction(() => { state.speed = getUrlSpeed(); state.level = getUrlLevel(); }); // restore speed + level before the player is created
@@ -283,6 +287,12 @@ function bps(n: number): string {
     if (n >= 1048576) return (n / 1048576).toFixed(1) + "MB/s";
     if (n >= 1024) return (n / 1024).toFixed(0) + "KB/s";
     return Math.round(n) + "B/s";
+}
+function fmtBytes(n: number): string {
+    if (n >= 1073741824) return (n / 1073741824).toFixed(2) + " GB";
+    if (n >= 1048576) return (n / 1048576).toFixed(1) + " MB";
+    if (n >= 1024) return (n / 1024).toFixed(0) + " KB";
+    return n + " B";
 }
 function formatStats(s: Stats): string {
     const sy = s.system;
@@ -532,6 +542,7 @@ const App = observer(class extends preact.Component {
                 {/* Stats + build pinned bottom-right, unaffected by scrolling. */}
                 <div style={{ position: "fixed", right: "8px", bottom: "6px", fontSize: "11px", color: "rgba(255,255,255,0.65)", textAlign: "right", background: "rgba(0,0,0,0.45)", padding: "3px 8px", borderRadius: "4px", pointerEvents: "none", lineHeight: "1.5", maxWidth: "92vw" }}>
                     {state.view === "browse" && !state.online && <div style={{ color: "hsl(40,95%,62%)" }}>● reconnecting…</div>}
+                    {state.view === "browse" && <div>Loaded {fmtBytes(state.loadedBytes)} · {bps(state.loadRateBps)}</div>}
                     {state.stats && <div>{formatStats(state.stats)}</div>}
                     <div>Build {formatDateTime(BUILD_TIMESTAMP)}</div>
                 </div>

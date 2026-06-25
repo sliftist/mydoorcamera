@@ -36,6 +36,9 @@ export class CameraApi {
     // Server-push routing.
     private streamCb: ((meta: any, bytes: Uint8Array) => void) | undefined;
     private watchCbs = new Map<string, (cov: DayCoverage) => void>();
+    // Inbound-data accounting: total bytes ever received + a 60s sliding log for rate.
+    private bytesTotal = 0;
+    private byteLog: { t: number; n: number }[] = [];
 
     constructor(public ip: string, public port = 8443) {}
 
@@ -49,8 +52,30 @@ export class CameraApi {
         await this.open();
     }
 
+    // Total bytes received from the server (monotonic) and the rolling 60s rate.
+    get loadedBytes(): number { return this.bytesTotal; }
+    loadRateBps(): number {
+        const cut = Date.now() - 60_000;
+        let sum = 0;
+        for (const e of this.byteLog) if (e.t >= cut) sum += e.n;
+        return sum / 60;
+    }
+    private recordBytes(n: number): void {
+        if (!n) return;
+        this.bytesTotal += n;
+        const now = Date.now();
+        this.byteLog.push({ t: now, n });
+        const cut = now - 60_000;
+        while (this.byteLog.length && this.byteLog[0].t < cut) this.byteLog.shift();
+    }
+
     private async open(): Promise<void> {
         const ws = new WebSocket(`wss://${this.ip}:${this.port}`);
+        // Count every inbound message (RPC replies + live pushes) as loaded data.
+        ws.addEventListener("message", (ev: MessageEvent) => {
+            const d: any = ev.data;
+            this.recordBytes(d instanceof ArrayBuffer ? d.byteLength : (d?.byteLength ?? d?.size ?? (typeof d === "string" ? d.length : 0)));
+        });
         await new Promise<void>((resolve, reject) => {
             ws.onopen = () => resolve();
             ws.onerror = () => {
