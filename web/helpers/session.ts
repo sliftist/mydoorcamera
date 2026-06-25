@@ -7,8 +7,9 @@ import { CameraApi } from "./api";
 import { DayPlayer } from "./videoHelpers";
 import { state, lsSet } from "./appState";
 import {
-    selectDay, refreshLevels, saveUrlPosition, rewatchDay, fetchCoverage,
-    getUrlSpeed, getUrlLevel, getUrlDay, getUrlLive, setUrlLive, thisMonth, todayDayStr,
+    selectPeriod, refreshLevels, saveUrlPosition, rewatchDay, fetchCoverage,
+    periodBounds, periodStartFromKey, todayStart,
+    getUrlSpeed, getUrlLevel, getUrlDay, getUrlLive, setUrlLive,
 } from "./navigation";
 
 export let api: CameraApi | undefined;
@@ -35,14 +36,17 @@ export async function connect(): Promise<void> {
         const days = await api.getAvailableDays();
         runInAction(() => { state.view = "browse"; state.availableDays = days; });
         startStatsPoll();
-        if (!loadTimer) loadTimer = setInterval(() => { if (api) runInAction(() => { state.loadedBytes = api!.loadedBytes; state.loadRateBps = api!.loadRateBps(); }); }, 1000);
+        if (!loadTimer) loadTimer = setInterval(() => {
+            if (!api) return;
+            runInAction(() => { state.loadedBytes = api!.loadedBytes; state.loadRateBps = api!.loadRateBps(); if (player) state.bufferedRanges = player.bufferedWallRanges(); });
+        }, 1000);
         if (!posTimer) posTimer = setInterval(() => { if (state.day && state.coverage) saveUrlPosition(state.playWall); void refreshLevels(); }, 30000);
         void refreshLevels();
         runInAction(() => { state.speed = getUrlSpeed(); state.level = getUrlLevel(); }); // restore speed + level before the player is created
         const urlDay = getUrlDay();
-        const initial = (urlDay && days.includes(urlDay)) ? urlDay : (days[days.length - 1] || "");
-        if (initial) await selectDay(initial, false);
-        else runInAction(() => { state.calMonth = thisMonth(); });
+        const anchor = urlDay ? periodStartFromKey(urlDay) : (days.length ? periodStartFromKey(days[days.length - 1]) : 0);
+        if (anchor) await selectPeriod(anchor, false);
+        else runInAction(() => { state.pickerAnchorMs = Date.now(); });
         if (getUrlLive()) void enterLive(); // resume live mode across refresh
     } catch (e: any) {
         runInAction(() => { state.error = e?.message || String(e); state.showCertLink = !!e?.needsCert; });
@@ -60,9 +64,14 @@ async function onReconnected(): Promise<void> {
         const days = await api.getAvailableDays();
         runInAction(() => { state.availableDays = days; });
         void refreshLevels();
-        if (state.day) { const cov = await fetchCoverage(state.day, state.level); runInAction(() => { state.coverage = cov; }); if (player) player.ranges = cov.ranges; }
+        if (state.day) {
+            const { start, end } = periodBounds(state.level, periodStartFromKey(state.day));
+            const cov = await fetchCoverage(start, end, state.level);
+            runInAction(() => { state.coverage = cov; });
+            if (player) player.ranges = cov.ranges;
+        }
     } catch { /* ignore */ }
-    if (state.day) rewatchDay(state.day);
+    if (state.day && state.level === 0) rewatchDay(state.day);
     if (state.live && player) { try { await player.startLive(); } catch { /* */ } }
     else if (player) player.seekTo(state.playWall);
 }
@@ -87,9 +96,14 @@ export function maybeStartDayPlayer(): void {
     if (player && playerKey === key) return;
     teardownPlayer();
     playerKey = key;
-    player = new DayPlayer(videoEl, api, state.day.split("/"), state.coverage.dayStartMs, state.coverage.ranges, state.level);
+    player = new DayPlayer(videoEl, api, state.day.split("/"), state.coverage.dayStartMs, state.coverage.ranges, state.level, state.coverage.dayEndMs);
     player.setSpeed(state.speed); // adopt the current (possibly URL-restored) playback speed
-    player.onTime = (wall) => runInAction(() => { state.playWall = wall; });
+    player.onTime = (wall) => runInAction(() => {
+        state.playWall = wall;
+        // While actually playing, keep the seek base (desiredWall) on the live
+        // playhead so arrow-seek moves from where we are, not the last click.
+        if (player && player.wantsPlay && !state.live) state.desiredWall = wall;
+    });
     player.onStatus = (s) => runInAction(() => { state.playStatus = s; });
     player.onRate = (r) => runInAction(() => { state.playbackRate = r; });
     player.onBuffer = (s) => runInAction(() => { state.bufferSec = s; });
@@ -101,10 +115,10 @@ export function teardownPlayer(): void { if (player) { player.teardown(); player
 // ---- live mode (full-res real-time only) ----
 export async function enterLive(): Promise<void> {
     if (!api) return;
-    const today = todayDayStr();
-    const needReselect = state.day !== today || state.level !== 0;
+    const tStart = todayStart();
+    const needReselect = state.level !== 0 || !state.coverage || state.coverage.dayStartMs !== tStart;
     if (state.level !== 0) runInAction(() => { state.level = 0; });
-    if (needReselect) await selectDay(today, true);
+    if (needReselect) await selectPeriod(tStart, true);
     if (!player) return;
     runInAction(() => { state.live = true; });
     setUrlLive(true);

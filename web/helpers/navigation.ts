@@ -1,27 +1,56 @@
-// Navigation controller: day selection, thinning-level switching, and URL params.
+// Navigation controller: period selection (scaled to the level's folder span),
+// thinning-level switching, and URL params.
+//
+// The navigable PERIOD scales with the thinning level, matching the on-disk
+// folder span (see storage bucketOf / config levelPeriod):
+//   L0 = a day, L1 = a month, L2+ = a year.
+// state.coverage / the trackbar span the period; the date picker picks at that
+// granularity (day, month, or year) and never finer.
 
 import { runInAction } from "mobx";
 import { DayCoverage, LevelInfo } from "./api";
 import { state } from "./appState";
 import { SPEEDS } from "./format";
 import { api, player, maybeStartDayPlayer, exitLive } from "./session";
+import { levelPeriod } from "../../src/config";
 
-export function thisMonth(): string { const d = new Date(); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}`; }
-export function todayDayStr(): string { const d = new Date(); return `${d.getFullYear()}/${pad(d.getMonth() + 1)}/${pad(d.getDate())}`; }
 function pad(n: number): string { return String(n).padStart(2, "0"); }
 
-let lastWatchedDay = "";
+// ---- periods ----
+// Bounds (local time) of the period of `level` containing `ms`.
+export function periodBounds(level: number, ms: number): { start: number; end: number } {
+    const d = new Date(ms);
+    const p = levelPeriod(level);
+    if (p === "day") return { start: new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime(), end: new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1).getTime() };
+    if (p === "month") return { start: new Date(d.getFullYear(), d.getMonth(), 1).getTime(), end: new Date(d.getFullYear(), d.getMonth() + 1, 1).getTime() };
+    return { start: new Date(d.getFullYear(), 0, 1).getTime(), end: new Date(d.getFullYear() + 1, 0, 1).getTime() };
+}
+// URL/key for a period: "YYYY/MM/DD" (day), "YYYY/MM" (month), "YYYY" (year).
+export function periodKey(level: number, ms: number): string {
+    const d = new Date(ms); const p = levelPeriod(level);
+    const Y = d.getFullYear(), M = pad(d.getMonth() + 1), D = pad(d.getDate());
+    return p === "day" ? `${Y}/${M}/${D}` : p === "month" ? `${Y}/${M}` : `${Y}`;
+}
+export function periodStartFromKey(key: string): number {
+    const [y, m, d] = key.split("/").map(Number);
+    return new Date(y, (m || 1) - 1, d || 1).getTime();
+}
+export function todayStart(): number { return periodBounds(0, Date.now()).start; }
+
+// Does the period at `level` containing `startMs` have any footage?
+export function periodHasFootage(level: number, startMs: number): boolean {
+    if (level === 0) return state.availableDays.includes(periodKey(0, startMs));
+    const li = state.levels.find(l => l.level === level);
+    if (!li || !li.latestMs) return false;
+    const { start, end } = periodBounds(level, startMs);
+    return li.earliestMs < end && li.latestMs > start;
+}
 
 // ---- thinning levels ----
-// Coverage for a day at the current level. L0 uses the day index; thinned levels
-// pull the day's window from the level index (same DayCoverage shape).
-export async function fetchCoverage(dayStr: string, level: number): Promise<DayCoverage> {
-    const [y, mo, d] = dayStr.split("/").map(Number);
-    const dayStartMs = new Date(y, mo - 1, d, 0, 0, 0, 0).getTime();
-    const dayEndMs = dayStartMs + 24 * 3600 * 1000;
-    if (level === 0) return api!.getDayCoverage(dayStr.split("/"));
-    const c = await api!.getLevelCoverage(level, dayStartMs, dayEndMs, 1440);
-    return { dayStartMs, dayEndMs, ranges: c.ranges, badRanges: c.badRanges, activity: c.activity };
+export async function fetchCoverage(start: number, end: number, level: number): Promise<DayCoverage> {
+    if (level === 0) return api!.getDayCoverage(periodKey(0, start).split("/"));
+    const c = await api!.getLevelCoverage(level, start, end, 1440);
+    return { dayStartMs: start, dayEndMs: end, ranges: c.ranges, badRanges: c.badRanges, activity: c.activity };
 }
 
 export async function refreshLevels(): Promise<void> {
@@ -32,9 +61,10 @@ export async function refreshLevels(): Promise<void> {
 export async function setLevel(L: number): Promise<void> {
     if (L === state.level) return;
     if (state.live) await exitLive();             // live is full-res real-time only
+    const anchor = state.playWall || state.desiredWall || (state.coverage ? state.coverage.dayStartMs : Date.now());
     runInAction(() => { state.level = L; });
-    if (state.day) await selectDay(state.day, false); // refetch coverage + recreate player at new level
-    saveUrlPosition(state.playWall);              // persist &lvl (+t)
+    await selectPeriod(anchor, false, anchor);    // select the new level's period around the current position
+    saveUrlPosition(state.playWall);              // persist &lvl (+t, +day key)
 }
 
 export function levelOptions(): LevelInfo[] {
@@ -56,44 +86,46 @@ export function setUrlLive(on: boolean): void {
     if (!state.day) return;
     try { history.replaceState({}, "", on ? `?day=${state.day}&live=1${extraSuffix()}` : `?day=${state.day}${extraSuffix()}`); } catch { /* ignore */ }
 }
-// Persist the current position as seconds-of-day in ?t (replaceState, no history spam). Skipped in live mode.
+// Persist the current position as seconds-into-period in ?t (replaceState). Skipped in live mode.
 export function saveUrlPosition(wall: number): void {
     if (state.live || !state.day || !state.coverage) return;
     const t = Math.max(0, Math.round((wall - state.coverage.dayStartMs) / 1000));
     try { history.replaceState({}, "", `?day=${state.day}&t=${t}${extraSuffix()}`); } catch { /* ignore */ }
 }
 
-// ---- day selection ----
-export async function selectDay(dayStr: string, push = true): Promise<void> {
+// ---- period selection ----
+export async function selectPeriod(startMs: number, push = true, positionWall?: number): Promise<void> {
     if (!api) return;
-    if (push) setUrlDay(dayStr);
-    const cov = await fetchCoverage(dayStr, state.level);
-    let startWall = cov.ranges.length ? cov.ranges[0].start : cov.dayStartMs;
-    if (!push) { const t = getUrlT(); if (t != null) startWall = cov.dayStartMs + t * 1000; } // resume saved position
+    const { start, end } = periodBounds(state.level, startMs);
+    const key = periodKey(state.level, start);
+    if (push) setUrlDay(key);
+    const cov = await fetchCoverage(start, end, state.level);
+    let pos = positionWall != null ? positionWall : (cov.ranges.length ? cov.ranges[0].start : start);
+    if (positionWall == null && !push) { const t = getUrlT(); if (t != null) pos = start + t * 1000; } // resume saved position
+    pos = Math.max(start, Math.min(end - 1, pos));
     runInAction(() => {
-        state.day = dayStr;
+        state.day = key;
         state.coverage = cov;
-        state.calMonth = dayStr.slice(0, 7).replace("/", "-");
-        state.playWall = startWall; state.desiredWall = startWall; state.hoverWall = null;
-        state.viewStart = cov.dayStartMs; state.viewEnd = cov.dayEndMs; // reset trackbar zoom
+        state.pickerAnchorMs = start;
+        state.playWall = pos; state.desiredWall = pos; state.hoverWall = null;
+        state.viewStart = start; state.viewEnd = end; // reset trackbar zoom to the whole period
     });
     maybeStartDayPlayer();
     // Live-grow watch only makes sense for the full-res day index.
-    if (state.level === 0) watchSelectedDay(dayStr);
+    if (state.level === 0) watchSelectedDay(key);
     else if (lastWatchedDay) { api.unwatchDay(lastWatchedDay); lastWatchedDay = ""; }
 }
 
-// Watch a day so the trackbar grows as the live capture appends new footage.
-export function watchSelectedDay(dayStr: string): void {
+// ---- day watch (L0 live-grow) ----
+let lastWatchedDay = "";
+export function watchSelectedDay(dayKey: string): void {
     if (!api) return;
-    if (lastWatchedDay && lastWatchedDay !== dayStr) api.unwatchDay(lastWatchedDay);
-    lastWatchedDay = dayStr;
-    api.watchDay(dayStr, (cov) => {
-        if (state.day !== dayStr) return;
+    if (lastWatchedDay && lastWatchedDay !== dayKey) api.unwatchDay(lastWatchedDay);
+    lastWatchedDay = dayKey;
+    api.watchDay(dayKey, (cov) => {
+        if (state.day !== dayKey) return;
         runInAction(() => { state.coverage = cov; });
         if (player) player.ranges = cov.ranges; // so coveredAt sees the freshly-added data
     }).catch(() => { /* */ });
 }
-
-// Force a fresh watch subscription (used after a reconnect).
-export function rewatchDay(dayStr: string): void { lastWatchedDay = ""; watchSelectedDay(dayStr); }
+export function rewatchDay(dayKey: string): void { lastWatchedDay = ""; watchSelectedDay(dayKey); }

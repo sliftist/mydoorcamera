@@ -15,10 +15,11 @@ export const state = observable({
     error: "",
     showCertLink: false,
     connecting: false,
-    availableDays: [] as string[],   // "YYYY/MM/DD"
-    day: "",                         // selected "YYYY/MM/DD"
-    coverage: null as DayCoverage | null,
-    calMonth: "",                    // "YYYY-MM" shown in the calendar
+    availableDays: [] as string[],   // L0 day folders: "YYYY/MM/DD"
+    day: "",                         // selected period key: "YYYY/MM/DD" (L0), "YYYY/MM" (L1), "YYYY" (L2+)
+    coverage: null as DayCoverage | null,  // coverage over the period (dayStartMs/dayEndMs = period bounds)
+    bufferedRanges: [] as { start: number; end: number }[], // what's actually loaded into the player (wall-clock)
+    pickerAnchorMs: 0,               // timestamp the date picker is centered on
     playWall: 0,                     // actual playhead (wall-clock ms)
     desiredWall: 0,                  // where the user asked to play
     hoverWall: null as number | null,

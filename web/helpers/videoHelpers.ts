@@ -55,6 +55,9 @@ export class DayPlayer {
     private wdStall = 0;
     private watchdogTimer: ReturnType<typeof setInterval> | undefined;
 
+    private spanEndMs = 0;              // end of the navigable period (day/month/year)
+    private destroyed = false;
+
     onStatus: ((s: PlayStatus) => void) | undefined;
     onTime: ((wallMs: number) => void) | undefined;
     onRate: ((rate: number) => void) | undefined;
@@ -67,14 +70,40 @@ export class DayPlayer {
         public dayStartMs: number,
         public ranges: { start: number; end: number }[],
         public level = 0,
+        periodEndMs = 0,
     ) {
         this.comp = Math.pow(30, level);
+        this.spanEndMs = periodEndMs || dayStartMs + DAY_MS;
         this.targetWall = dayStartMs;
         this.video.addEventListener("timeupdate", this.onTimeUpdate);
         for (const ev of ["playing", "waiting", "pause", "seeked", "ended", "stalled", "canplay"]) {
             this.video.addEventListener(ev, this.refreshStatus);
         }
         this.watchdogTimer = setInterval(() => this.watchdog(), 500);
+        this.scheduleFrameCb(); // per-frame playhead updates (the video tells us when it shows a frame)
+    }
+
+    // Drive onTime off actual presented frames (requestVideoFrameCallback) so the
+    // playhead tracks real playback, not just the ~4Hz timeupdate event.
+    private scheduleFrameCb(): void {
+        const v: any = this.video;
+        if (typeof v.requestVideoFrameCallback !== "function") return;
+        const cb = () => {
+            if (this.destroyed) return;
+            this.onTime?.(this.currentWall());
+            v.requestVideoFrameCallback(cb);
+        };
+        v.requestVideoFrameCallback(cb);
+    }
+
+    // Buffered MSE ranges mapped back to wall-clock time (what's actually loaded
+    // into the player) — drives the solid-green "loaded" band on the trackbar.
+    bufferedWallRanges(): { start: number; end: number }[] {
+        const b = this.sb?.buffered;
+        if (!b) return [];
+        const out: { start: number; end: number }[] = [];
+        for (let i = 0; i < b.length; i++) out.push({ start: this.dayStartMs + b.start(i) * 1000 * this.comp, end: this.dayStartMs + b.end(i) * 1000 * this.comp });
+        return out;
     }
 
     // ---- helpers ----
@@ -86,7 +115,7 @@ export class DayPlayer {
     // Load all of the day's thinned GOPs once (level>0). Levels are small.
     private ensureLevelLoaded(): Promise<void> {
         if (!this.levelReady) this.levelReady = (async () => {
-            try { const r = await this.api.getLevelIndex(this.level, this.dayStartMs, this.dayStartMs + DAY_MS); this.levelGops = ((r && r.gops) || []).slice().sort((a, b) => a.t - b.t); }
+            try { const r = await this.api.getLevelIndex(this.level, this.dayStartMs, this.spanEndMs); this.levelGops = ((r && r.gops) || []).slice().sort((a, b) => a.t - b.t); }
             catch { this.levelGops = []; }
         })();
         return this.levelReady;
@@ -116,7 +145,7 @@ export class DayPlayer {
 
     // ---- seeking (click / drag / arrows) ----
     seekTo(wall: number): void {
-        this.targetWall = Math.max(this.dayStartMs, Math.min(this.dayStartMs + DAY_MS - 1, wall));
+        this.targetWall = Math.max(this.dayStartMs, Math.min(this.spanEndMs - 1, wall));
         try { this.video.pause(); } catch { /* */ }   // static frames while seeking
         this.refreshStatus();
         void this.runSeekPump();
@@ -419,6 +448,7 @@ export class DayPlayer {
     }
 
     teardown(): void {
+        this.destroyed = true; // stop the per-frame callback loop
         if (this.live) { this.live = false; try { void this.api.stopStream(); } catch { /* */ } }
         if (this.rateTimer) clearInterval(this.rateTimer);
         if (this.watchdogTimer) clearInterval(this.watchdogTimer);

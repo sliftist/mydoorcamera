@@ -8,8 +8,8 @@ import { rateColor, rateLabel } from "../helpers/format";
 import { playBtnCss } from "../helpers/styles";
 import { Trackbar } from "./Trackbar";
 import { Controls } from "./Controls";
-import { Calendar } from "./Calendar";
-import { LevelsPanel } from "./LevelsPanel";
+import { DatePicker } from "./DatePicker";
+import { LevelSelector } from "./LevelSelector";
 
 @observer
 export class VideoPlayer extends preact.Component {
@@ -31,14 +31,13 @@ export class VideoPlayer extends preact.Component {
                             <span className={css.fontSize(13).opacity(0.8)}>buffered {state.bufferSec.toFixed(1)}s</span>
                         </div>
                         : state.coverage
-                            ? <div className={css.vbox(8).width("100%")}><Trackbar /><Controls /></div>
-                            : <div className={css.opacity(0.6).fontSize(13)}>Select a day below…</div>}
+                            ? <div className={css.vbox(8).width("100%")}><LevelSelector /><Trackbar /><Controls /></div>
+                            : <LevelSelector />}
                 </div>
                 {!state.live && <div className={css.fontSize(13).opacity(0.75)}>
-                    {state.day ? state.day.replace(/\//g, "-") : "No day selected"}{noFootage ? " · no footage this day" : ""}
+                    {state.day ? state.day.replace(/\//g, "-") : "No period selected"}{noFootage ? " · no footage in this period" : ""}
                 </div>}
-                {!state.live && <Calendar />}
-                {!state.live && <LevelsPanel />}
+                {!state.live && <DatePicker />}
                 <div style={{ height: "48px" }} />
             </div>
         );

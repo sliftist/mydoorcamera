@@ -51,6 +51,13 @@ export function levelGopSpanSec(level: number): number { return Math.pow(THIN_FA
 // in ~1s, so this equals the GOP span): L0=1, L1=30, L2=900, L3=27000, L4=810000.
 export function levelTimePerSec(level: number): number { return Math.pow(THIN_FACTOR, level); }
 
+// Navigable period for a level, matching its on-disk folder span (see storage
+// bucketOf): L0 = a day, L1 = a month, L2+ = a year. The date picker and trackbar
+// span this period.
+export function levelPeriod(level: number): "day" | "month" | "year" {
+    return level === 0 ? "day" : level === 1 ? "month" : "year";
+}
+
 // HTTPS / WSS server.
 export const SERVER_PORT = Number(env.MYDOORCAMERA_PORT) || 8443;
 export const CERT_DIR = env.MYDOORCAMERA_CERT_DIR || "/var/lib/mydoorcamera/cert";

@@ -63,10 +63,11 @@ function bucketOf(level: number, ms: number): { dir: string[]; stem: string } {
     const d = new Date(ms);
     const Y = String(d.getFullYear()), MM = pad2(d.getMonth() + 1), DD = pad2(d.getDate()), HH = pad2(d.getHours());
     switch (level) {
-        case 0: return { dir: [Y, MM, DD], stem: HH };
-        case 1: return { dir: [Y, MM], stem: DD };
-        case 2: return { dir: [Y], stem: MM };
-        default: return { dir: [], stem: Y };   // L3, L4: one file per year
+        // Folder granularity caps at year, file granularity caps at month. So the
+        // navigable period scales: L0 = a day, L1 = a month, L2+ = a year.
+        case 0: return { dir: [Y, MM, DD], stem: HH };  // folder=day,   file=hour
+        case 1: return { dir: [Y, MM], stem: DD };      // folder=month, file=day
+        default: return { dir: [Y], stem: MM };         // folder=year,  file=month (L2, L3, L4)
     }
 }
 
