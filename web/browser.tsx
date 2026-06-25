@@ -210,10 +210,15 @@ function startStatsPoll(): void {
     statsTimer = setInterval(() => void tick(), 5000);
 }
 function gb(b: number): string { return (b / 1073741824).toFixed(1); }
+function bps(n: number): string {
+    if (n >= 1048576) return (n / 1048576).toFixed(1) + "MB/s";
+    if (n >= 1024) return (n / 1024).toFixed(0) + "KB/s";
+    return Math.round(n) + "B/s";
+}
 function formatStats(s: Stats): string {
     const sy = s.system;
     const enc = s.encoder ? `enc ${s.encoder.fps}fps (${s.encoder.cpuPct}%)` : "enc —";
-    return `CPU ${sy.cpuPct}% · RAM ${gb(sy.ramUsedBytes)}/${gb(sy.ramTotalBytes)} GB · Disk ${gb(sy.diskUsedBytes)}/${gb(sy.diskTotalBytes)} GB · ${enc}`;
+    return `CPU ${sy.cpuPct}% · RAM ${gb(sy.ramUsedBytes)}/${gb(sy.ramTotalBytes)} GB · Disk ${gb(sy.diskUsedBytes)}/${gb(sy.diskTotalBytes)} GB · net ↓${bps(sy.netRxBps)} ↑${bps(sy.netTxBps)} · ${enc}`;
 }
 
 // ---- views ----

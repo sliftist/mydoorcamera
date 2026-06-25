@@ -13,6 +13,8 @@ export type SystemStats = {
     ramTotalBytes: number;
     diskUsedBytes: number;
     diskTotalBytes: number;
+    netRxBps: number;        // gross download rate, bytes/sec (all real interfaces)
+    netTxBps: number;        // gross upload rate, bytes/sec
 };
 
 export type EncoderStats = { fps: number; cpuPct: number; updatedMs: number };
@@ -57,6 +59,34 @@ export class ProcCpuSampler {
     }
 }
 
+// Continuous network-rate sampler (gross rx/tx across real interfaces).
+let lastNet = { rx: 0, tx: 0, ms: 0 };
+let netRate = { rxBps: 0, txBps: 0 };
+function readNetTotals(): { rx: number; tx: number } {
+    try {
+        let rx = 0, tx = 0;
+        for (const line of fs.readFileSync("/proc/net/dev", "utf8").split("\n")) {
+            const m = line.match(/^\s*([\w.-]+):\s*(.*)$/);
+            if (!m || m[1] === "lo") continue;
+            const cols = m[2].trim().split(/\s+/).map(Number);
+            rx += cols[0] || 0;   // receive bytes
+            tx += cols[8] || 0;   // transmit bytes
+        }
+        return { rx, tx };
+    } catch { return { rx: 0, tx: 0 }; }
+}
+function sampleNetRate(): void {
+    const now = Date.now();
+    const cur = readNetTotals();
+    if (lastNet.ms) {
+        const dt = (now - lastNet.ms) / 1000;
+        if (dt > 0) netRate = { rxBps: Math.max(0, (cur.rx - lastNet.rx) / dt), txBps: Math.max(0, (cur.tx - lastNet.tx) / dt) };
+    }
+    lastNet = { rx: cur.rx, tx: cur.tx, ms: now };
+}
+setInterval(sampleNetRate, 2000);
+sampleNetRate();
+
 export async function getSystemStats(dataDir: string): Promise<SystemStats> {
     const cpuPct = await sampleCpuPct(200);
     const total = os.totalmem(), free = os.freemem();
@@ -74,6 +104,8 @@ export async function getSystemStats(dataDir: string): Promise<SystemStats> {
         ramTotalBytes: total,
         diskUsedBytes,
         diskTotalBytes,
+        netRxBps: Math.round(netRate.rxBps),
+        netTxBps: Math.round(netRate.txBps),
     };
 }
 
