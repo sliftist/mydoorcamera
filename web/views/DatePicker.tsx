@@ -52,6 +52,7 @@ export class DatePicker extends preact.Component {
         );
         const grid = (cols: number, children: any) => <div style={{ display: "grid", gridTemplateColumns: `repeat(${cols},1fr)`, gap: "4px" }}>{children}</div>;
 
+        let body: any, hint: string;
         if (p === "day") {
             const y = a.getFullYear(), m = a.getMonth();
             const firstWd = new Date(y, m, 1).getDay();
@@ -59,31 +60,38 @@ export class DatePicker extends preact.Component {
             const cells: any[] = [];
             for (let i = 0; i < firstWd; i++) cells.push(<div key={"e" + i} />);
             for (let dd = 1; dd <= numDays; dd++) cells.push(cell(dd, dd, new Date(y, m, dd).getTime(), 0));
-            return (
-                <div className={css.vbox(8).width("100%").maxWidth(340)}>
-                    {header(new Date(y, m, 1).toLocaleString([], { month: "long", year: "numeric" }))}
-                    {grid(7, [...WEEKDAYS.map((w, i) => <div key={"w" + i} className={css.fontSize(11).opacity(0.5)} style={{ textAlign: "center" }}>{w}</div>), ...cells])}
-                    <div className={css.fontSize(11).opacity(0.5)}>Green = has footage · purple ring = selected. Pick a day.</div>
-                </div>
-            );
-        }
-        if (p === "month") {
+            hint = "Pick a day.";
+            body = <preact.Fragment>
+                {header(new Date(y, m, 1).toLocaleString([], { month: "long", year: "numeric" }))}
+                {grid(7, [...WEEKDAYS.map((w, i) => <div key={"w" + i} className={css.fontSize(11).opacity(0.5)} style={{ textAlign: "center" }}>{w}</div>), ...cells])}
+            </preact.Fragment>;
+        } else if (p === "month") {
             const y = a.getFullYear();
-            return (
-                <div className={css.vbox(8).width("100%").maxWidth(340)}>
-                    {header(String(y))}
-                    {grid(4, MONTHS.map((mo, i) => cell(mo, mo, new Date(y, i, 1).getTime(), state.level, { wide: true })))}
-                    <div className={css.fontSize(11).opacity(0.5)}>Green = has footage · purple ring = selected. Pick a month.</div>
-                </div>
-            );
-        }
-        const base = Math.floor(a.getFullYear() / 12) * 12;
-        const years = Array.from({ length: 12 }, (_, i) => base + i);
-        return (
-            <div className={css.vbox(8).width("100%").maxWidth(340)}>
+            hint = "Pick a month.";
+            body = <preact.Fragment>
+                {header(String(y))}
+                {grid(4, MONTHS.map((mo, i) => cell(mo, mo, new Date(y, i, 1).getTime(), state.level, { wide: true })))}
+            </preact.Fragment>;
+        } else {
+            const base = Math.floor(a.getFullYear() / 12) * 12;
+            const years = Array.from({ length: 12 }, (_, i) => base + i);
+            hint = "Pick a year.";
+            body = <preact.Fragment>
                 {header(`${base}–${base + 11}`)}
                 {grid(4, years.map(yr => cell(yr, yr, new Date(yr, 0, 1).getTime(), state.level, { wide: true })))}
-                <div className={css.fontSize(11).opacity(0.5)}>Green = has footage · purple ring = selected. Pick a year.</div>
+            </preact.Fragment>;
+        }
+
+        const onCurrent = state.day === periodKey(state.level, Date.now());
+        const nowLabel = p === "day" ? "today" : p === "month" ? "this month" : "this year";
+        return (
+            <div className={css.vbox(8).width("100%").maxWidth(340)}>
+                {body}
+                <div className={css.fontSize(11).opacity(0.5)}>Green = has footage · purple ring = selected. {hint}</div>
+                {!onCurrent && (
+                    <button className={navBtnCss} style={{ padding: "6px 12px" }}
+                        onClick={() => void selectPeriod(Date.now(), true, Date.now())}>⤓ Jump to {nowLabel}</button>
+                )}
             </div>
         );
     }
