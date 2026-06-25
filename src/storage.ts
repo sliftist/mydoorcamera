@@ -111,13 +111,18 @@ export function combineHour(parts: string[]): HourIndex {
 
     for (const { f } of idxFiles) {
         const dataFile = f.slice(0, -4) + ".data";
-        let lines: string[];
-        try { lines = fs.readFileSync(path.join(dir, f), "utf8").split("\n"); } catch { continue; }
-        for (const line of lines) {
-            if (!line) continue;
-            let rec: any; try { rec = JSON.parse(line); } catch { continue; }
-            if (overlaps(rec.t, rec.e)) { bad.push({ start: rec.t, end: rec.e }); continue; }
-            reserve(rec.t, rec.e);
+        let recs: any[];
+        try { recs = fs.readFileSync(path.join(dir, f), "utf8").split("\n").filter(Boolean).map(l => JSON.parse(l)); }
+        catch { continue; }
+        for (let i = 0; i < recs.length; i++) {
+            const rec = recs[i];
+            // Footprint = up to the NEXT keyframe in this session (its real coverage),
+            // so consecutive GOPs tile exactly instead of falsely overlapping when the
+            // frame-rate estimate (rec.e) drifts from the true spacing. Only genuine
+            // cross-session overlap (a restart re-recording covered time) is flagged.
+            const footEnd = i + 1 < recs.length ? recs[i + 1].t : rec.e;
+            if (overlaps(rec.t, footEnd)) { bad.push({ start: rec.t, end: footEnd }); continue; }
+            reserve(rec.t, footEnd);
             gops.push({ t: rec.t, e: rec.e, f: dataFile, o: rec.o, l: rec.l, n: rec.n });
         }
     }
