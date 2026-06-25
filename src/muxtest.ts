@@ -11,15 +11,15 @@ const OUT = "/var/lib/mydoorcamera/muxtest.mp4";
 const pad2 = (n: number) => String(n).padStart(2, "0");
 
 async function main(): Promise<void> {
-    const y = listChildren([])[0];
-    const mo = y && listChildren([y])[0];
-    const d = mo && listChildren([y, mo])[0];
+    const y = (await listChildren([]))[0];
+    const mo = y && (await listChildren([y]))[0];
+    const d = mo && (await listChildren([y, mo]))[0];
     if (!d) throw new Error("no captured data found under DATA_DIR");
     const dayParts = [y, mo, d];
 
     let gops: GopEntry[] = [];
     for (let h = 0; h < 24; h++) {
-        const r = combineHour([...dayParts, pad2(h)]);
+        const r = await combineHour([...dayParts, pad2(h)]);
         if (r.gops.length) { gops = r.gops; break; }
     }
     if (!gops.length) throw new Error("day has no GOPs");
@@ -28,7 +28,7 @@ async function main(): Promise<void> {
     const take = gops.slice(0, count);
 
     let nals: Buffer[] = [];
-    for (const g of take) nals.push(...splitFramedNals(readGopBytes(dayParts, g.f, g.o, g.l)));
+    for (const g of take) nals.push(...splitFramedNals(await readGopBytes(dayParts, g.f, g.o, g.l)));
 
     const res = await H264toMP4({ buffer: nals, frameDurationInSeconds: 1 / FPS, width: 1920, height: 1080 });
     fs.writeFileSync(OUT, res.buffer);

@@ -2,7 +2,7 @@
 // throughput/CPU and writes it to a small file; the server reads that plus live
 // system stats (CPU / RAM / disk) and serves it all over RPC.
 
-import * as fs from "fs";
+import { promises as fsp } from "fs";
 import * as os from "os";
 
 export type SystemStats = {
@@ -21,17 +21,17 @@ export type EncoderStats = { fps: number; cpuPct: number; updatedMs: number };
 
 const STATS_FILE = "/var/lib/mydoorcamera/encoder-stats.json";
 
-function cpuTotals(): { idle: number; total: number } {
-    const line = fs.readFileSync("/proc/stat", "utf8").split("\n")[0];          // "cpu  user nice system idle iowait ..."
+async function cpuTotals(): Promise<{ idle: number; total: number }> {
+    const line = (await fsp.readFile("/proc/stat", "utf8")).split("\n")[0];      // "cpu  user nice system idle iowait ..."
     const v = line.trim().split(/\s+/).slice(1).map(Number);
     return { idle: v[3] + (v[4] || 0), total: v.reduce((a, b) => a + b, 0) };
 }
 
 // Overall CPU% sampled over `ms` by diffing /proc/stat.
 export async function sampleCpuPct(ms = 200): Promise<number> {
-    const a = cpuTotals();
+    const a = await cpuTotals();
     await new Promise(r => setTimeout(r, ms));
-    const b = cpuTotals();
+    const b = await cpuTotals();
     const dIdle = b.idle - a.idle, dTotal = b.total - a.total;
     if (dTotal <= 0) return 0;
     return Math.max(0, Math.min(100, (1 - dIdle / dTotal) * 100));
@@ -43,14 +43,14 @@ export class ProcCpuSampler {
     private lastProc = 0;
     private lastTotal = 0;
     constructor(private pid: number) {}
-    sample(): number {
+    async sample(): Promise<number> {
         let proc = 0;
         try {
-            const s = fs.readFileSync(`/proc/${this.pid}/stat`, "utf8");
+            const s = await fsp.readFile(`/proc/${this.pid}/stat`, "utf8");
             const f = s.slice(s.lastIndexOf(")") + 1).trim().split(/\s+/); // fields after comm
             proc = Number(f[11]) + Number(f[12]);                          // utime + stime (jiffies)
         } catch { return 0; }
-        const total = cpuTotals().total;
+        const total = (await cpuTotals()).total;
         const dProc = proc - this.lastProc, dTotal = total - this.lastTotal;
         const had = this.lastTotal > 0;
         this.lastProc = proc; this.lastTotal = total;
@@ -62,10 +62,10 @@ export class ProcCpuSampler {
 // Continuous network-rate sampler (gross rx/tx across real interfaces).
 let lastNet = { rx: 0, tx: 0, ms: 0 };
 let netRate = { rxBps: 0, txBps: 0 };
-function readNetTotals(): { rx: number; tx: number } {
+async function readNetTotals(): Promise<{ rx: number; tx: number }> {
     try {
         let rx = 0, tx = 0;
-        for (const line of fs.readFileSync("/proc/net/dev", "utf8").split("\n")) {
+        for (const line of (await fsp.readFile("/proc/net/dev", "utf8")).split("\n")) {
             const m = line.match(/^\s*([\w.-]+):\s*(.*)$/);
             if (!m || m[1] === "lo") continue;
             const cols = m[2].trim().split(/\s+/).map(Number);
@@ -75,24 +75,24 @@ function readNetTotals(): { rx: number; tx: number } {
         return { rx, tx };
     } catch { return { rx: 0, tx: 0 }; }
 }
-function sampleNetRate(): void {
+async function sampleNetRate(): Promise<void> {
     const now = Date.now();
-    const cur = readNetTotals();
+    const cur = await readNetTotals();
     if (lastNet.ms) {
         const dt = (now - lastNet.ms) / 1000;
         if (dt > 0) netRate = { rxBps: Math.max(0, (cur.rx - lastNet.rx) / dt), txBps: Math.max(0, (cur.tx - lastNet.tx) / dt) };
     }
     lastNet = { rx: cur.rx, tx: cur.tx, ms: now };
 }
-setInterval(sampleNetRate, 2000);
-sampleNetRate();
+setInterval(() => void sampleNetRate(), 2000);
+void sampleNetRate();
 
 export async function getSystemStats(dataDir: string): Promise<SystemStats> {
     const cpuPct = await sampleCpuPct(200);
     const total = os.totalmem(), free = os.freemem();
     let diskUsedBytes = 0, diskTotalBytes = 0;
     try {
-        const st: any = (fs as any).statfsSync(dataDir);
+        const st: any = await (fsp as any).statfs(dataDir);
         diskTotalBytes = st.blocks * st.bsize;
         diskUsedBytes = (st.blocks - st.bfree) * st.bsize;
     } catch { /* ignore */ }
@@ -109,9 +109,9 @@ export async function getSystemStats(dataDir: string): Promise<SystemStats> {
     };
 }
 
-export function writeEncoderStats(s: EncoderStats): void {
-    try { fs.writeFileSync(STATS_FILE, JSON.stringify(s)); } catch { /* ignore */ }
+export async function writeEncoderStats(s: EncoderStats): Promise<void> {
+    try { await fsp.writeFile(STATS_FILE, JSON.stringify(s)); } catch { /* ignore */ }
 }
-export function readEncoderStats(): EncoderStats | null {
-    try { return JSON.parse(fs.readFileSync(STATS_FILE, "utf8")) as EncoderStats; } catch { return null; }
+export async function readEncoderStats(): Promise<EncoderStats | null> {
+    try { return JSON.parse(await fsp.readFile(STATS_FILE, "utf8")) as EncoderStats; } catch { return null; }
 }

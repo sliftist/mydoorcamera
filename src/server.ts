@@ -3,7 +3,7 @@
 // it once by opening https://<ip>:<port>/ in a tab. Run via typenode.
 
 import * as https from "https";
-import * as fs from "fs";
+import { promises as fsp } from "fs";
 import * as os from "os";
 import * as path from "path";
 import { execSync } from "child_process";
@@ -20,7 +20,7 @@ function firstLanIp(): string {
     return "127.0.0.1";
 }
 import { createRpc, Channel, Rpc } from "./rpc";
-import { listChildren, combineHour, readGopBytes, getAvailableDays, getDayCoverage, latestIdxFile, readIdxIncremental, dataReady, daySignature } from "./storage";
+import { listChildren, combineHour, readGopBytes, getAvailableDays, getDayCoverage, latestIdxFile, readIdxIncremental, dataReady, daySignature, getLevelsInfo, getLevelCoverage, readLevelGops, readLevelGopData } from "./storage";
 import { getPassword, checkPassword, isBlacklisted, recordFailedAttempt } from "./auth";
 import { getSystemStats, readEncoderStats } from "./stats";
 import { getTimezone } from "./timezone";
@@ -28,11 +28,12 @@ import { getTimezone } from "./timezone";
 // Match the capture daemon's zone so day boundaries / folders line up.
 process.env.TZ = getTimezone();
 
-function ensureCert(): { key: Buffer; cert: Buffer } {
+async function ensureCert(): Promise<{ key: Buffer; cert: Buffer }> {
     const keyPath = path.join(CERT_DIR, "key.pem");
     const certPath = path.join(CERT_DIR, "cert.pem");
-    if (!fs.existsSync(keyPath) || !fs.existsSync(certPath)) {
-        fs.mkdirSync(CERT_DIR, { recursive: true });
+    const exists = async (p: string): Promise<boolean> => { try { await fsp.access(p); return true; } catch { return false; } };
+    if (!(await exists(keyPath)) || !(await exists(certPath))) {
+        await fsp.mkdir(CERT_DIR, { recursive: true });
         const ip = firstLanIp();
         execSync(
             `openssl req -x509 -newkey rsa:2048 -keyout "${keyPath}" -out "${certPath}" -days 3650 -nodes ` +
@@ -41,7 +42,7 @@ function ensureCert(): { key: Buffer; cert: Buffer } {
         );
         console.log(`[server] generated self-signed cert (SAN IP:${ip})`);
     }
-    return { key: fs.readFileSync(keyPath), cert: fs.readFileSync(certPath) };
+    return { key: await fsp.readFile(keyPath), cert: await fsp.readFile(certPath) };
 }
 
 function nodeWsChannel(ws: import("ws").WebSocket): Channel {
@@ -59,10 +60,10 @@ const CERT_PAGE =
     `<h1>mydoorcamera server</h1><p>Certificate accepted &#10003; — you can close this tab and return to the app.</p>` +
     `</body></html>`;
 
-function start(): void {
-    const { key, cert } = ensureCert();
+async function start(): Promise<void> {
+    const { key, cert } = await ensureCert();
     const ip = firstLanIp();
-    const password = getPassword();
+    const password = await getPassword();
     console.log("\n=========== mydoorcamera server ===========");
     console.log(`Accept cert here:  https://${ip}:${SERVER_PORT}/`);
     console.log(`WSS endpoint:      wss://${ip}:${SERVER_PORT}`);
@@ -75,9 +76,9 @@ function start(): void {
     });
 
     const wss = new WebSocketServer({ server: httpsServer });
-    wss.on("connection", (ws, req) => {
+    wss.on("connection", async (ws, req) => {
         const clientIp = (req.socket.remoteAddress || "").replace(/^::ffff:/, "");
-        if (isBlacklisted(clientIp)) { ws.close(); return; }
+        if (await isBlacklisted(clientIp)) { ws.close(); return; }
 
         let authed = false;
         const requireAuth = () => { if (!authed) throw new Error("not authenticated"); };
@@ -93,38 +94,47 @@ function start(): void {
             if (streamTimer) { clearInterval(streamTimer); streamTimer = undefined; }
             stream = undefined;
         }
-        function pollStream(): void {
-            if (!stream) return;
-            const live = latestIdxFile(stream.parts);
-            if (!live) return;
-            if (live !== stream.file) { stream.file = live; stream.offset = 0; } // hour rolled / restart
-            const { records, ends } = readIdxIncremental(stream.parts, stream.file, stream.offset);
-            for (let i = 0; i < records.length; i++) {
-                const r = records[i];
-                if (!dataReady(stream.parts, r.f, r.o, r.l)) break; // not flushed yet — retry next tick
-                const bytes = readGopBytes(stream.parts, r.f, r.o, r.l);
-                rpc.call("onStreamData", { t: r.t, e: r.e, n: r.n }, bytes).catch(() => { /* */ });
-                stream.offset = ends[i];
-            }
-        }
-        function pollWatched(): void {
-            for (const day of watched.keys()) {
-                const parts = day.split("/");
-                const sig = daySignature(parts);
-                if (sig !== watched.get(day)) {
-                    watched.set(day, sig);
-                    rpc.call("onRangesUpdated", day, getDayCoverage(parts)).catch(() => { /* */ });
+        let streamPolling = false, watchPolling = false; // re-entrancy guards for the async pollers
+        async function pollStream(): Promise<void> {
+            if (!stream || streamPolling) return;
+            streamPolling = true;
+            try {
+                const live = await latestIdxFile(stream.parts);
+                if (!live || !stream) return;
+                if (live !== stream.file) { stream.file = live; stream.offset = 0; } // hour rolled / restart
+                const { records, ends } = await readIdxIncremental(stream.parts, stream.file, stream.offset);
+                for (let i = 0; i < records.length; i++) {
+                    const r = records[i];
+                    if (!stream) break;
+                    if (!(await dataReady(stream.parts, r.f, r.o, r.l))) break; // not flushed yet — retry next tick
+                    const bytes = await readGopBytes(stream.parts, r.f, r.o, r.l);
+                    rpc.call("onStreamData", { t: r.t, e: r.e, n: r.n }, bytes).catch(() => { /* */ });
+                    stream.offset = ends[i];
                 }
-            }
+            } finally { streamPolling = false; }
+        }
+        async function pollWatched(): Promise<void> {
+            if (watchPolling) return;
+            watchPolling = true;
+            try {
+                for (const day of watched.keys()) {
+                    const parts = day.split("/");
+                    const sig = await daySignature(parts);
+                    if (sig !== watched.get(day)) {
+                        watched.set(day, sig);
+                        rpc.call("onRangesUpdated", day, await getDayCoverage(parts)).catch(() => { /* */ });
+                    }
+                }
+            } finally { watchPolling = false; }
         }
 
         ws.on("close", () => { stopStream(); if (watchTimer) clearInterval(watchTimer); });
 
         rpc = createRpc(nodeWsChannel(ws), {
             async login(pw: string) {
-                if (isBlacklisted(clientIp)) throw new Error("blacklisted");
-                if (checkPassword(pw)) { authed = true; return { ok: true }; }
-                const nowBlack = recordFailedAttempt(clientIp);
+                if (await isBlacklisted(clientIp)) throw new Error("blacklisted");
+                if (await checkPassword(pw)) { authed = true; return { ok: true }; }
+                const nowBlack = await recordFailedAttempt(clientIp);
                 throw new Error(nowBlack ? "blacklisted" : "wrong password");
             },
             async listChildren(parts: string[]) { requireAuth(); return listChildren(parts); },
@@ -135,8 +145,14 @@ function start(): void {
                 requireAuth();
                 return readGopBytes(parts, file, off, len); // Buffer travels natively over cbor-x
             },
+            // ---- thinning levels ----
+            async getLevels() { requireAuth(); return getLevelsInfo(); },
+            async getLevelCoverage(level: number, fromMs: number, toMs: number, buckets?: number) { requireAuth(); return getLevelCoverage(level, fromMs, toMs, buckets || 1440); },
+            async getLevelIndex(level: number, fromMs: number, toMs: number) { requireAuth(); return { gops: await readLevelGops(level, fromMs, toMs), badRanges: [] }; },
+            async getLevelGopData(level: number, t: number, file: string, off: number, len: number) { requireAuth(); return readLevelGopData(level, t, file, off, len); },
+
             async serverInfo() { requireAuth(); return { ip, port: SERVER_PORT }; },
-            async getStats() { requireAuth(); return { system: await getSystemStats(DATA_DIR), encoder: readEncoderStats() }; },
+            async getStats() { requireAuth(); return { system: await getSystemStats(DATA_DIR), encoder: await readEncoderStats() }; },
 
             // ---- live streaming ----
             async startStream(day: string) {
@@ -144,11 +160,11 @@ function start(): void {
                 stopStream();
                 const parts = day.split("/");
                 // Start at the live edge: skip the existing backlog of the current file.
-                const live = latestIdxFile(parts);
+                const live = await latestIdxFile(parts);
                 let offset = 0;
-                if (live) { try { offset = readIdxIncremental(parts, live, 0).nextByte; } catch { offset = 0; } }
+                if (live) { try { offset = (await readIdxIncremental(parts, live, 0)).nextByte; } catch { offset = 0; } }
                 stream = { parts, file: live || "", offset };
-                streamTimer = setInterval(pollStream, 500);
+                streamTimer = setInterval(() => void pollStream(), 500);
                 return { ok: true };
             },
             async stopStream() { stopStream(); return { ok: true }; },
@@ -156,8 +172,8 @@ function start(): void {
             // ---- watch a day for growing coverage ----
             async watchDay(day: string) {
                 requireAuth();
-                watched.set(day, daySignature(day.split("/")));
-                if (!watchTimer) watchTimer = setInterval(pollWatched, 2000);
+                watched.set(day, await daySignature(day.split("/")));
+                if (!watchTimer) watchTimer = setInterval(() => void pollWatched(), 2000);
                 return { ok: true };
             },
             async unwatchDay(day: string) { watched.delete(day); return { ok: true }; },
@@ -167,4 +183,4 @@ function start(): void {
     httpsServer.listen(SERVER_PORT, () => console.log(`[server] listening on :${SERVER_PORT}`));
 }
 
-start();
+start().catch(e => { console.error("[server] failed to start:", e); process.exit(1); });

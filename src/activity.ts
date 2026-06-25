@@ -21,9 +21,9 @@ let prevFrame: Buffer | undefined;
 let lastSampledT = -Infinity;
 
 // Extract SPS+PPS+IDR of a GOP as an Annex-B access unit.
-function keyframeAU(parts: string[], g: GopEntry): Buffer {
+async function keyframeAU(parts: string[], g: GopEntry): Promise<Buffer> {
     const out: Buffer[] = [];
-    for (const n of splitFramedNals(readGopBytes(parts, g.f, g.o, g.l))) {
+    for (const n of splitFramedNals(await readGopBytes(parts, g.f, g.o, g.l))) {
         const t = n[0] & 0x1f;
         if (t === 7 || t === 8 || t === 5) { out.push(START_CODE, n); }
     }
@@ -64,31 +64,32 @@ function activityOf(cur: Buffer, prev?: Buffer): number {
 }
 
 async function loop(): Promise<void> {
-    let pending: ReturnType<typeof findPendingActivity> = [];
-    try { pending = findPendingActivity(PENDING_LIMIT); } catch { /* */ }
+    type Pending = Awaited<ReturnType<typeof findPendingActivity>>;
+    let pending: Pending = [];
+    try { pending = await findPendingActivity(PENDING_LIMIT); } catch { /* */ }
     if (!pending.length) { setTimeout(loop, PERIOD_MS); return; }
 
     // Sample at most one keyframe per SAMPLE_INTERVAL_MS; the skipped GOPs in
     // between are written 0 (the per-minute max chart only needs occasional samples).
-    const toSample: typeof pending = [];
+    const toSample: Pending = [];
     for (const p of pending) {
         if (p.gop.t - lastSampledT >= SAMPLE_INTERVAL_MS) { toSample.push(p); lastSampledT = p.gop.t; }
-        else { try { writeActivity(p.parts, p.idxFile, p.start, 0); } catch { /* */ } }
+        else { try { await writeActivity(p.parts, p.idxFile, p.start, 0); } catch { /* */ } }
     }
     if (!toSample.length) { setTimeout(loop, PERIOD_MS); return; }
 
     let frames: Buffer[] = [];
-    try { frames = await decode(Buffer.concat(toSample.map(p => keyframeAU(p.parts, p.gop)))); }
+    try { frames = await decode(Buffer.concat(await Promise.all(toSample.map(p => keyframeAU(p.parts, p.gop))))); }
     catch { /* */ }
     if (frames.length === 0) {
-        try { writeActivity(toSample[0].parts, toSample[0].idxFile, toSample[0].start, 0); } catch { /* */ }
+        try { await writeActivity(toSample[0].parts, toSample[0].idxFile, toSample[0].start, 0); } catch { /* */ }
         setTimeout(loop, PERIOD_MS); return;
     }
     const k = Math.min(frames.length, toSample.length);
     for (let i = 0; i < k; i++) {
         const a = activityOf(frames[i], prevFrame);
         prevFrame = frames[i];
-        try { writeActivity(toSample[i].parts, toSample[i].idxFile, toSample[i].start, a); } catch { /* */ }
+        try { await writeActivity(toSample[i].parts, toSample[i].idxFile, toSample[i].start, a); } catch { /* */ }
     }
     setTimeout(loop, PERIOD_MS);
 }

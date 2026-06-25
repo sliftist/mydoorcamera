@@ -4,7 +4,7 @@
 // day is permanently blacklisted (no rate-limiting before that — try freely
 // until you hit the cap, then you're out forever).
 
-import * as fs from "fs";
+import { promises as fsp } from "fs";
 import * as path from "path";
 import * as crypto from "crypto";
 import { PASSWORD_WORD_COUNT, WORDLIST_SIZE, MAX_PASSWORD_ATTEMPTS_PER_DAY } from "./config";
@@ -23,52 +23,58 @@ function normalize(s: string): string {
 }
 
 let cachedPassword = "";
-export function getPassword(): string {
+export async function getPassword(): Promise<string> {
     if (cachedPassword) return cachedPassword;
     try {
-        const fromDisk = fs.readFileSync(PASSWORD_FILE, "utf8").trim();
+        const fromDisk = (await fsp.readFile(PASSWORD_FILE, "utf8")).trim();
         if (fromDisk) { cachedPassword = fromDisk; return cachedPassword; } // keep display form (with spaces)
     } catch { /* not generated yet */ }
     const picked = Array.from({ length: PASSWORD_WORD_COUNT }, () => WORDS[crypto.randomInt(WORDS.length)]);
     cachedPassword = picked.join(" ");
-    fs.mkdirSync(SECRET_DIR, { recursive: true });
-    fs.writeFileSync(PASSWORD_FILE, cachedPassword + "\n", { mode: 0o600 });
+    await fsp.mkdir(SECRET_DIR, { recursive: true });
+    await fsp.writeFile(PASSWORD_FILE, cachedPassword + "\n", { mode: 0o600 });
     return cachedPassword;
 }
 
-export function checkPassword(input: string): boolean {
+export async function checkPassword(input: string): Promise<boolean> {
     // Compare on the alpha-only normalized form of both sides.
     const a = Buffer.from(normalize(input));
-    const b = Buffer.from(normalize(getPassword()));
+    const b = Buffer.from(normalize(await getPassword()));
     return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
 
 // ---- blacklist / attempt tracking ----
-let blacklist = new Set<string>();
-try { blacklist = new Set(JSON.parse(fs.readFileSync(BLACKLIST_FILE, "utf8"))); } catch { /* none yet */ }
+let blacklist: Set<string> | undefined;
+async function ensureBlacklist(): Promise<Set<string>> {
+    if (blacklist) return blacklist;
+    try { blacklist = new Set<string>(JSON.parse(await fsp.readFile(BLACKLIST_FILE, "utf8"))); }
+    catch { blacklist = new Set<string>(); }
+    return blacklist;
+}
 
 const attempts = new Map<string, { day: string; count: number }>();
 function today(): string { return new Date().toISOString().slice(0, 10); }
 
-function saveBlacklist(): void {
-    try { fs.mkdirSync(SECRET_DIR, { recursive: true }); fs.writeFileSync(BLACKLIST_FILE, JSON.stringify([...blacklist])); }
+async function saveBlacklist(): Promise<void> {
+    try { await fsp.mkdir(SECRET_DIR, { recursive: true }); await fsp.writeFile(BLACKLIST_FILE, JSON.stringify([...(blacklist || [])])); }
     catch { /* ignore */ }
 }
 
-export function isBlacklisted(ip: string): boolean {
-    return blacklist.has(ip);
+export async function isBlacklisted(ip: string): Promise<boolean> {
+    return (await ensureBlacklist()).has(ip);
 }
 
 // Returns true if this failed attempt pushed the IP over the cap (now blacklisted).
-export function recordFailedAttempt(ip: string): boolean {
-    if (blacklist.has(ip)) return true;
+export async function recordFailedAttempt(ip: string): Promise<boolean> {
+    const bl = await ensureBlacklist();
+    if (bl.has(ip)) return true;
     const d = today();
     let a = attempts.get(ip);
     if (!a || a.day !== d) { a = { day: d, count: 0 }; attempts.set(ip, a); }
     a.count++;
     if (a.count > MAX_PASSWORD_ATTEMPTS_PER_DAY) {
-        blacklist.add(ip);
-        saveBlacklist();
+        bl.add(ip);
+        await saveBlacklist();
         return true;
     }
     return false;

@@ -49,8 +49,8 @@ let gopTime = 0;
 
 function finalizeGop(): void {
     if (gopFrames > 0 && gopNals.length) {
-        try { writer.writeGop(gopNals, gopTime, gopFrames); framesWritten += gopFrames; }
-        catch (e) { console.error("writeGop failed:", (e as Error).message); }
+        void writer.writeGop(gopNals, gopTime, gopFrames); // async + serialized + self-logging
+        framesWritten += gopFrames;
     }
     gopNals = [];
     gopFrames = 0;
@@ -99,18 +99,21 @@ function start(): void {
 
 // Sample encoder throughput + CPU every 5s and publish for the server to read.
 let lastFrames = 0, lastStatsMs = Date.now();
-setInterval(() => {
-    const now = Date.now();
-    const dt = (now - lastStatsMs) / 1000;
-    const fps = dt > 0 ? (framesWritten - lastFrames) / dt : 0;
-    lastFrames = framesWritten; lastStatsMs = now;
-    writeEncoderStats({ fps: Math.round(fps * 10) / 10, cpuPct: gstSampler ? Math.round(gstSampler.sample()) : 0, updatedMs: now });
+setInterval(async () => {
+    try {
+        const now = Date.now();
+        const dt = (now - lastStatsMs) / 1000;
+        const fps = dt > 0 ? (framesWritten - lastFrames) / dt : 0;
+        lastFrames = framesWritten; lastStatsMs = now;
+        const cpuPct = gstSampler ? Math.round(await gstSampler.sample()) : 0;
+        await writeEncoderStats({ fps: Math.round(fps * 10) / 10, cpuPct, updatedMs: now });
+    } catch (e) { console.error("[capture] stats failed:", (e as Error).message); }
 }, 5000);
 
 // Enforce the rolling byte cap every 60s.
-setInterval(() => {
+setInterval(async () => {
     try {
-        const r = enforceRetention();
+        const r = await enforceRetention();
         if (r.deleted.length) {
             console.log(`[capture] retention: deleted ${r.deleted.length} file pair(s), now ${(r.totalBytes / 1e9).toFixed(2)} GB`);
         }

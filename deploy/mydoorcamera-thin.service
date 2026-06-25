@@ -1,0 +1,15 @@
+[Unit]
+Description=mydoorcamera thinning worker (cascading keyframe thinning L1..L4)
+After=multi-user.target
+
+[Service]
+Type=simple
+User=root
+Nice=15
+WorkingDirectory=/root/mydoorcamera
+ExecStart=/usr/bin/node -r /root/mydoorcamera/node_modules/typenode/index.js /root/mydoorcamera/src/thin.ts
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

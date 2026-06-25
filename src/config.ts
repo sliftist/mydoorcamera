@@ -22,6 +22,28 @@ export const GOP = 30;                // keyframe every 30 frames (~1s)
 // Start at 16 GB (SD card has ~21 GB free); raise once on a bigger drive.
 export const RETENTION_BYTES = Number(env.MYDOORCAMERA_RETENTION_BYTES) || 16 * 1024 * 1024 * 1024;
 
+// ---- Video thinning (see docs/thinning.md) ----
+// Cascading keyframe thinning keeps a sparser copy of old footage instead of
+// just deleting it. Level L keeps 1 of every THIN_FACTOR frames of level L-1
+// (which lands on keyframes, since GOP == THIN_FACTOR), re-encoded into normal
+// 30-frame GOPs. One L-level GOP plays in ~1s and covers 30^L real seconds.
+export const THIN_FACTOR = GOP;            // keep 1 of every 30 frames per level (== GOP)
+export const THIN_LEVELS = 4;             // generate L1..L4 (L0 is the unthinned root)
+export const THIN_GOP_FRAMES = 30;        // frames per re-encoded thinned GOP
+// Re-encode thinned GOPs on the GPU (v4l2h264enc), full resolution, like capture.
+export const THIN_BITRATE = 3_000_000;    // 3 Mbps for re-encoded thinned levels
+export const LEVEL_COUNT = THIN_LEVELS + 1; // 5 levels total (L0..L4)
+// Thinned levels live in their own tree (kept out of DATA_DIR's year scan).
+export const THIN_DIR = env.MYDOORCAMERA_THIN || "/var/lib/mydoorcamera/thin";
+// Split the whole byte budget evenly across the 5 levels (~3.2 GB each at 16 GB).
+export const LEVEL_BUDGET_BYTES = Math.floor(RETENTION_BYTES / LEVEL_COUNT);
+
+// Real seconds one GOP at this level spans (== 30^level). L0 = 1s.
+export function levelGopSpanSec(level: number): number { return Math.pow(THIN_FACTOR, level); }
+// Real seconds represented by one second of playback at this level (a GOP plays
+// in ~1s, so this equals the GOP span): L0=1, L1=30, L2=900, L3=27000, L4=810000.
+export function levelTimePerSec(level: number): number { return Math.pow(THIN_FACTOR, level); }
+
 // HTTPS / WSS server.
 export const SERVER_PORT = Number(env.MYDOORCAMERA_PORT) || 8443;
 export const CERT_DIR = env.MYDOORCAMERA_CERT_DIR || "/var/lib/mydoorcamera/cert";

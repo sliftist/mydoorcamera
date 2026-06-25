@@ -16,20 +16,31 @@
 // read we combine them ordered by sessionId, RESERVING each GOP's [t, next-t]
 // footprint; a later session overlapping a reserved range is dropped + warned
 // (interlaced data) and reported as a "bad range".
+//
+// All disk I/O here is ASYNC (fs.promises) so the HTTPS/WSS server never blocks
+// the event loop on a read while serving other clients. Writers serialize their
+// appends through a per-writer promise chain so offsets stay consistent.
 
-import * as fs from "fs";
+import { promises as fsp } from "fs";
+import type { Dirent } from "fs";
 import * as path from "path";
-import { DATA_DIR, RETENTION_BYTES } from "./config";
+import { DATA_DIR, THIN_DIR, LEVEL_BUDGET_BYTES, LEVEL_COUNT, levelGopSpanSec } from "./config";
 import { frameNal } from "./annexb";
 
 export type Range = { start: number; end: number };
-export type GopEntry = { t: number; e: number; f: string; o: number; l: number; n: number; a: number };
+// a = average activity (L0: the single value); aMax = max activity (L0: == a).
+export type GopEntry = { t: number; e: number; f: string; o: number; l: number; n: number; a: number; aMax: number };
 export type HourIndex = { gops: GopEntry[]; badRanges: Range[] };
 export type DayCoverage = { dayStartMs: number; dayEndMs: number; ranges: Range[]; badRanges: Range[]; activity: number[] };
+export type LevelCoverage = { fromMs: number; toMs: number; ranges: Range[]; badRanges: Range[]; activity: number[] };
+export type LevelInfo = {
+    level: number; timePerSec: number; gopSpanSec: number;
+    budgetBytes: number; usedBytes: number;
+    earliestMs: number; latestMs: number;   // 0/0 when empty
+};
 
-const FIELD_COUNT = 6;                 // t, e, o, l, n, activity
-const REC_BYTES = 4 + FIELD_COUNT * 8 + 4;
-const ACTIVITY_FIELD = 5;              // index of the activity float within a record
+const FIELD_COUNT = 6;                 // L0 record: t, e, o, l, n, activity
+const ACTIVITY_FIELD = 5;              // index of the activity float within an L0 record
 export const ACTIVITY_BYTE_OFFSET = 4 + ACTIVITY_FIELD * 8; // byte offset of activity within a record
 const ACT_BUCKETS = 1440;              // per-minute activity buckets for the day chart
 
@@ -37,14 +48,61 @@ function pad2(n: number): string { return String(n).padStart(2, "0"); }
 function dayPartsOf(ms: number): string[] { const d = new Date(ms); return [String(d.getFullYear()), pad2(d.getMonth() + 1), pad2(d.getDate())]; }
 function hourOf(ms: number): string { return pad2(new Date(ms).getHours()); }
 
-function encodeRecord(t: number, e: number, o: number, l: number, n: number, a: number): Buffer {
-    const buf = Buffer.allocUnsafe(REC_BYTES);
-    const body = FIELD_COUNT * 8;
+async function readdirSafe(dir: string): Promise<string[]> { try { return await fsp.readdir(dir); } catch { return []; } }
+async function readdirEnts(dir: string): Promise<Dirent[]> { try { return await fsp.readdir(dir, { withFileTypes: true }); } catch { return []; } }
+async function sizeOf(p: string): Promise<number> { try { return (await fsp.stat(p)).size; } catch { return -1; } }
+
+// ---- level-aware paths ----
+// L0 lives in DATA_DIR; thinned levels under THIN_DIR/L<n>. The file/folder
+// bucket coarsens one calendar step per level so each file holds a healthy batch
+// of GOPs (see docs/thinning.md): L0=hour, L1=day, L2=month, L3/L4=year.
+export function levelRoot(level: number): string { return level === 0 ? DATA_DIR : path.join(THIN_DIR, "L" + level); }
+
+// Directory (relative to the level root) and file stem for a timestamp.
+function bucketOf(level: number, ms: number): { dir: string[]; stem: string } {
+    const d = new Date(ms);
+    const Y = String(d.getFullYear()), MM = pad2(d.getMonth() + 1), DD = pad2(d.getDate()), HH = pad2(d.getHours());
+    switch (level) {
+        case 0: return { dir: [Y, MM, DD], stem: HH };
+        case 1: return { dir: [Y, MM], stem: DD };
+        case 2: return { dir: [Y], stem: MM };
+        default: return { dir: [], stem: Y };   // L3, L4: one file per year
+    }
+}
+
+// Recursively find every "<stem>.<session>.idx" under a level root, returning
+// each unique bucket (dir relative to root + stem). Levels are small (few files).
+async function listLevelBuckets(level: number): Promise<{ dir: string[]; stem: string }[]> {
+    const root = levelRoot(level);
+    const seen = new Set<string>();
+    const out: { dir: string[]; stem: string }[] = [];
+    const walk = async (rel: string[]): Promise<void> => {
+        for (const e of await readdirEnts(path.join(root, ...rel))) {
+            if (e.isDirectory()) await walk([...rel, e.name]);
+            else if (e.name.endsWith(".idx")) {
+                const stem = e.name.split(".")[0];
+                const key = rel.join("/") + "|" + stem;
+                if (!seen.has(key)) { seen.add(key); out.push({ dir: rel, stem }); }
+            }
+        }
+    };
+    await walk([]);
+    return out;
+}
+
+// Encode a framed record from a field array (len prefix + f64 fields + len
+// suffix). L0 writes 6 fields [t,e,o,l,n,a]; thinned levels write 7
+// [t,e,o,l,n,aAvg,aMax]. decodeRecords reads whatever field count is present.
+function encodeVals(vals: number[]): Buffer {
+    const body = vals.length * 8;
+    const buf = Buffer.allocUnsafe(4 + body + 4);
     buf.writeUInt32LE(body, 0);
-    const vals = [t, e, o, l, n, a];
-    for (let i = 0; i < FIELD_COUNT; i++) buf.writeDoubleLE(vals[i], 4 + i * 8);
+    for (let i = 0; i < vals.length; i++) buf.writeDoubleLE(vals[i], 4 + i * 8);
     buf.writeUInt32LE(body, 4 + body);
     return buf;
+}
+function encodeRecord(t: number, e: number, o: number, l: number, n: number, a: number): Buffer {
+    return encodeVals([t, e, o, l, n, a]);
 }
 
 // Parse framed records from `buf`. Returns each record's fields, the byte offset
@@ -59,7 +117,8 @@ function decodeRecords(buf: Buffer, dataFile: string): { gops: GopEntry[]; start
         if (buf.readUInt32LE(p + 4 + len) !== len) break;                     // corruption: prefix != suffix -> stop
         const v: number[] = [];
         for (let i = 0; i < len / 8; i++) v.push(buf.readDoubleLE(p + 4 + i * 8));
-        gops.push({ t: v[0], e: v[1], f: dataFile, o: v[2], l: v[3], n: v[4], a: v.length > 5 ? v[5] : -1 });
+        const a = v.length > 5 ? v[5] : -1;
+        gops.push({ t: v[0], e: v[1], f: dataFile, o: v[2], l: v[3], n: v[4], a, aMax: v.length > 6 ? v[6] : a });
         starts.push(p);
         p += 4 + len + 4;
     }
@@ -80,67 +139,66 @@ function mergeRanges(rs: Range[], joinMs = 0): Range[] {
 
 const SESSION = Date.now();
 
+// Serializes GOP appends for the unthinned root (L0). writeGop returns a promise
+// that resolves when this GOP is on disk; callers may fire-and-forget (the chain
+// keeps offsets consistent) or await for back-pressure.
 export class StorageWriter {
     private dataDir = "";
     private dataHour = "";
     private dataPath = "";
     private offset = 0;
+    private tail: Promise<void> = Promise.resolve();
 
-    private ensureDataTarget(ms: number): void {
+    private async ensureDataTarget(ms: number): Promise<void> {
         const dir = path.join(DATA_DIR, ...dayPartsOf(ms));
         const hh = hourOf(ms);
         if (dir === this.dataDir && hh === this.dataHour) return;
-        fs.mkdirSync(dir, { recursive: true });
+        await fsp.mkdir(dir, { recursive: true });
         this.dataDir = dir; this.dataHour = hh;
         this.dataPath = path.join(dir, `${hh}.${SESSION}.data`);
-        try { this.offset = fs.statSync(this.dataPath).size; } catch { this.offset = 0; }
+        const sz = await sizeOf(this.dataPath);
+        this.offset = sz >= 0 ? sz : 0;
     }
 
     // Write the GOP bytes (data first), then the framed index record. activity
     // starts at -1; the activity worker backfills it in place later.
-    writeGop(nals: Buffer[], timeMs: number, frameCount: number, activity = -1): void {
-        this.ensureDataTarget(timeMs);
-        const body = Buffer.concat(nals.map(frameNal));
-        fs.appendFileSync(this.dataPath, body);
-        const o = this.offset;
-        this.offset += body.length;
-        const e = timeMs + Math.round((frameCount / 30) * 1000);
-        const idxPath = path.join(DATA_DIR, ...dayPartsOf(timeMs), `${hourOf(timeMs)}.${SESSION}.idx`);
-        fs.appendFileSync(idxPath, encodeRecord(timeMs, e, o, body.length, frameCount, activity));
+    writeGop(nals: Buffer[], timeMs: number, frameCount: number, activity = -1): Promise<void> {
+        const run = async (): Promise<void> => {
+            await this.ensureDataTarget(timeMs);
+            const body = Buffer.concat(nals.map(frameNal));
+            await fsp.appendFile(this.dataPath, body);
+            const o = this.offset;
+            this.offset += body.length;
+            const e = timeMs + Math.round((frameCount / 30) * 1000);
+            const idxPath = path.join(DATA_DIR, ...dayPartsOf(timeMs), `${hourOf(timeMs)}.${SESSION}.idx`);
+            await fsp.appendFile(idxPath, encodeRecord(timeMs, e, o, body.length, frameCount, activity));
+        };
+        this.tail = this.tail.then(run).catch(err => { console.error("[storage] writeGop failed:", (err as Error)?.message); });
+        return this.tail;
     }
 }
 
 // ---- read side ----
 
-export function listChildren(parts: string[]): string[] {
-    try {
-        return fs.readdirSync(path.join(DATA_DIR, ...parts), { withFileTypes: true })
-            .filter(e => e.isDirectory()).map(e => e.name).sort();
-    } catch { return []; }
+export async function listChildren(parts: string[]): Promise<string[]> {
+    return (await readdirEnts(path.join(DATA_DIR, ...parts))).filter(e => e.isDirectory()).map(e => e.name).sort();
 }
 
-export function getAvailableDays(): string[] {
+export async function getAvailableDays(): Promise<string[]> {
     const out: string[] = [];
-    for (const y of listChildren([]))
-        for (const mo of listChildren([y]))
-            for (const d of listChildren([y, mo])) out.push(`${y}/${mo}/${d}`);
+    for (const y of await listChildren([]))
+        for (const mo of await listChildren([y]))
+            for (const d of await listChildren([y, mo])) out.push(`${y}/${mo}/${d}`);
     return out;
 }
 
-function readIdxFile(parts: string[], idxFile: string): GopEntry[] {
-    try {
-        const buf = fs.readFileSync(path.join(DATA_DIR, ...parts, idxFile));
-        return decodeRecords(buf, idxFile.slice(0, -4) + ".data").gops;
-    } catch { return []; }
-}
-
-export function combineHour(parts: string[]): HourIndex {
-    const [y, mo, d, hh] = parts;
-    const dir = path.join(DATA_DIR, y, mo, d);
-    let files: string[];
-    try { files = fs.readdirSync(dir); } catch { return { gops: [], badRanges: [] }; }
-    const idxFiles = files
-        .filter(f => f.startsWith(hh + ".") && f.endsWith(".idx"))
+// Combine all sessions of one bucket (a level's file group: same stem, different
+// sessions) into a single ordered GOP list, RESERVING each GOP's [t, next-t]
+// footprint and dropping overlapping ("interlaced") data as bad ranges.
+export async function combineBucket(level: number, dir: string[], stem: string): Promise<HourIndex> {
+    const absDir = path.join(levelRoot(level), ...dir);
+    const idxFiles = (await readdirSafe(absDir))
+        .filter(f => f.startsWith(stem + ".") && f.endsWith(".idx"))
         .map(f => ({ f, session: Number(f.split(".")[1]) || 0 }))
         .sort((a, b) => a.session - b.session);
 
@@ -155,7 +213,9 @@ export function combineHour(parts: string[]): HourIndex {
     };
 
     for (const { f } of idxFiles) {
-        const recs = readIdxFile([y, mo, d], f);
+        let recs: GopEntry[];
+        try { recs = decodeRecords(await fsp.readFile(path.join(absDir, f)), f.slice(0, -4) + ".data").gops; }
+        catch { recs = []; }
         for (let i = 0; i < recs.length; i++) {
             const rec = recs[i];
             const footEnd = i + 1 < recs.length ? recs[i + 1].t : rec.e; // real coverage = up to next keyframe
@@ -166,19 +226,68 @@ export function combineHour(parts: string[]): HourIndex {
     }
     gops.sort((a, b) => a.t - b.t);
     const badRanges = mergeRanges(bad);
-    if (badRanges.length) console.warn(`[storage] interlaced/overlapping data in ${y}/${mo}/${d} ${hh}h: ${bad.length} GOP(s) ignored`);
+    if (badRanges.length) console.warn(`[storage] interlaced/overlapping data in L${level} ${dir.join("/")}/${stem}: ${bad.length} GOP(s) ignored`);
     return { gops, badRanges };
 }
 
-export function getDayCoverage(parts: string[]): DayCoverage {
+export function combineHour(parts: string[]): Promise<HourIndex> {
+    const [y, mo, d, hh] = parts;
+    return combineBucket(0, [y, mo, d], hh);
+}
+
+// All GOP records of a level overlapping [fromMs, toMs), time-ordered.
+export async function readLevelGops(level: number, fromMs: number, toMs: number): Promise<GopEntry[]> {
+    const buckets = await listLevelBuckets(level);
+    const perBucket = await Promise.all(buckets.map(b => combineBucket(level, b.dir, b.stem)));
+    const out: GopEntry[] = [];
+    for (const { gops } of perBucket) for (const g of gops) if (g.e > fromMs && g.t < toMs) out.push(g);
+    out.sort((a, b) => a.t - b.t);
+    return out;
+}
+
+// Coverage + activity for a level across an arbitrary span (drives the trackbar
+// at any thinning level). Activity is the per-bucket max of aMax. Ranges are
+// joined across gaps up to ~1.5 GOPs so contiguous coverage reads as one band.
+export async function getLevelCoverage(level: number, fromMs: number, toMs: number, buckets = 1440): Promise<LevelCoverage> {
+    const gops = await readLevelGops(level, fromMs, toMs);
+    const span = Math.max(1, toMs - fromMs);
+    const good: Range[] = [];
+    const activity = new Array(buckets).fill(0);
+    for (const g of gops) {
+        good.push({ start: g.t, end: g.e });
+        const act = g.aMax >= 0 ? g.aMax : g.a;
+        if (act >= 0) {
+            const b = Math.min(buckets - 1, Math.max(0, Math.floor((g.t - fromMs) / span * buckets)));
+            if (act > activity[b]) activity[b] = act;
+        }
+    }
+    return { fromMs, toMs, ranges: mergeRanges(good, levelGopSpanSec(level) * 1000 * 1.5), badRanges: [], activity };
+}
+
+export async function readLevelGopBytes(level: number, dir: string[], file: string, off: number, len: number): Promise<Buffer> {
+    const fh = await fsp.open(path.join(levelRoot(level), ...dir, file), "r");
+    try { const b = Buffer.allocUnsafe(len); await fh.read(b, 0, len, off); return b; }
+    finally { await fh.close(); }
+}
+
+// Read a GOP's bytes given only its timestamp (the bucket dir is derived from t,
+// since the writer buckets every GOP by its t). Used by the thin worker + server.
+export function readLevelGopData(level: number, t: number, file: string, off: number, len: number): Promise<Buffer> {
+    return readLevelGopBytes(level, bucketOf(level, t).dir, file, off, len);
+}
+export function readLevelGopAt(level: number, g: GopEntry): Promise<Buffer> {
+    return readLevelGopData(level, g.t, g.f, g.o, g.l);
+}
+
+export async function getDayCoverage(parts: string[]): Promise<DayCoverage> {
     const [y, mo, d] = parts;
     const dayStartMs = new Date(Number(y), Number(mo) - 1, Number(d), 0, 0, 0, 0).getTime();
     const dayEndMs = dayStartMs + 24 * 3600 * 1000;
+    const hours = await Promise.all(Array.from({ length: 24 }, (_, h) => combineHour([y, mo, d, pad2(h)])));
     const good: Range[] = [];
     const bad: Range[] = [];
     const activity = new Array(ACT_BUCKETS).fill(0);
-    for (let h = 0; h < 24; h++) {
-        const { gops, badRanges } = combineHour([y, mo, d, pad2(h)]);
+    for (const { gops, badRanges } of hours) {
         for (const g of gops) {
             good.push({ start: g.t, end: g.e });
             if (g.a >= 0) {
@@ -191,58 +300,55 @@ export function getDayCoverage(parts: string[]): DayCoverage {
     return { dayStartMs, dayEndMs, ranges: mergeRanges(good, 2500), badRanges: mergeRanges(bad), activity };
 }
 
-export function readGopBytes(parts: string[], file: string, off: number, len: number): Buffer {
-    const fd = fs.openSync(path.join(DATA_DIR, ...parts, file), "r");
-    try { const b = Buffer.allocUnsafe(len); fs.readSync(fd, b, 0, len, off); return b; }
-    finally { fs.closeSync(fd); }
+export async function readGopBytes(parts: string[], file: string, off: number, len: number): Promise<Buffer> {
+    const fh = await fsp.open(path.join(DATA_DIR, ...parts, file), "r");
+    try { const b = Buffer.allocUnsafe(len); await fh.read(b, 0, len, off); return b; }
+    finally { await fh.close(); }
 }
 
 // ---- live streaming helpers ----
 
-export function latestIdxFile(parts: string[]): string | undefined {
+export async function latestIdxFile(parts: string[]): Promise<string | undefined> {
     const dir = path.join(DATA_DIR, ...parts);
-    let files: string[]; try { files = fs.readdirSync(dir); } catch { return undefined; }
     let best: string | undefined, bestM = -1;
-    for (const f of files) {
+    for (const f of await readdirSafe(dir)) {
         if (!f.endsWith(".idx")) continue;
-        try { const m = fs.statSync(path.join(dir, f)).mtimeMs; if (m > bestM) { bestM = m; best = f; } } catch { /* */ }
+        try { const m = (await fsp.stat(path.join(dir, f))).mtimeMs; if (m > bestM) { bestM = m; best = f; } } catch { /* */ }
     }
     return best;
 }
 
 // Read complete framed records after `fromByte`; framing detects partial writes.
-export function readIdxIncremental(parts: string[], idxFile: string, fromByte: number): { records: GopEntry[]; ends: number[]; nextByte: number } {
+export async function readIdxIncremental(parts: string[], idxFile: string, fromByte: number): Promise<{ records: GopEntry[]; ends: number[]; nextByte: number }> {
     const p = path.join(DATA_DIR, ...parts, idxFile);
-    let size: number; try { size = fs.statSync(p).size; } catch { return { records: [], ends: [], nextByte: fromByte }; }
-    if (size <= fromByte) return { records: [], ends: [], nextByte: fromByte };
-    const fd = fs.openSync(p, "r");
+    const size = await sizeOf(p);
+    if (size < 0 || size <= fromByte) return { records: [], ends: [], nextByte: fromByte };
+    const fh = await fsp.open(p, "r");
     try {
         const buf = Buffer.allocUnsafe(size - fromByte);
-        fs.readSync(fd, buf, 0, size - fromByte, fromByte);
+        await fh.read(buf, 0, size - fromByte, fromByte);
         const { gops, starts, consumed } = decodeRecords(buf, idxFile.slice(0, -4) + ".data");
         const ends = starts.map((s, i) => fromByte + (i + 1 < starts.length ? starts[i + 1] : consumed));
         return { records: gops, ends, nextByte: fromByte + consumed };
-    } finally { fs.closeSync(fd); }
+    } finally { await fh.close(); }
 }
 
 // ---- activity worker helpers ----
 
 // Backfill one record's activity float in place (fixed-size field; framing untouched).
-export function writeActivity(parts: string[], idxFile: string, recordStart: number, activity: number): void {
-    const fd = fs.openSync(path.join(DATA_DIR, ...parts, idxFile), "r+");
-    try { const b = Buffer.allocUnsafe(8); b.writeDoubleLE(activity, 0); fs.writeSync(fd, b, 0, 8, recordStart + ACTIVITY_BYTE_OFFSET); }
-    finally { fs.closeSync(fd); }
+export async function writeActivity(parts: string[], idxFile: string, recordStart: number, activity: number): Promise<void> {
+    const fh = await fsp.open(path.join(DATA_DIR, ...parts, idxFile), "r+");
+    try { const b = Buffer.allocUnsafe(8); b.writeDoubleLE(activity, 0); await fh.write(b, 0, 8, recordStart + ACTIVITY_BYTE_OFFSET); }
+    finally { await fh.close(); }
 }
 
 // Oldest records still needing activity (a === -1), in time order, bounded.
-export function findPendingActivity(limit: number): { parts: string[]; idxFile: string; start: number; gop: GopEntry }[] {
+export async function findPendingActivity(limit: number): Promise<{ parts: string[]; idxFile: string; start: number; gop: GopEntry }[]> {
     const out: { parts: string[]; idxFile: string; start: number; gop: GopEntry }[] = [];
-    for (const y of listChildren([])) for (const mo of listChildren([y])) for (const d of listChildren([y, mo])) {
+    for (const y of await listChildren([])) for (const mo of await listChildren([y])) for (const d of await listChildren([y, mo])) {
         const parts = [y, mo, d];
-        let files: string[]; try { files = fs.readdirSync(path.join(DATA_DIR, ...parts)); } catch { continue; }
-        for (const f of files.filter(x => x.endsWith(".idx")).sort()) {
-            const buf = (() => { try { return fs.readFileSync(path.join(DATA_DIR, ...parts, f)); } catch { return null; } })();
-            if (!buf) continue;
+        for (const f of (await readdirSafe(path.join(DATA_DIR, ...parts))).filter(x => x.endsWith(".idx")).sort()) {
+            let buf: Buffer; try { buf = await fsp.readFile(path.join(DATA_DIR, ...parts, f)); } catch { continue; }
             const { gops, starts } = decodeRecords(buf, f.slice(0, -4) + ".data");
             for (let i = 0; i < gops.length; i++) {
                 if (gops[i].a === -1) { out.push({ parts, idxFile: f, start: starts[i], gop: gops[i] }); if (out.length >= limit) return out; }
@@ -252,43 +358,130 @@ export function findPendingActivity(limit: number): { parts: string[]; idxFile: 
     return out;
 }
 
-export function dataReady(parts: string[], dataFile: string, o: number, l: number): boolean {
-    try { return fs.statSync(path.join(DATA_DIR, ...parts, dataFile)).size >= o + l; } catch { return false; }
+export async function dataReady(parts: string[], dataFile: string, o: number, l: number): Promise<boolean> {
+    return (await sizeOf(path.join(DATA_DIR, ...parts, dataFile))) >= o + l;
 }
 
-export function daySignature(parts: string[]): string {
+export async function daySignature(parts: string[]): Promise<string> {
     const dir = path.join(DATA_DIR, ...parts);
-    let files: string[]; try { files = fs.readdirSync(dir); } catch { return ""; }
     let sig = "";
-    for (const f of files.sort()) {
+    for (const f of (await readdirSafe(dir)).sort()) {
         if (!f.endsWith(".idx")) continue;
-        try { const s = fs.statSync(path.join(dir, f)); sig += `${f}:${s.size}:${Math.round(s.mtimeMs)};`; } catch { /* */ }
+        try { const s = await fsp.stat(path.join(dir, f)); sig += `${f}:${s.size}:${Math.round(s.mtimeMs)};`; } catch { /* */ }
     }
     return sig;
 }
 
-export function enforceRetention(): { deleted: string[]; totalBytes: number } {
-    const items: { data: string; idx: string; key: string; bytes: number }[] = [];
-    for (const y of listChildren([])) for (const mo of listChildren([y])) for (const d of listChildren([y, mo])) {
-        const dir = path.join(DATA_DIR, y, mo, d);
-        let files: string[]; try { files = fs.readdirSync(dir); } catch { continue; }
-        for (const f of files) {
-            if (!f.endsWith(".data")) continue;
-            let bytes = 0; try { bytes = fs.statSync(path.join(dir, f)).size; } catch { /* */ }
-            items.push({ data: path.join(dir, f), idx: path.join(dir, f.slice(0, -5) + ".idx"), key: `${y}/${mo}/${d}/${f}`, bytes });
+// ---- thinned-level writing ----
+
+// Writes re-encoded thinned GOPs for one level. Same on-disk shape as L0, but
+// level-bucketed paths and 7-field records ([t,e,o,l,n,aAvg,aMax]). Appends are
+// serialized through a promise chain so offsets stay consistent.
+export class LevelWriter {
+    private session = Date.now();
+    private curKey = "";
+    private dataPath = "";
+    private idxPath = "";
+    private offset = 0;
+    private tail: Promise<void> = Promise.resolve();
+
+    constructor(private level: number) {}
+
+    private async ensure(ms: number): Promise<void> {
+        const { dir, stem } = bucketOf(this.level, ms);
+        const absDir = path.join(levelRoot(this.level), ...dir);
+        const key = absDir + "|" + stem;
+        if (key === this.curKey && this.dataPath) return;
+        await fsp.mkdir(absDir, { recursive: true });
+        this.curKey = key;
+        this.dataPath = path.join(absDir, `${stem}.${this.session}.data`);
+        this.idxPath = path.join(absDir, `${stem}.${this.session}.idx`);
+        const sz = await sizeOf(this.dataPath);
+        this.offset = sz >= 0 ? sz : 0;
+    }
+
+    writeGop(nals: Buffer[], t: number, e: number, frameCount: number, aAvg: number, aMax: number): Promise<void> {
+        const run = async (): Promise<void> => {
+            await this.ensure(t);
+            const body = Buffer.concat(nals.map(frameNal));
+            await fsp.appendFile(this.dataPath, body);
+            const o = this.offset; this.offset += body.length;
+            await fsp.appendFile(this.idxPath, encodeVals([t, e, o, body.length, frameCount, aAvg, aMax]));
+        };
+        this.tail = this.tail.then(run).catch(err => { console.error(`[storage] L${this.level} writeGop failed:`, (err as Error)?.message); });
+        return this.tail;
+    }
+}
+
+// ---- level discovery / retention helpers ----
+
+async function walkData(root: string): Promise<{ abs: string; key: string; bytes: number }[]> {
+    const out: { abs: string; key: string; bytes: number }[] = [];
+    const walk = async (rel: string[]): Promise<void> => {
+        for (const e of await readdirEnts(path.join(root, ...rel))) {
+            if (e.isDirectory()) await walk([...rel, e.name]);
+            else if (e.name.endsWith(".data")) {
+                const abs = path.join(root, ...rel, e.name);
+                const bytes = Math.max(0, await sizeOf(abs));
+                out.push({ abs, key: [...rel, e.name].join("/"), bytes });
+            }
         }
-    }
-    let total = items.reduce((s, i) => s + i.bytes, 0);
-    items.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+    };
+    await walk([]);
+    return out;
+}
+
+async function pruneEmptyDirs(root: string): Promise<void> {
+    const walk = async (rel: string[]): Promise<void> => {
+        const abs = path.join(root, ...rel);
+        for (const e of await readdirEnts(abs)) {
+            if (!e.isDirectory()) continue;
+            await walk([...rel, e.name]);
+            try { if ((await fsp.readdir(path.join(abs, e.name))).length === 0) await fsp.rmdir(path.join(abs, e.name)); } catch { /* */ }
+        }
+    };
+    await walk([]);
+}
+
+function bucketKey(b: { dir: string[]; stem: string }): string { return [...b.dir, b.stem].join("/"); }
+
+// Earliest start / latest end timestamps held by a level (reads only the first
+// and last non-empty buckets — buckets are chronological by zero-padded name).
+export async function levelTimeBounds(level: number): Promise<{ earliest: number; latest: number }> {
+    const bs = (await listLevelBuckets(level)).sort((a, b) => (bucketKey(a) < bucketKey(b) ? -1 : 1));
+    let earliest = 0, latest = 0;
+    for (let i = 0; i < bs.length; i++) { const { gops } = await combineBucket(level, bs[i].dir, bs[i].stem); if (gops.length) { earliest = gops[0].t; break; } }
+    for (let i = bs.length - 1; i >= 0; i--) { const { gops } = await combineBucket(level, bs[i].dir, bs[i].stem); if (gops.length) { latest = gops[gops.length - 1].e; break; } }
+    return { earliest, latest };
+}
+
+export async function getLevelsInfo(): Promise<LevelInfo[]> {
+    return Promise.all(Array.from({ length: LEVEL_COUNT }, async (_, level): Promise<LevelInfo> => {
+        const usedBytes = (await walkData(levelRoot(level))).reduce((s, i) => s + i.bytes, 0);
+        const { earliest, latest } = await levelTimeBounds(level);
+        return {
+            level, timePerSec: Math.pow(30, level), gopSpanSec: Math.pow(30, level),
+            budgetBytes: LEVEL_BUDGET_BYTES, usedBytes, earliestMs: earliest, latestMs: latest,
+        };
+    }));
+}
+
+// Enforce each level's byte budget independently, deleting that level's oldest
+// file buckets first.
+export async function enforceRetention(): Promise<{ deleted: string[]; totalBytes: number }> {
     const deleted: string[] = [];
-    for (const it of items) {
-        if (total <= RETENTION_BYTES) break;
-        try { fs.rmSync(it.data, { force: true }); fs.rmSync(it.idx, { force: true }); } catch { /* */ }
-        total -= it.bytes; deleted.push(it.key);
+    let grand = 0;
+    for (let level = 0; level < LEVEL_COUNT; level++) {
+        const root = levelRoot(level);
+        const items = (await walkData(root)).sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+        let total = items.reduce((s, i) => s + i.bytes, 0);
+        for (const it of items) {
+            if (total <= LEVEL_BUDGET_BYTES) break;
+            try { await fsp.rm(it.abs, { force: true }); await fsp.rm(it.abs.slice(0, -5) + ".idx", { force: true }); } catch { /* */ }
+            total -= it.bytes; deleted.push(`L${level}/${it.key}`);
+        }
+        grand += total;
+        await pruneEmptyDirs(root);
     }
-    for (const y of listChildren([])) for (const mo of listChildren([y])) for (const d of listChildren([y, mo])) {
-        const dir = path.join(DATA_DIR, y, mo, d);
-        try { if (fs.readdirSync(dir).length === 0) fs.rmdirSync(dir); } catch { /* */ }
-    }
-    return { deleted, totalBytes: total };
+    return { deleted, totalBytes: grand };
 }
