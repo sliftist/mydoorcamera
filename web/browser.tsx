@@ -6,7 +6,7 @@ import { observable, runInAction } from "mobx";
 import { observer } from "sliftutils/render-utils/observer";
 import { configureMobxNextFrameScheduler } from "sliftutils/render-utils/mobxTyped";
 import { css, isNode } from "typesafecss";
-import { CameraApi, GopEntry } from "./api";
+import { CameraApi, GopEntry, Stats } from "./api";
 import { Player } from "./player";
 import { FPS } from "../src/config";
 import { formatDateTime } from "socket-function/src/formatting/format";
@@ -26,6 +26,7 @@ const state = observable({
     list: [] as string[],     // child folder names at the current level
     hourGops: [] as GopEntry[],
     playWall: 0,              // current playhead as wall-clock ms
+    stats: null as Stats | null,
 }, undefined, { deep: false });
 
 const LEVELS = ["Year", "Month", "Day", "Hour"];
@@ -33,6 +34,7 @@ let api: CameraApi | undefined;
 let player: Player | undefined;
 let videoEl: HTMLVideoElement | null = null;
 let retryTimer: ReturnType<typeof setTimeout> | undefined;
+let statsTimer: ReturnType<typeof setInterval> | undefined;
 
 async function connect(): Promise<void> {
     if (retryTimer) { clearTimeout(retryTimer); retryTimer = undefined; }
@@ -43,6 +45,7 @@ async function connect(): Promise<void> {
         lsSet("mdc_ip", state.ip.trim());
         lsSet("mdc_pw", state.password);
         runInAction(() => { state.view = "browse"; });
+        startStatsPoll();
         await navigateTo(getUrlPath(), false); // restore the drilled-in location from the URL
     } catch (e: any) {
         runInAction(() => { state.error = e?.message || String(e); state.showCertLink = !!e?.needsCert; });
@@ -110,6 +113,24 @@ function hourDurationSec(): number {
 }
 
 function teardownPlayer(): void { if (player) { player.teardown(); player = undefined; } }
+
+// Poll system + encoder stats every 5s while connected (shown in the footer).
+function startStatsPoll(): void {
+    if (statsTimer) return;
+    const tick = async () => {
+        if (!api) return;
+        try { const s = await api.getStats(); runInAction(() => { state.stats = s; }); } catch { /* ignore */ }
+    };
+    void tick();
+    statsTimer = setInterval(() => void tick(), 5000);
+}
+
+function gb(b: number): string { return (b / 1073741824).toFixed(1); }
+function formatStats(s: Stats): string {
+    const sy = s.system;
+    const enc = s.encoder ? `enc ${s.encoder.fps}fps (${s.encoder.cpuPct}%)` : "enc —";
+    return `CPU ${sy.cpuPct}% · RAM ${gb(sy.ramUsedBytes)}/${gb(sy.ramTotalBytes)} GB · Disk ${gb(sy.diskUsedBytes)}/${gb(sy.diskTotalBytes)} GB · ${enc}`;
+}
 
 function fmtClock(ms: number): string { return new Date(ms).toLocaleTimeString(); }
 function pad(n: number): string { return String(n).padStart(2, "0"); }
@@ -205,7 +226,10 @@ const App = observer(class extends preact.Component {
         return (
             <div className={css.vbox(20).alignItems("center").minHeight("100vh").pad2(36, 20)}>
                 {state.view === "connect" ? <ConnectView /> : <BrowseView />}
-                <div className={css.fontSize(11).opacity(0.4)}>Build {formatDateTime(BUILD_TIMESTAMP)}</div>
+                <div className={css.hbox(12).wrap.center.fontSize(11).opacity(0.5)}>
+                    {state.stats && <span>{formatStats(state.stats)}</span>}
+                    <span>Build {formatDateTime(BUILD_TIMESTAMP)}</span>
+                </div>
             </div>
         );
     }

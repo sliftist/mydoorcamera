@@ -6,6 +6,7 @@ import { spawn } from "child_process";
 import { VIDEO_DEVICE, WIDTH, HEIGHT, FPS, BITRATE, GOP } from "./config";
 import { AnnexBSplitter, nalType } from "./annexb";
 import { StorageWriter, enforceRetention } from "./storage";
+import { ProcCpuSampler, writeEncoderStats } from "./stats";
 
 // FPS-tuned 1080p30 pipeline (see capture-pipeline tuning notes). queue elements
 // + videoconvert n-threads=4 spread software JPEG-decode across the 4 cores so we
@@ -30,6 +31,8 @@ function pipelineArgs(): string[] {
 
 const writer = new StorageWriter();
 const splitter = new AnnexBSplitter();
+let framesWritten = 0;
+let gstSampler: ProcCpuSampler | undefined;
 
 // Current GOP assembly state.
 let sps: Buffer | undefined;
@@ -40,7 +43,7 @@ let gopTime = 0;
 
 function finalizeGop(): void {
     if (gopFrames > 0 && gopNals.length) {
-        try { writer.writeGop(gopNals, gopTime, gopFrames); }
+        try { writer.writeGop(gopNals, gopTime, gopFrames); framesWritten += gopFrames; }
         catch (e) { console.error("writeGop failed:", (e as Error).message); }
     }
     gopNals = [];
@@ -74,6 +77,7 @@ function onNal(nal: Buffer): void {
 function start(): void {
     console.log(`[capture] starting pipeline ${WIDTH}x${HEIGHT}@${FPS} bitrate=${BITRATE} gop=${GOP}`);
     const gst = spawn("gst-launch-1.0", pipelineArgs(), { stdio: ["ignore", "pipe", "inherit"] });
+    if (gst.pid) gstSampler = new ProcCpuSampler(gst.pid);
 
     gst.stdout.on("data", (chunk: Buffer) => {
         for (const nal of splitter.push(chunk)) onNal(nal);
@@ -86,6 +90,16 @@ function start(): void {
     });
     gst.on("error", (e) => console.error("[capture] spawn error:", e.message));
 }
+
+// Sample encoder throughput + CPU every 5s and publish for the server to read.
+let lastFrames = 0, lastStatsMs = Date.now();
+setInterval(() => {
+    const now = Date.now();
+    const dt = (now - lastStatsMs) / 1000;
+    const fps = dt > 0 ? (framesWritten - lastFrames) / dt : 0;
+    lastFrames = framesWritten; lastStatsMs = now;
+    writeEncoderStats({ fps: Math.round(fps * 10) / 10, cpuPct: gstSampler ? Math.round(gstSampler.sample()) : 0, updatedMs: now });
+}, 5000);
 
 // Enforce the rolling byte cap every 60s.
 setInterval(() => {

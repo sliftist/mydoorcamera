@@ -8,7 +8,7 @@ import * as os from "os";
 import * as path from "path";
 import { execSync } from "child_process";
 import { WebSocketServer } from "ws";
-import { SERVER_PORT, CERT_DIR, PASSWORD_WORD_COUNT } from "./config";
+import { SERVER_PORT, CERT_DIR, DATA_DIR, PASSWORD_WORD_COUNT } from "./config";
 
 function firstLanIp(): string {
     const ifaces = os.networkInterfaces();
@@ -22,6 +22,7 @@ function firstLanIp(): string {
 import { createRpc, Channel } from "./rpc";
 import { listChildren, readHourIndex, readGopBytes } from "./storage";
 import { getPassword, checkPassword, isBlacklisted, recordFailedAttempt } from "./auth";
+import { getSystemStats, readEncoderStats } from "./stats";
 
 function ensureCert(): { key: Buffer; cert: Buffer } {
     const keyPath = path.join(CERT_DIR, "key.pem");
@@ -91,6 +92,7 @@ function start(): void {
                 return readGopBytes(parts, file, off, len); // Buffer travels natively over cbor-x
             },
             async serverInfo() { requireAuth(); return { ip, port: SERVER_PORT }; },
+            async getStats() { requireAuth(); return { system: await getSystemStats(DATA_DIR), encoder: readEncoderStats() }; },
         });
     });
 

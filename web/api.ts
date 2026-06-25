@@ -6,6 +6,15 @@ import { createRpc, browserWsChannel, Rpc } from "../src/rpc";
 
 export type GopEntry = { t: number; f: string; o: number; l: number; n: number };
 
+export type Stats = {
+    system: {
+        cpuPct: number; loadAvg: number; cores: number;
+        ramUsedBytes: number; ramTotalBytes: number;
+        diskUsedBytes: number; diskTotalBytes: number;
+    };
+    encoder: { fps: number; cpuPct: number; updatedMs: number } | null;
+};
+
 export class CameraApi {
     private rpc: Rpc | undefined;
 
@@ -32,4 +41,5 @@ export class CameraApi {
     getGopData(parts: string[], file: string, off: number, len: number): Promise<Uint8Array> {
         return this.rpc!.call("getGopData", parts, file, off, len);
     }
+    getStats(): Promise<Stats> { return this.rpc!.call("getStats"); }
 }
