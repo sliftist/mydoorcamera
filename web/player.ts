@@ -315,9 +315,13 @@ export class DayPlayer {
         if (!this.live) return;
         const buf = isFinite(this.minBuffer) ? this.minBuffer : this.bufferedSec();
         this.minBuffer = Infinity;
-        if (buf < 1) this.rate = Math.max(0.90, this.rate - 0.01);
-        else if (buf > 2) this.rate = Math.min(1.10, this.rate + 0.01);
-        else if (this.rate > 1.0001) this.rate = Math.max(1, this.rate - 0.01);
+        // Reducing the rate steps down by max(1%, 20% of the current excess speed),
+        // so a big catch-up (e.g. 1.5×) unwinds fast (→1.4→1.32→…). Speeding up is a
+        // steady +1%/s. Range ±50%.
+        const reduceStep = () => Math.max(0.01, 0.2 * Math.max(0, this.rate - 1));
+        if (buf > 2) this.rate = Math.min(1.5, this.rate + 0.01);
+        else if (buf < 1) this.rate = Math.max(0.5, this.rate - reduceStep());
+        else if (this.rate > 1.0001) this.rate = Math.max(1, this.rate - reduceStep());
         else if (this.rate < 0.9999) this.rate = Math.min(1, this.rate + 0.01);
         try { this.video.playbackRate = this.rate; } catch { /* */ }
         this.onRate?.(this.rate);
