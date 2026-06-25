@@ -64,6 +64,7 @@ async function connect(): Promise<void> {
         runInAction(() => { state.view = "browse"; state.availableDays = days; });
         startStatsPoll();
         if (!posTimer) posTimer = setInterval(() => { if (state.day && state.coverage) saveUrlPosition(state.playWall); }, 30000);
+        runInAction(() => { state.speed = getUrlSpeed(); }); // restore playback speed before the player is created
         const urlDay = getUrlDay();
         const initial = (urlDay && days.includes(urlDay)) ? urlDay : (days[days.length - 1] || "");
         if (initial) await selectDay(initial, false);
@@ -81,18 +82,20 @@ function thisMonth(): string { const d = new Date(); return `${d.getFullYear()}-
 
 // ---- day selection ----
 function getUrlDay(): string { try { return new URLSearchParams(location.search).get("day") || ""; } catch { return ""; } }
-function setUrlDay(day: string): void { try { history.pushState({}, "", day ? `?day=${day}` : location.pathname); } catch { /* ignore */ } }
+function speedSuffix(): string { return state.speed !== 1 ? `&speed=${state.speed}` : ""; }
+function getUrlSpeed(): number { try { const n = Number(new URLSearchParams(location.search).get("speed")); return SPEEDS.includes(n) ? n : 1; } catch { return 1; } }
+function setUrlDay(day: string): void { try { history.pushState({}, "", day ? `?day=${day}${speedSuffix()}` : location.pathname); } catch { /* ignore */ } }
 function getUrlT(): number | null { try { const v = new URLSearchParams(location.search).get("t"); return v == null || v === "" ? null : Number(v); } catch { return null; } }
 function getUrlLive(): boolean { try { return new URLSearchParams(location.search).get("live") === "1"; } catch { return false; } }
 function setUrlLive(on: boolean): void {
     if (!state.day) return;
-    try { history.replaceState({}, "", on ? `?day=${state.day}&live=1` : `?day=${state.day}`); } catch { /* ignore */ }
+    try { history.replaceState({}, "", on ? `?day=${state.day}&live=1${speedSuffix()}` : `?day=${state.day}${speedSuffix()}`); } catch { /* ignore */ }
 }
 // Persist the current position as seconds-of-day in ?t (replaceState, no history spam). Skipped in live mode.
 function saveUrlPosition(wall: number): void {
     if (state.live || !state.day || !state.coverage) return;
     const t = Math.max(0, Math.round((wall - state.coverage.dayStartMs) / 1000));
-    try { history.replaceState({}, "", `?day=${state.day}&t=${t}`); } catch { /* ignore */ }
+    try { history.replaceState({}, "", `?day=${state.day}&t=${t}${speedSuffix()}`); } catch { /* ignore */ }
 }
 
 async function selectDay(dayStr: string, push = true): Promise<void> {
@@ -154,6 +157,7 @@ function maybeStartDayPlayer(): void {
     teardownPlayer();
     playerKey = state.day;
     player = new DayPlayer(videoEl, api, state.day.split("/"), state.coverage.dayStartMs, state.coverage.ranges);
+    player.setSpeed(state.speed); // adopt the current (possibly URL-restored) playback speed
     player.onTime = (wall) => runInAction(() => { state.playWall = wall; });
     player.onStatus = (s) => runInAction(() => { state.playStatus = s; });
     player.onRate = (r) => runInAction(() => { state.playbackRate = r; });
@@ -340,7 +344,7 @@ const Controls = observer(class extends preact.Component { render() {
             <span className={css.fontSize(12).opacity(0.6).flexGrow(1)}>← → seek 5s</span>
             <span className={css.fontSize(13).opacity(0.7)}>⏩</span>
             <select className={selectCss} value={String(state.speed)}
-                onChange={(e: any) => { const s = Number(e.target.value); runInAction(() => { state.speed = s; }); player?.setSpeed(s); }}>
+                onChange={(e: any) => { const s = Number(e.target.value); runInAction(() => { state.speed = s; }); player?.setSpeed(s); saveUrlPosition(state.playWall); }}>
                 {SPEEDS.map(s => <option key={s} value={String(s)}>{speedLabel(s)}×</option>)}
             </select>
             <button className={liveBtnCss} title="Jump to live" onMouseDown={(e: any) => { e.preventDefault(); void enterLive(); }}>● Live</button>
