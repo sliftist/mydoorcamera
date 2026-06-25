@@ -33,7 +33,7 @@ export class DayPlayer {
     private onTimeUpdate = (): void => {
         const wall = this.dayStartMs + this.video.currentTime * 1000;
         this.onTime?.(wall);
-        void this.loadRange(wall, wall + 15_000);
+        void this.loadRange(wall, wall + 15_000).catch(() => { /* ignore */ });
         this.evictBefore(this.video.currentTime - 90);
     };
 
@@ -46,9 +46,9 @@ export class DayPlayer {
         const hh = pad2(hourNum);
         if (!this.hourCache.has(hh)) {
             try { this.hourCache.set(hh, await this.api.getHourIndex([...this.dayParts, hh])); }
-            catch { this.hourCache.set(hh, []); }
+            catch { return []; } // don't cache a failure (e.g. during a reconnect) — retry later
         }
-        return this.hourCache.get(hh)!;
+        return this.hourCache.get(hh) || [];
     }
 
     // The GOP covering wallMs (last keyframe at/before it), else the nearest after.
@@ -85,9 +85,14 @@ export class DayPlayer {
     private async appendGop(hh: string, g: GopEntry, nals?: Buffer[]): Promise<void> {
         if (this.appended.has(g.t)) return;
         this.appended.add(g.t);
-        const ns = nals || await this.fetchNals(hh, g);
-        const mp4 = await H264toMP4({ buffer: ns, frameDurationInSeconds: 1 / FPS, mediaStartTimeSeconds: this.internalSec(g.t) });
-        this.enqueue(Buffer.from(mp4.buffer));
+        try {
+            const ns = nals || await this.fetchNals(hh, g);
+            const mp4 = await H264toMP4({ buffer: ns, frameDurationInSeconds: 1 / FPS, mediaStartTimeSeconds: this.internalSec(g.t) });
+            this.enqueue(Buffer.from(mp4.buffer));
+        } catch (e) {
+            this.appended.delete(g.t); // a fetch failed (e.g. during a reconnect) — allow a later retry
+            throw e;
+        }
     }
 
     // Seek to a wall-clock time in the day and start playing from the covering keyframe.
@@ -115,7 +120,9 @@ export class DayPlayer {
             for (const g of gops) {
                 if (g.t + this.gopDurMs(g) < startWall) continue;
                 if (g.t > endWall) return;
-                if (!this.appended.has(g.t)) await this.appendGop(hh, g);
+                if (!this.appended.has(g.t)) {
+                    try { await this.appendGop(hh, g); } catch { return; } // drop/fetch error — stop, retry later
+                }
             }
         }
     }

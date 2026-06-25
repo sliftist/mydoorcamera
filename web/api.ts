@@ -18,12 +18,27 @@ export type Stats = {
 
 export class CameraApi {
     private rpc: Rpc | undefined;
+    private password = "";
+    private alive = true;
+    private connected = false;
+    private reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+    // Optional hooks for the UI: connection up/down, and "just reconnected".
+    onStatus: ((connected: boolean) => void) | undefined;
+    onReconnect: (() => void) | undefined;
 
     constructor(public ip: string, public port = 8443) {}
 
     get certUrl(): string { return `https://${this.ip}:${this.port}/`; }
 
+    // First connect — surfaces cert/password errors to the UI. After this
+    // succeeds, the socket auto-reconnects (re-login included) on any drop.
     async connect(password: string): Promise<void> {
+        this.password = password;
+        this.alive = true;
+        await this.open();
+    }
+
+    private async open(): Promise<void> {
         const ws = new WebSocket(`wss://${this.ip}:${this.port}`);
         await new Promise<void>((resolve, reject) => {
             ws.onopen = () => resolve();
@@ -33,16 +48,48 @@ export class CameraApi {
                 reject(e);
             };
         });
-        this.rpc = createRpc(browserWsChannel(ws), {});
-        await this.rpc.call("login", password); // rejects on wrong password / blacklist
+        const rpc = createRpc(browserWsChannel(ws), {});
+        await rpc.call("login", this.password); // rejects on wrong password / blacklist
+        this.rpc = rpc;
+        this.connected = true;
+        this.onStatus?.(true);
+        ws.addEventListener("close", () => this.onSocketClose());
     }
 
-    listChildren(parts: string[]): Promise<string[]> { return this.rpc!.call("listChildren", parts); }
-    getAvailableDays(): Promise<string[]> { return this.rpc!.call("getAvailableDays"); }
-    getDayCoverage(parts: string[]): Promise<DayCoverage> { return this.rpc!.call("getDayCoverage", parts); }
-    getHourIndex(parts: string[]): Promise<GopEntry[]> { return this.rpc!.call("getHourIndex", parts); }
-    getGopData(parts: string[], file: string, off: number, len: number): Promise<Uint8Array> {
-        return this.rpc!.call("getGopData", parts, file, off, len);
+    private onSocketClose(): void {
+        if (!this.connected) return;
+        this.connected = false;
+        this.rpc = undefined;
+        this.onStatus?.(false);
+        this.scheduleReconnect();
     }
-    getStats(): Promise<Stats> { return this.rpc!.call("getStats"); }
+
+    private scheduleReconnect(): void {
+        if (!this.alive || this.reconnectTimer) return;
+        this.reconnectTimer = setTimeout(async () => {
+            this.reconnectTimer = undefined;
+            try { await this.open(); this.onReconnect?.(); }
+            catch { this.scheduleReconnect(); } // server still down / restarting — keep trying
+        }, 2000);
+    }
+
+    close(): void {
+        this.alive = false;
+        if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+        this.rpc?.close();
+    }
+
+    private call<T = any>(method: string, ...args: any[]): Promise<T> {
+        if (!this.rpc) return Promise.reject(new Error("not connected"));
+        return this.rpc.call<T>(method, ...args);
+    }
+
+    listChildren(parts: string[]): Promise<string[]> { return this.call("listChildren", parts); }
+    getAvailableDays(): Promise<string[]> { return this.call("getAvailableDays"); }
+    getDayCoverage(parts: string[]): Promise<DayCoverage> { return this.call("getDayCoverage", parts); }
+    getHourIndex(parts: string[]): Promise<GopEntry[]> { return this.call("getHourIndex", parts); }
+    getGopData(parts: string[], file: string, off: number, len: number): Promise<Uint8Array> {
+        return this.call("getGopData", parts, file, off, len);
+    }
+    getStats(): Promise<Stats> { return this.call("getStats"); }
 }

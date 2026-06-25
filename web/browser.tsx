@@ -32,6 +32,7 @@ const state = observable({
     desiredWall: 0,                  // where the user asked to play
     hoverWall: null as number | null,
     stats: null as Stats | null,
+    online: true,
 }, undefined, { deep: false });
 
 let api: CameraApi | undefined;
@@ -47,6 +48,8 @@ async function connect(): Promise<void> {
     runInAction(() => { state.error = ""; state.showCertLink = false; state.connecting = true; });
     try {
         api = new CameraApi(state.ip.trim());
+        api.onStatus = (c) => runInAction(() => { state.online = c; });
+        api.onReconnect = () => { void onReconnected(); };
         await api.connect(state.password);
         lsSet("mdc_ip", state.ip.trim());
         lsSet("mdc_pw", state.password);
@@ -97,6 +100,18 @@ function maybeStartDayPlayer(): void {
 }
 
 function teardownPlayer(): void { if (player) { player.teardown(); player = undefined; } playerKey = ""; }
+
+// Called after the socket auto-reconnects (e.g. server restarted): refresh the
+// day list/coverage and resume playback from the current position.
+async function onReconnected(): Promise<void> {
+    if (!api) return;
+    try {
+        const days = await api.getAvailableDays();
+        runInAction(() => { state.availableDays = days; });
+        if (state.day) { const cov = await api.getDayCoverage(state.day.split("/")); runInAction(() => { state.coverage = cov; }); }
+    } catch { /* ignore */ }
+    if (player) void player.seek(state.playWall).catch(() => { /* ignore */ });
+}
 
 function seekTo(wall: number): void {
     runInAction(() => { state.desiredWall = wall; });
@@ -259,6 +274,7 @@ const App = observer(class extends preact.Component {
             <div className={css.vbox(20).alignItems("center").minHeight("100vh").pad2(28, 16)}>
                 {state.view === "connect" ? <ConnectView /> : <DayView />}
                 <div className={css.hbox(12).wrap.center.fontSize(11).opacity(0.5)}>
+                    {state.view === "browse" && !state.online && <span className={css.color("hsl(40,95%,62%)")}>● reconnecting…</span>}
                     {state.stats && <span>{formatStats(state.stats)}</span>}
                     <span>Build {formatDateTime(BUILD_TIMESTAMP)}</span>
                 </div>
