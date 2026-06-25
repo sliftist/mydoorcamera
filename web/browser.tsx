@@ -118,8 +118,10 @@ function fmtDur(sec: number): string {
     const mo = day / 30.44; if (mo < 24) return `${mo < 10 ? mo.toFixed(1) : Math.round(mo)} mo`;
     return `${(day / 365).toFixed(1)} yr`;
 }
-// Level label by time-per-playback-second.
-function tpsLabel(l: LevelInfo): string { return l.level === 0 ? "1× real-time" : `${fmtDur(l.timePerSec)} / s`; }
+// Level label by time-PER-FRAME — i.e. how much real time each shown frame
+// represents (what you'd miss between frames). L1 = 1 frame/sec (you see where
+// someone was), L2 = 1 frame / 30s (you only catch lingering things), etc.
+function tpfLabel(l: LevelInfo): string { return l.level === 0 ? "full · real-time" : `${fmtDur(l.timePerSec / 30)} / frame`; }
 function levelOptions(): LevelInfo[] {
     const ls = state.levels.filter(l => l.level === 0 || l.usedBytes > 0);
     return ls.length ? ls : [{ level: 0, timePerSec: 1, gopSpanSec: 1, budgetBytes: 0, usedBytes: 0, earliestMs: 0, latestMs: 0 }];
@@ -396,10 +398,10 @@ const Controls = observer(class extends preact.Component { render() {
             </button>
             <span className={css.fontSize(13).width(110)} style={{ color: statusColor(state.playStatus) }}>{statusLabel(state.playStatus)}</span>
             <span className={css.fontSize(12).opacity(0.6).flexGrow(1)}>← → seek 5s</span>
-            <span className={css.fontSize(13).opacity(0.7)} title="Thinning level — real time per playback second">🔍</span>
+            <span className={css.fontSize(13).opacity(0.7)} title="Thinning level — real time each frame represents (what you'd miss between frames)">🔍</span>
             <select className={selectCss} value={String(state.level)} title="Thinning level"
                 onChange={(e: any) => void setLevel(Number(e.target.value))}>
-                {levelOptions().map(l => <option key={l.level} value={String(l.level)}>{tpsLabel(l)}</option>)}
+                {levelOptions().map(l => <option key={l.level} value={String(l.level)}>{tpfLabel(l)}</option>)}
             </select>
             <span className={css.fontSize(13).opacity(0.7)}>⏩</span>
             <select className={selectCss} value={String(state.speed)}
@@ -425,7 +427,7 @@ const LevelsPanel = observer(class extends preact.Component { render() {
     if (!state.levels.length) return <div />;
     return (
         <div className={css.vbox(6).width("100%").maxWidth(420)}>
-            <div className={css.fontSize(12).opacity(0.7)}>Thinning levels — how far back each reaches (click to view)</div>
+            <div className={css.fontSize(12).opacity(0.7)}>Thinning levels — time per frame &amp; how far back each reaches (click to view)</div>
             {state.levels.map(l => {
                 const heldSec = l.latestMs > l.earliestMs ? (l.latestMs - l.earliestMs) / 1000 : 0;
                 const capSec = l.usedBytes > 0 ? heldSec * l.budgetBytes / l.usedBytes : 0;
@@ -435,7 +437,7 @@ const LevelsPanel = observer(class extends preact.Component { render() {
                     <div key={l.level} onClick={() => void setLevel(l.level)} className={css.vbox(3).pad2(6, 8).pointer}
                         style={{ background: sel ? "hsl(210,55%,20%)" : "hsl(220,15%,13%)", border: "1px solid " + (sel ? "hsl(210,80%,50%)" : "hsl(220,15%,24%)"), borderRadius: "4px" }}>
                         <div className={css.hbox(8).fontSize(12).alignItems("baseline")} style={{ justifyContent: "space-between" }}>
-                            <span style={{ fontWeight: 600 }}>{tpsLabel(l)}</span>
+                            <span style={{ fontWeight: 600 }}>{tpfLabel(l)}</span>
                             <span className={css.opacity(0.85)}>{heldSec > 0 ? `held ${fmtDur(heldSec)}` : "empty"}{capSec > 0 ? ` / ~${fmtDur(capSec)} capacity` : ""}</span>
                         </div>
                         <div style={{ position: "relative", height: "5px", background: "hsl(220,15%,22%)", borderRadius: "3px" }}>

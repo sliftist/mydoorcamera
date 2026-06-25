@@ -30,8 +30,15 @@ export const RETENTION_BYTES = Number(env.MYDOORCAMERA_RETENTION_BYTES) || 16 * 
 export const THIN_FACTOR = GOP;            // keep 1 of every 30 frames per level (== GOP)
 export const THIN_LEVELS = 4;             // generate L1..L4 (L0 is the unthinned root)
 export const THIN_GOP_FRAMES = 30;        // frames per re-encoded thinned GOP
-// Re-encode thinned GOPs on the GPU (v4l2h264enc), full resolution, like capture.
-export const THIN_BITRATE = 3_000_000;    // 3 Mbps for re-encoded thinned levels
+// Re-encode thinned GOPs on the GPU (v4l2h264enc), full resolution. Thinned frames
+// are sparse — at a high thinning level you may only get a few frames of whatever
+// you're looking for — so we encode them near-losslessly: quality over size, since
+// the effective frame rate (and thus data volume) is tiny anyway. A low QP floor +
+// max bitrate also stops the VBR rate-controller from crushing the cold IDR (the
+// first frame of each fresh 30-frame encode), which was the start-of-group blockiness.
+export const THIN_BITRATE = 25_000_000;   // 25 Mbps (encoder max) VBR target
+export const THIN_MIN_QP = 10;            // low QP floor -> near-lossless sharp frames
+export const THIN_MAX_QP = 20;            // cap so the cold IDR can't be crushed
 export const LEVEL_COUNT = THIN_LEVELS + 1; // 5 levels total (L0..L4)
 // Thinned levels live in their own tree (kept out of DATA_DIR's year scan).
 export const THIN_DIR = env.MYDOORCAMERA_THIN || "/var/lib/mydoorcamera/thin";

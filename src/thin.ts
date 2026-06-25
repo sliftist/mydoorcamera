@@ -8,7 +8,7 @@
 import { spawn } from "child_process";
 import { getTimezone } from "./timezone";
 process.env.TZ = getTimezone();
-import { THIN_LEVELS, THIN_BITRATE, levelGopSpanSec } from "./config";
+import { THIN_LEVELS, THIN_BITRATE, THIN_MIN_QP, THIN_MAX_QP, levelGopSpanSec } from "./config";
 import {
     GopEntry, LevelWriter, readLevelGops, readLevelGopAt, levelTimeBounds,
 } from "./storage";
@@ -41,8 +41,11 @@ function reencode(annexb: Buffer): Promise<Buffer[]> {
         const gst = spawn("gst-launch-1.0", [
             "-q", "fdsrc", "fd=0", "!", "h264parse", "!", "avdec_h264", "!",
             "videoconvert", "!", "video/x-raw,format=I420", "!",
-            "v4l2h264enc", `extra-controls=encode,video_bitrate=${THIN_BITRATE},h264_i_frame_period=30`, "!",
-            "video/x-h264,level=(string)4,profile=main", "!",
+            // Near-lossless: max bitrate + a low QP floor, and a QP ceiling so the
+            // VBR rate-controller can't crush the cold IDR (first frame of each
+            // fresh 30-frame encode) — that was the start-of-group blockiness.
+            "v4l2h264enc", `extra-controls=encode,video_bitrate=${THIN_BITRATE},h264_i_frame_period=30,h264_minimum_qp_value=${THIN_MIN_QP},h264_maximum_qp_value=${THIN_MAX_QP}`, "!",
+            "video/x-h264,level=(string)4.2,profile=high", "!",
             "h264parse", "config-interval=1", "!",
             "video/x-h264,stream-format=byte-stream,alignment=au", "!",
             "fdsink", "fd=1",
