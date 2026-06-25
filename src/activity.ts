@@ -28,11 +28,14 @@ function keyframeAU(parts: string[], g: GopEntry): Buffer {
     return Buffer.concat(out);
 }
 
-// Hardware-decode a concatenated keyframe stream to GRAY8 WxH frames.
+// Software-decode (avdec_h264) a concatenated keyframe stream to GRAY8 WxH
+// frames. Software (CPU) is used deliberately: the hardware decoder shares the
+// bcm2835 codec block with the live encoder and dropped it 30->24fps, whereas
+// CPU decode (~35ms/keyframe) runs on spare cores and leaves the encoder at 30.
 function decode(stream: Buffer): Promise<Buffer[]> {
     return new Promise(resolve => {
         const gst = spawn("gst-launch-1.0", [
-            "-q", "fdsrc", "fd=0", "!", "h264parse", "!", "v4l2h264dec", "!",
+            "-q", "fdsrc", "fd=0", "!", "h264parse", "!", "avdec_h264", "!",
             "videoconvert", "!", "videoscale", "!", `video/x-raw,format=GRAY8,width=${W},height=${H}`, "!",
             "fdsink", "fd=1",
         ], { stdio: ["pipe", "pipe", "ignore"] });

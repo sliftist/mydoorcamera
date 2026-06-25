@@ -284,6 +284,17 @@ const Trackbar = observer(class extends preact.Component { render() {
                 {c.badRanges.map((r, i) => (
                     <div key={"b" + i} title="conflicting / bad data" style={{ position: "absolute", top: 0, bottom: 0, left: pct(r.start), width: wpct(r.start, r.end), background: "repeating-linear-gradient(45deg, hsl(0,70%,42%), hsl(0,70%,42%) 6px, hsl(0,70%,26%) 6px, hsl(0,70%,26%) 12px)" }} />
                 ))}
+                {/* Activity line chart: max activity per minute, scaled to the day's peak. */}
+                {(() => {
+                    const act = c.activity || [];
+                    const scale = Math.max(0.05, ...act, 0);
+                    const pts = act.map((v, i) => `${i},${(100 - Math.min(1, v / scale) * 100).toFixed(1)}`).join(" ");
+                    return (
+                        <svg viewBox="0 0 1440 100" preserveAspectRatio="none" style={{ position: "absolute", inset: 0, width: "100%", height: "100%", pointerEvents: "none" }}>
+                            <polyline points={pts} fill="none" stroke="hsl(50,100%,65%)" strokeWidth={1} vectorEffect="non-scaling-stroke" opacity={0.9} />
+                        </svg>
+                    );
+                })()}
                 <div style={{ position: "absolute", top: 0, bottom: 0, left: pct(state.desiredWall), width: "2px", background: "hsl(45,100%,58%)" }} title="seek target" />
                 <div style={{ position: "absolute", top: 0, bottom: 0, left: pct(state.playWall), width: "2px", background: "hsl(210,100%,66%)" }} title="playing" />
                 {state.hoverWall != null && (
