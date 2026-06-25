@@ -40,10 +40,12 @@ export class DayPlayer {
     private status: PlayStatus = "paused";
     private live = false;
     private firstLive = true;
+    private lastReceivedEnd = 0; // max end-time of any GOP received from the live stream
 
     onStatus: ((s: PlayStatus) => void) | undefined;
     onTime: ((wallMs: number) => void) | undefined;
     onRate: ((rate: number) => void) | undefined;
+    onBuffer: ((sec: number) => void) | undefined;
 
     constructor(
         public video: HTMLVideoElement,
@@ -244,6 +246,7 @@ export class DayPlayer {
 
     async startLive(): Promise<void> {
         this.live = true; this.intent = "play"; this.firstLive = true;
+        this.lastReceivedEnd = 0;
         this.teardownMse(); // fresh timeline starting at the live edge
         try { await this.api.startStream(this.dayParts.join("/"), (meta, bytes) => void this.onLiveData(meta, bytes)); }
         catch (e) { this.live = false; throw e; }
@@ -254,6 +257,7 @@ export class DayPlayer {
         this.live = false;
         try { this.video.playbackRate = 1; } catch { /* */ }
         this.onRate?.(1);
+        this.onBuffer?.(0);
         try { await this.api.stopStream(); } catch { /* */ }
         this.intent = "pause"; this.refreshStatus();
     }
@@ -266,8 +270,12 @@ export class DayPlayer {
         this.sb = this.ms.addSourceBuffer(`video/mp4; codecs="${codecFromSps(nals)}"`);
     }
 
+    private bufferedSec(): number { return Math.max(0, (this.lastReceivedEnd - this.currentWall()) / 1000); }
+
     private async onLiveData(meta: { t: number; e: number; n: number }, bytes: Uint8Array): Promise<void> {
         if (!this.live) return;
+        this.lastReceivedEnd = Math.max(this.lastReceivedEnd, meta.e); // count all received data, even pre-append
+        this.onBuffer?.(this.bufferedSec());
         const nals = splitFramedNals(Buffer.from(bytes));
         await this.ensureSourceBufferWithNals(nals);
         if (this.appended.has(meta.t)) return;
@@ -294,6 +302,7 @@ export class DayPlayer {
         else if (ahead < 1.7) rate = 0.99;
         if (Math.abs(this.video.playbackRate - rate) > 0.001) { try { this.video.playbackRate = rate; } catch { /* */ } }
         this.onRate?.(this.video.playbackRate);
+        this.onBuffer?.(this.bufferedSec());
         this.evictBefore(this.video.currentTime - 20);
     }
 

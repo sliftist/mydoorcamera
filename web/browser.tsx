@@ -36,6 +36,7 @@ const state = observable({
     playStatus: "paused" as PlayStatus,
     live: false,
     playbackRate: 1,
+    bufferSec: 0,
 }, undefined, { deep: false });
 
 let api: CameraApi | undefined;
@@ -147,6 +148,7 @@ function maybeStartDayPlayer(): void {
     player.onTime = (wall) => runInAction(() => { state.playWall = wall; });
     player.onStatus = (s) => runInAction(() => { state.playStatus = s; });
     player.onRate = (r) => runInAction(() => { state.playbackRate = r; });
+    player.onBuffer = (s) => runInAction(() => { state.bufferSec = s; });
     player.seekTo(state.desiredWall); // show the initial / resumed frame (paused), set by selectDay
 }
 
@@ -366,24 +368,29 @@ const Calendar = observer(class extends preact.Component { render() {
 const DayView = observer(class extends preact.Component { render() {
     const noFootage = state.coverage && state.coverage.ranges.length === 0;
     return (
-        <div className={css.vbox(16).width("100%").maxWidth(900).alignItems("center")}>
-            <video ref={(el: any) => { videoEl = el; if (el) maybeStartDayPlayer(); }}
-                className={css.width("100%").background("#000").maxHeight("68vh")} playsInline muted
-                style={{ cursor: "pointer" }}
-                onMouseDown={(e: any) => { e.preventDefault(); player?.togglePlay(); saveUrlPosition(state.playWall); }} />
-            {state.live
-                ? <div className={css.hbox(14).alignItems("center").width("100%")}>
-                    <span className={css.color("hsl(0,85%,62%)").fontSize(15)}>● LIVE</span>
-                    <button className={playBtnCss} onMouseDown={(e: any) => { e.preventDefault(); void exitLive(); }}>Exit Live</button>
-                    <span className={css.fontSize(13)} style={{ color: rateColor(state.playbackRate) }}>{rateLabel(state.playbackRate)}</span>
-                </div>
-                : state.coverage
-                    ? <div className={css.vbox(8).width("100%")}><Trackbar /><Controls /></div>
-                    : <div className={css.opacity(0.6).fontSize(13)}>Select a day below…</div>}
+        <div className={css.vbox(14).width("100%").alignItems("center")}>
+            {/* Player fills the first viewport; the date picker is below the fold. */}
+            <div className={css.vbox(10).width("100%").maxWidth(1200).alignItems("center")}
+                style={{ minHeight: "100vh", justifyContent: "center", padding: "8px 12px", boxSizing: "border-box" }}>
+                <video ref={(el: any) => { videoEl = el; if (el) maybeStartDayPlayer(); }} playsInline muted
+                    style={{ width: "100%", maxWidth: "1200px", maxHeight: "calc(100vh - 150px)", aspectRatio: "16 / 9", background: "#000", objectFit: "contain", cursor: "pointer" }}
+                    onMouseDown={(e: any) => { e.preventDefault(); player?.togglePlay(); saveUrlPosition(state.playWall); }} />
+                {state.live
+                    ? <div className={css.hbox(14).alignItems("center").width("100%")}>
+                        <span className={css.color("hsl(0,85%,62%)").fontSize(15)}>● LIVE</span>
+                        <button className={playBtnCss} onMouseDown={(e: any) => { e.preventDefault(); void exitLive(); }}>Exit Live</button>
+                        <span className={css.fontSize(13)} style={{ color: rateColor(state.playbackRate) }}>{rateLabel(state.playbackRate)}</span>
+                        <span className={css.fontSize(13).opacity(0.8)}>buffered {state.bufferSec.toFixed(1)}s</span>
+                    </div>
+                    : state.coverage
+                        ? <div className={css.vbox(8).width("100%")}><Trackbar /><Controls /></div>
+                        : <div className={css.opacity(0.6).fontSize(13)}>Select a day below…</div>}
+            </div>
             {!state.live && <div className={css.fontSize(13).opacity(0.75)}>
                 {state.day ? state.day.replace(/\//g, "-") : "No day selected"}{noFootage ? " · no footage this day" : ""}
             </div>}
             {!state.live && <Calendar />}
+            <div style={{ height: "48px" }} />
         </div>
     );
 } });
@@ -391,14 +398,17 @@ const DayView = observer(class extends preact.Component { render() {
 const App = observer(class extends preact.Component {
     render() {
         return (
-            <div className={css.vbox(20).alignItems("center").minHeight("100vh").pad2(28, 16)}>
-                {state.view === "connect" ? <ConnectView /> : <DayView />}
-                <div className={css.hbox(12).wrap.center.fontSize(11).opacity(0.5)}>
-                    {state.view === "browse" && !state.online && <span className={css.color("hsl(40,95%,62%)")}>● reconnecting…</span>}
-                    {state.stats && <span>{formatStats(state.stats)}</span>}
-                    <span>Build {formatDateTime(BUILD_TIMESTAMP)}</span>
+            <preact.Fragment>
+                {state.view === "connect"
+                    ? <div className={css.vbox(0).alignItems("center")} style={{ minHeight: "100vh", justifyContent: "center", padding: "24px", boxSizing: "border-box" }}><ConnectView /></div>
+                    : <DayView />}
+                {/* Stats + build pinned bottom-right, unaffected by scrolling. */}
+                <div style={{ position: "fixed", right: "8px", bottom: "6px", fontSize: "11px", color: "rgba(255,255,255,0.65)", textAlign: "right", background: "rgba(0,0,0,0.45)", padding: "3px 8px", borderRadius: "4px", pointerEvents: "none", lineHeight: "1.5", maxWidth: "92vw" }}>
+                    {state.view === "browse" && !state.online && <div style={{ color: "hsl(40,95%,62%)" }}>● reconnecting…</div>}
+                    {state.stats && <div>{formatStats(state.stats)}</div>}
+                    <div>Build {formatDateTime(BUILD_TIMESTAMP)}</div>
                 </div>
-            </div>
+            </preact.Fragment>
         );
     }
 });
