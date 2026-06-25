@@ -12,11 +12,13 @@ import { splitFramedNals } from "./annexb";
 
 const W = 64, H = 36, FRAME = W * H;   // tiny grayscale frame
 const NOISE = 16;                       // per-pixel change below this is treated as sensor noise
-const BATCH = 2;                        // 2/s: keeps up with live (1/s) + slow backfill, minimal CPU
-const PERIOD_MS = 1000;                 // while leaving the shared codec block mostly free for the encoder
+const PENDING_LIMIT = 12;               // records examined per pass
+const PERIOD_MS = 1000;
+const SAMPLE_INTERVAL_MS = 3000;        // only decode/diff one keyframe every ~3s (the rest get 0)
 const START_CODE = Buffer.from([0, 0, 0, 1]);
 
 let prevFrame: Buffer | undefined;
+let lastSampledT = -Infinity;
 
 // Extract SPS+PPS+IDR of a GOP as an Annex-B access unit.
 function keyframeAU(parts: string[], g: GopEntry): Buffer {
@@ -63,25 +65,32 @@ function activityOf(cur: Buffer, prev?: Buffer): number {
 
 async function loop(): Promise<void> {
     let pending: ReturnType<typeof findPendingActivity> = [];
-    try { pending = findPendingActivity(BATCH); } catch { /* */ }
+    try { pending = findPendingActivity(PENDING_LIMIT); } catch { /* */ }
     if (!pending.length) { setTimeout(loop, PERIOD_MS); return; }
 
-    let frames: Buffer[] = [];
-    try { frames = await decode(Buffer.concat(pending.map(p => keyframeAU(p.parts, p.gop)))); }
-    catch { /* */ }
+    // Sample at most one keyframe per SAMPLE_INTERVAL_MS; the skipped GOPs in
+    // between are written 0 (the per-minute max chart only needs occasional samples).
+    const toSample: typeof pending = [];
+    for (const p of pending) {
+        if (p.gop.t - lastSampledT >= SAMPLE_INTERVAL_MS) { toSample.push(p); lastSampledT = p.gop.t; }
+        else { try { writeActivity(p.parts, p.idxFile, p.start, 0); } catch { /* */ } }
+    }
+    if (!toSample.length) { setTimeout(loop, PERIOD_MS); return; }
 
+    let frames: Buffer[] = [];
+    try { frames = await decode(Buffer.concat(toSample.map(p => keyframeAU(p.parts, p.gop)))); }
+    catch { /* */ }
     if (frames.length === 0) {
-        // Couldn't decode the head GOP — mark it 0 so we make forward progress.
-        try { writeActivity(pending[0].parts, pending[0].idxFile, pending[0].start, 0); } catch { /* */ }
+        try { writeActivity(toSample[0].parts, toSample[0].idxFile, toSample[0].start, 0); } catch { /* */ }
         setTimeout(loop, PERIOD_MS); return;
     }
-    const k = Math.min(frames.length, pending.length);
+    const k = Math.min(frames.length, toSample.length);
     for (let i = 0; i < k; i++) {
         const a = activityOf(frames[i], prevFrame);
         prevFrame = frames[i];
-        try { writeActivity(pending[i].parts, pending[i].idxFile, pending[i].start, a); } catch { /* */ }
+        try { writeActivity(toSample[i].parts, toSample[i].idxFile, toSample[i].start, a); } catch { /* */ }
     }
-    setTimeout(loop, PERIOD_MS); // (records k.. retried next pass)
+    setTimeout(loop, PERIOD_MS);
 }
 
 console.log("[activity] worker started");

@@ -38,6 +38,7 @@ export class DayPlayer {
     private shownWall = -1;
     private pumping = false;
     private status: PlayStatus = "paused";
+    private speed = 1;                  // playback speed for non-live review (1/16 .. 16)
     private live = false;
     private firstLive = true;
     private lastReceivedEnd = 0; // max end-time of any GOP received from the live stream
@@ -83,6 +84,13 @@ export class DayPlayer {
     play(): void { this.intent = "play"; this.refreshStatus(); void this.startPlaybackFrom(this.currentWall()); }
     pause(): void { this.intent = "pause"; try { this.video.pause(); } catch { /* */ } this.refreshStatus(); }
 
+    // Playback speed for review. Higher speed -> buffer proportionally more ahead.
+    setSpeed(s: number): void {
+        this.speed = s;
+        if (!this.live) { try { this.video.playbackRate = s; } catch { /* */ } }
+    }
+    private bufferWindowMs(): number { return Math.min(60_000, Math.max(8_000, 15_000 * this.speed)); }
+
     // ---- seeking (click / drag / arrows) ----
     seekTo(wall: number): void {
         this.targetWall = Math.max(this.dayStartMs, Math.min(this.dayStartMs + DAY_MS - 1, wall));
@@ -109,7 +117,7 @@ export class DayPlayer {
         // playback; if paused, still prebuffer a few seconds so hitting play (or a
         // resume) starts immediately.
         if (this.intent === "play") void this.startPlaybackFrom(this.targetWall);
-        else void this.loadRange(this.targetWall, this.targetWall + PREBUFFER_MS).catch(() => { /* */ });
+        else void this.loadRange(this.targetWall, this.targetWall + PREBUFFER_MS * Math.max(1, this.speed)).catch(() => { /* */ });
     }
 
     private async showFrameAt(wall: number): Promise<void> {
@@ -141,9 +149,10 @@ export class DayPlayer {
         const target = await this.gopAt(wall);
         if (!target) { this.setStatus("unavailable"); return; }
         await this.ensureSourceBuffer(target);
-        await this.loadRange(wall, wall + 12_000).catch(() => { /* */ });
+        await this.loadRange(wall, wall + this.bufferWindowMs()).catch(() => { /* */ });
         if (this.intent !== "play") return;
         if (Math.abs(this.currentWall() - wall) > 1500) { try { this.video.currentTime = this.internalSec(wall); } catch { /* */ } }
+        try { this.video.playbackRate = this.speed; } catch { /* */ }
         try { await this.video.play(); } catch { /* gesture needed */ }
         this.refreshStatus();
     }
@@ -159,7 +168,7 @@ export class DayPlayer {
         const wall = this.currentWall();
         this.onTime?.(wall);
         if (this.intent === "play" && !this.video.paused && !this.pumping) {
-            void this.loadRange(wall, wall + 15_000).catch(() => { /* */ });
+            void this.loadRange(wall, wall + this.bufferWindowMs()).catch(() => { /* */ });
             this.evictBefore(this.video.currentTime - 90);
         }
         this.refreshStatus();

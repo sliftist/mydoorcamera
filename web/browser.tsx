@@ -37,6 +37,7 @@ const state = observable({
     live: false,
     playbackRate: 1,
     bufferSec: 0,
+    speed: 1,
 }, undefined, { deep: false });
 
 let api: CameraApi | undefined;
@@ -337,10 +338,18 @@ const Controls = observer(class extends preact.Component { render() {
             </button>
             <span className={css.fontSize(13).width(110)} style={{ color: statusColor(state.playStatus) }}>{statusLabel(state.playStatus)}</span>
             <span className={css.fontSize(12).opacity(0.6).flexGrow(1)}>← → seek 5s</span>
+            <span className={css.fontSize(13).opacity(0.7)}>⏩</span>
+            <select className={selectCss} value={String(state.speed)}
+                onChange={(e: any) => { const s = Number(e.target.value); runInAction(() => { state.speed = s; }); player?.setSpeed(s); }}>
+                {SPEEDS.map(s => <option key={s} value={String(s)}>{speedLabel(s)}×</option>)}
+            </select>
             <button className={liveBtnCss} title="Jump to live" onMouseDown={(e: any) => { e.preventDefault(); void enterLive(); }}>● Live</button>
         </div>
     );
 } });
+
+const SPEEDS = [1 / 16, 1 / 8, 1 / 4, 1 / 2, 1, 2, 4, 8, 16];
+function speedLabel(s: number): string { return s < 1 ? `1/${Math.round(1 / s)}` : String(s); }
 
 const WEEKDAYS = ["S", "M", "T", "W", "T", "F", "S"];
 function shiftMonth(delta: number): void {
@@ -442,6 +451,7 @@ const btnCss = css.fontSize(15).pad2(10, 18).hsl(220, 90, 55).color("white").bor
 const navBtnCss = css.fontSize(16).pad2(4, 12).hsl(220, 15, 18).color("inherit").border("1px solid hsl(220,15%,30%)").pointer.toString();
 const playBtnCss = css.fontSize(16).pad2(8, 16).hsl(220, 90, 55).color("white").border("none").pointer.toString();
 const liveBtnCss = css.fontSize(14).pad2(8, 14).hsl(0, 75, 48).color("white").border("none").pointer.toString();
+const selectCss = css.fontSize(13).pad2(6, 8).hsl(220, 15, 16).color("inherit").border("1px solid hsl(220,15%,30%)").pointer.toString();
 
 // Arrow keys seek ±5s (routed through the player's throttled seek-pump, so
 // holding them shows frames instead of endlessly buffering); space toggles play.
