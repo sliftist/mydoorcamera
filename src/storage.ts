@@ -1,31 +1,71 @@
-// On-disk video store (v2). Per capture session + hour we stream two files
-// side by side into the day's directory:
-//   YYYY/MM/DD/<HH>.<sessionId>.data   length-prefixed NAL bytes (one GOP after another)
-//   YYYY/MM/DD/<HH>.<sessionId>.idx    one JSON line per GOP: {t,e,o,l,n}
+// On-disk video store (v3). Per capture session + hour, two files stream side by
+// side into the day's directory:
+//   YYYY/MM/DD/<HH>.<sessionId>.data   length-prefixed NAL bytes (GOP after GOP)
+//   YYYY/MM/DD/<HH>.<sessionId>.idx    BINARY index, one framed record per GOP
+//
+// Index record framing (all little-endian):
+//   [u32 len][ f64 × (len/8) ][u32 len]
+// The length is written as BOTH a prefix and a suffix, so a partially-written
+// trailing record (prefix present, body/suffix not) or a corrupted record
+// (prefix != suffix) is detected on read — we stop there and ignore everything
+// after. Fields are plain float64 (no bit-packing): [t, e, o, l, n, activity].
+// activity is -1 until a background worker computes it (so it can be backfilled
+// in place without touching the framing).
 //
 // A restart makes a new sessionId, so an hour can have several file pairs. On
-// read we combine them, ordered by sessionId (the stable "id"). Each GOP's
-// [t,e] interval is RESERVED by the first session to claim it; any later GOP
-// overlapping a reserved interval is dropped from the index (never served),
-// console.warn'd, and reported as a "bad range" so the UI can flag it. We expect
-// sessions to be end-to-end at worst; interlaced/overlapping data is the warning.
+// read we combine them ordered by sessionId, RESERVING each GOP's [t, next-t]
+// footprint; a later session overlapping a reserved range is dropped + warned
+// (interlaced data) and reported as a "bad range".
 
 import * as fs from "fs";
 import * as path from "path";
-import { DATA_DIR, RETENTION_BYTES, FPS } from "./config";
+import { DATA_DIR, RETENTION_BYTES } from "./config";
 import { frameNal } from "./annexb";
 
 export type Range = { start: number; end: number };
-export type GopEntry = { t: number; e: number; f: string; o: number; l: number; n: number };
+export type GopEntry = { t: number; e: number; f: string; o: number; l: number; n: number; a: number };
 export type HourIndex = { gops: GopEntry[]; badRanges: Range[] };
-export type DayCoverage = { dayStartMs: number; dayEndMs: number; ranges: Range[]; badRanges: Range[] };
+export type DayCoverage = { dayStartMs: number; dayEndMs: number; ranges: Range[]; badRanges: Range[]; activity: number[] };
+
+const FIELD_COUNT = 6;                 // t, e, o, l, n, activity
+const REC_BYTES = 4 + FIELD_COUNT * 8 + 4;
+const ACTIVITY_FIELD = 5;              // index of the activity float within a record
+export const ACTIVITY_BYTE_OFFSET = 4 + ACTIVITY_FIELD * 8; // byte offset of activity within a record
+const ACT_BUCKETS = 1440;              // per-minute activity buckets for the day chart
 
 function pad2(n: number): string { return String(n).padStart(2, "0"); }
 function dayPartsOf(ms: number): string[] { const d = new Date(ms); return [String(d.getFullYear()), pad2(d.getMonth() + 1), pad2(d.getDate())]; }
 function hourOf(ms: number): string { return pad2(new Date(ms).getHours()); }
 
-// Merge overlapping/adjacent ranges. joinMs bridges small gaps (consecutive GOPs
-// sit ~1/fps apart, so continuous footage shows as one band, not hundreds).
+function encodeRecord(t: number, e: number, o: number, l: number, n: number, a: number): Buffer {
+    const buf = Buffer.allocUnsafe(REC_BYTES);
+    const body = FIELD_COUNT * 8;
+    buf.writeUInt32LE(body, 0);
+    const vals = [t, e, o, l, n, a];
+    for (let i = 0; i < FIELD_COUNT; i++) buf.writeDoubleLE(vals[i], 4 + i * 8);
+    buf.writeUInt32LE(body, 4 + body);
+    return buf;
+}
+
+// Parse framed records from `buf`. Returns each record's fields, the byte offset
+// of each record's start (within buf), and how many bytes were validly consumed.
+function decodeRecords(buf: Buffer, dataFile: string): { gops: GopEntry[]; starts: number[]; consumed: number } {
+    const gops: GopEntry[] = [];
+    const starts: number[] = [];
+    let p = 0;
+    while (p + 4 <= buf.length) {
+        const len = buf.readUInt32LE(p);
+        if (len <= 0 || len % 8 !== 0 || p + 4 + len + 4 > buf.length) break; // partial / not yet fully written
+        if (buf.readUInt32LE(p + 4 + len) !== len) break;                     // corruption: prefix != suffix -> stop
+        const v: number[] = [];
+        for (let i = 0; i < len / 8; i++) v.push(buf.readDoubleLE(p + 4 + i * 8));
+        gops.push({ t: v[0], e: v[1], f: dataFile, o: v[2], l: v[3], n: v[4], a: v.length > 5 ? v[5] : -1 });
+        starts.push(p);
+        p += 4 + len + 4;
+    }
+    return { gops, starts, consumed: p };
+}
+
 function mergeRanges(rs: Range[], joinMs = 0): Range[] {
     if (!rs.length) return [];
     const s = [...rs].sort((a, b) => a.start - b.start);
@@ -38,35 +78,35 @@ function mergeRanges(rs: Range[], joinMs = 0): Range[] {
     return out;
 }
 
-// Unique per process run — distinguishes file pairs written across restarts.
 const SESSION = Date.now();
 
 export class StorageWriter {
-    private dayDir = "";
-    private hour = "";
+    private dataDir = "";
+    private dataHour = "";
     private dataPath = "";
-    private idxPath = "";
     private offset = 0;
 
-    private ensureTarget(ms: number): void {
+    private ensureDataTarget(ms: number): void {
         const dir = path.join(DATA_DIR, ...dayPartsOf(ms));
         const hh = hourOf(ms);
-        if (dir === this.dayDir && hh === this.hour) return;
+        if (dir === this.dataDir && hh === this.dataHour) return;
         fs.mkdirSync(dir, { recursive: true });
-        this.dayDir = dir; this.hour = hh;
+        this.dataDir = dir; this.dataHour = hh;
         this.dataPath = path.join(dir, `${hh}.${SESSION}.data`);
-        this.idxPath = path.join(dir, `${hh}.${SESSION}.idx`);
         try { this.offset = fs.statSync(this.dataPath).size; } catch { this.offset = 0; }
     }
 
-    // One self-contained GOP: [SPS, PPS, IDR, ...frames]; timeMs = keyframe wall-clock.
-    writeGop(nals: Buffer[], timeMs: number, frameCount: number): void {
-        this.ensureTarget(timeMs);
+    // Write the GOP bytes (data first), then the framed index record. activity
+    // starts at -1; the activity worker backfills it in place later.
+    writeGop(nals: Buffer[], timeMs: number, frameCount: number, activity = -1): void {
+        this.ensureDataTarget(timeMs);
         const body = Buffer.concat(nals.map(frameNal));
         fs.appendFileSync(this.dataPath, body);
-        const e = timeMs + Math.round((frameCount / FPS) * 1000);
-        fs.appendFileSync(this.idxPath, JSON.stringify({ t: timeMs, e, o: this.offset, l: body.length, n: frameCount }) + "\n");
+        const o = this.offset;
         this.offset += body.length;
+        const e = timeMs + Math.round((frameCount / 30) * 1000);
+        const idxPath = path.join(DATA_DIR, ...dayPartsOf(timeMs), `${hourOf(timeMs)}.${SESSION}.idx`);
+        fs.appendFileSync(idxPath, encodeRecord(timeMs, e, o, body.length, frameCount, activity));
     }
 }
 
@@ -87,17 +127,22 @@ export function getAvailableDays(): string[] {
     return out;
 }
 
-// Combine every session file for one hour, applying the reservation rule.
+function readIdxFile(parts: string[], idxFile: string): GopEntry[] {
+    try {
+        const buf = fs.readFileSync(path.join(DATA_DIR, ...parts, idxFile));
+        return decodeRecords(buf, idxFile.slice(0, -4) + ".data").gops;
+    } catch { return []; }
+}
+
 export function combineHour(parts: string[]): HourIndex {
     const [y, mo, d, hh] = parts;
     const dir = path.join(DATA_DIR, y, mo, d);
     let files: string[];
     try { files = fs.readdirSync(dir); } catch { return { gops: [], badRanges: [] }; }
-
     const idxFiles = files
         .filter(f => f.startsWith(hh + ".") && f.endsWith(".idx"))
         .map(f => ({ f, session: Number(f.split(".")[1]) || 0 }))
-        .sort((a, b) => a.session - b.session); // stable order by session id
+        .sort((a, b) => a.session - b.session);
 
     const reserved: Range[] = [];
     const gops: GopEntry[] = [];
@@ -110,27 +155,18 @@ export function combineHour(parts: string[]): HourIndex {
     };
 
     for (const { f } of idxFiles) {
-        const dataFile = f.slice(0, -4) + ".data";
-        let recs: any[];
-        try { recs = fs.readFileSync(path.join(dir, f), "utf8").split("\n").filter(Boolean).map(l => JSON.parse(l)); }
-        catch { continue; }
+        const recs = readIdxFile([y, mo, d], f);
         for (let i = 0; i < recs.length; i++) {
             const rec = recs[i];
-            // Footprint = up to the NEXT keyframe in this session (its real coverage),
-            // so consecutive GOPs tile exactly instead of falsely overlapping when the
-            // frame-rate estimate (rec.e) drifts from the true spacing. Only genuine
-            // cross-session overlap (a restart re-recording covered time) is flagged.
-            const footEnd = i + 1 < recs.length ? recs[i + 1].t : rec.e;
+            const footEnd = i + 1 < recs.length ? recs[i + 1].t : rec.e; // real coverage = up to next keyframe
             if (overlaps(rec.t, footEnd)) { bad.push({ start: rec.t, end: footEnd }); continue; }
             reserve(rec.t, footEnd);
-            gops.push({ t: rec.t, e: rec.e, f: dataFile, o: rec.o, l: rec.l, n: rec.n });
+            gops.push(rec);
         }
     }
     gops.sort((a, b) => a.t - b.t);
     const badRanges = mergeRanges(bad);
-    if (badRanges.length) {
-        console.warn(`[storage] interlaced/overlapping data in ${y}/${mo}/${d} ${hh}h: ${bad.length} conflicting GOP(s) ignored across ${badRanges.length} range(s)`);
-    }
+    if (badRanges.length) console.warn(`[storage] interlaced/overlapping data in ${y}/${mo}/${d} ${hh}h: ${bad.length} GOP(s) ignored`);
     return { gops, badRanges };
 }
 
@@ -140,18 +176,29 @@ export function getDayCoverage(parts: string[]): DayCoverage {
     const dayEndMs = dayStartMs + 24 * 3600 * 1000;
     const good: Range[] = [];
     const bad: Range[] = [];
+    const activity = new Array(ACT_BUCKETS).fill(0);
     for (let h = 0; h < 24; h++) {
         const { gops, badRanges } = combineHour([y, mo, d, pad2(h)]);
-        for (const g of gops) good.push({ start: g.t, end: g.e });
+        for (const g of gops) {
+            good.push({ start: g.t, end: g.e });
+            if (g.a >= 0) {
+                const b = Math.min(ACT_BUCKETS - 1, Math.max(0, Math.floor((g.t - dayStartMs) / 60000)));
+                if (g.a > activity[b]) activity[b] = g.a;
+            }
+        }
         bad.push(...badRanges);
     }
-    // Bridge sub-2.5s gaps so continuous capture is one band; bigger gaps = real dropouts.
-    return { dayStartMs, dayEndMs, ranges: mergeRanges(good, 2500), badRanges: mergeRanges(bad) };
+    return { dayStartMs, dayEndMs, ranges: mergeRanges(good, 2500), badRanges: mergeRanges(bad), activity };
+}
+
+export function readGopBytes(parts: string[], file: string, off: number, len: number): Buffer {
+    const fd = fs.openSync(path.join(DATA_DIR, ...parts, file), "r");
+    try { const b = Buffer.allocUnsafe(len); fs.readSync(fd, b, 0, len, off); return b; }
+    finally { fs.closeSync(fd); }
 }
 
 // ---- live streaming helpers ----
 
-// The most-recently-written index file for a day (the live edge).
 export function latestIdxFile(parts: string[]): string | undefined {
     const dir = path.join(DATA_DIR, ...parts);
     let files: string[]; try { files = fs.readdirSync(dir); } catch { return undefined; }
@@ -163,10 +210,7 @@ export function latestIdxFile(parts: string[]): string | undefined {
     return best;
 }
 
-// Read COMPLETE index records appended after `fromByte`. A partially-written
-// trailing line (no \n yet) is left for next time. `ends[i]` is the byte offset
-// just past record i's line, so a caller can advance only through records it
-// actually consumed.
+// Read complete framed records after `fromByte`; framing detects partial writes.
 export function readIdxIncremental(parts: string[], idxFile: string, fromByte: number): { records: GopEntry[]; ends: number[]; nextByte: number } {
     const p = path.join(DATA_DIR, ...parts, idxFile);
     let size: number; try { size = fs.statSync(p).size; } catch { return { records: [], ends: [], nextByte: fromByte }; }
@@ -175,48 +219,27 @@ export function readIdxIncremental(parts: string[], idxFile: string, fromByte: n
     try {
         const buf = Buffer.allocUnsafe(size - fromByte);
         fs.readSync(fd, buf, 0, size - fromByte, fromByte);
-        const text = buf.toString("utf8");
-        const lastNl = text.lastIndexOf("\n");
-        if (lastNl < 0) return { records: [], ends: [], nextByte: fromByte };
-        const complete = text.slice(0, lastNl);
-        const dataFile = idxFile.slice(0, -4) + ".data";
-        const records: GopEntry[] = [], ends: number[] = [];
-        let acc = fromByte;
-        for (const line of complete.split("\n")) {
-            acc += Buffer.byteLength(line, "utf8") + 1;
-            if (!line) continue;
-            try { const r = JSON.parse(line); records.push({ t: r.t, e: r.e, f: dataFile, o: r.o, l: r.l, n: r.n }); ends.push(acc); } catch { /* */ }
-        }
-        return { records, ends, nextByte: acc };
+        const { gops, starts, consumed } = decodeRecords(buf, idxFile.slice(0, -4) + ".data");
+        const ends = starts.map((s, i) => fromByte + (i + 1 < starts.length ? starts[i + 1] : consumed));
+        return { records: gops, ends, nextByte: fromByte + consumed };
     } finally { fs.closeSync(fd); }
 }
 
-// True once the GOP's bytes are actually on disk (data is written before index,
-// but guard anyway so a reader never serves a hole).
 export function dataReady(parts: string[], dataFile: string, o: number, l: number): boolean {
     try { return fs.statSync(path.join(DATA_DIR, ...parts, dataFile)).size >= o + l; } catch { return false; }
 }
 
-// Cheap change signature for a day (to detect new data for watchers).
 export function daySignature(parts: string[]): string {
     const dir = path.join(DATA_DIR, ...parts);
     let files: string[]; try { files = fs.readdirSync(dir); } catch { return ""; }
     let sig = "";
     for (const f of files.sort()) {
         if (!f.endsWith(".idx")) continue;
-        try { const s = fs.statSync(path.join(dir, f)); sig += `${f}:${s.size};`; } catch { /* */ }
+        try { const s = fs.statSync(path.join(dir, f)); sig += `${f}:${s.size}:${Math.round(s.mtimeMs)};`; } catch { /* */ }
     }
     return sig;
 }
 
-// `parts` is the day [Y,MM,DD]; `file` is the <HH>.<session>.data name.
-export function readGopBytes(parts: string[], file: string, off: number, len: number): Buffer {
-    const fd = fs.openSync(path.join(DATA_DIR, ...parts, file), "r");
-    try { const b = Buffer.allocUnsafe(len); fs.readSync(fd, b, 0, len, off); return b; }
-    finally { fs.closeSync(fd); }
-}
-
-// Rolling retention: delete oldest (day/hour/session) file pairs until under cap.
 export function enforceRetention(): { deleted: string[]; totalBytes: number } {
     const items: { data: string; idx: string; key: string; bytes: number }[] = [];
     for (const y of listChildren([])) for (const mo of listChildren([y])) for (const d of listChildren([y, mo])) {
@@ -236,7 +259,6 @@ export function enforceRetention(): { deleted: string[]; totalBytes: number } {
         try { fs.rmSync(it.data, { force: true }); fs.rmSync(it.idx, { force: true }); } catch { /* */ }
         total -= it.bytes; deleted.push(it.key);
     }
-    // prune now-empty day folders
     for (const y of listChildren([])) for (const mo of listChildren([y])) for (const d of listChildren([y, mo])) {
         const dir = path.join(DATA_DIR, y, mo, d);
         try { if (fs.readdirSync(dir).length === 0) fs.rmdirSync(dir); } catch { /* */ }
