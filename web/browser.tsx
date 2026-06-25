@@ -7,7 +7,7 @@ import { observer } from "sliftutils/render-utils/observer";
 import { configureMobxNextFrameScheduler } from "sliftutils/render-utils/mobxTyped";
 import { css, isNode } from "typesafecss";
 import { CameraApi, DayCoverage, Stats } from "./api";
-import { DayPlayer } from "./player";
+import { DayPlayer, PlayStatus } from "./player";
 import { formatDateTime } from "socket-function/src/formatting/format";
 import { BUILD_TIMESTAMP } from "../buildVersion";
 
@@ -33,6 +33,7 @@ const state = observable({
     hoverWall: null as number | null,
     stats: null as Stats | null,
     online: true,
+    playStatus: "paused" as PlayStatus,
 }, undefined, { deep: false });
 
 let api: CameraApi | undefined;
@@ -93,10 +94,12 @@ function maybeStartDayPlayer(): void {
     if (player && playerKey === state.day) return;
     teardownPlayer();
     playerKey = state.day;
-    player = new DayPlayer(videoEl, api, state.day.split("/"), state.coverage.dayStartMs);
+    player = new DayPlayer(videoEl, api, state.day.split("/"), state.coverage.dayStartMs, state.coverage.ranges);
     player.onTime = (wall) => runInAction(() => { state.playWall = wall; });
+    player.onStatus = (s) => runInAction(() => { state.playStatus = s; });
     const startWall = state.coverage.ranges.length ? state.coverage.ranges[0].start : state.coverage.dayStartMs;
-    void player.seek(startWall).catch(e => console.error("[player] seek failed:", e));
+    runInAction(() => { state.desiredWall = startWall; });
+    player.seekTo(startWall); // show an initial frame (paused)
 }
 
 function teardownPlayer(): void { if (player) { player.teardown(); player = undefined; } playerKey = ""; }
@@ -110,12 +113,40 @@ async function onReconnected(): Promise<void> {
         runInAction(() => { state.availableDays = days; });
         if (state.day) { const cov = await api.getDayCoverage(state.day.split("/")); runInAction(() => { state.coverage = cov; }); }
     } catch { /* ignore */ }
-    if (player) void player.seek(state.playWall).catch(() => { /* ignore */ });
+    if (player) player.seekTo(state.playWall);
 }
 
-function seekTo(wall: number): void {
+// Trackbar drag-seek. We seek on mousedown (responsive), keep seeking while
+// dragging, and the player's seek-pump throttles + shows frames.
+let trackEl: HTMLElement | null = null;
+let dragging = false;
+function clientToWall(clientX: number): number | undefined {
+    if (!trackEl || !state.coverage) return undefined;
+    const r = trackEl.getBoundingClientRect();
+    const f = Math.min(1, Math.max(0, (clientX - r.left) / r.width));
+    return state.coverage.dayStartMs + f * (state.coverage.dayEndMs - state.coverage.dayStartMs);
+}
+function seekToWall(wall: number): void {
     runInAction(() => { state.desiredWall = wall; });
-    void player?.seek(wall).catch(e => console.error("[player] seek failed:", e));
+    player?.seekTo(wall);
+}
+function onTrackDown(e: any): void {
+    if (!state.coverage) return;
+    e.preventDefault();
+    dragging = true;
+    const w = clientToWall(e.clientX); if (w != null) seekToWall(w);
+    window.addEventListener("mousemove", onTrackDrag);
+    window.addEventListener("mouseup", onTrackUp);
+}
+function onTrackDrag(e: MouseEvent): void {
+    if (!dragging) return;
+    const w = clientToWall(e.clientX);
+    if (w != null) { runInAction(() => { state.hoverWall = w; }); seekToWall(w); }
+}
+function onTrackUp(): void {
+    dragging = false;
+    window.removeEventListener("mousemove", onTrackDrag);
+    window.removeEventListener("mouseup", onTrackUp);
 }
 
 // ---- stats ----
@@ -167,12 +198,6 @@ const ConnectView = observer(class extends preact.Component { render() {
     );
 } });
 
-function trackFrac(e: any): number {
-    const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
-    return Math.min(1, Math.max(0, (e.clientX - r.left) / r.width));
-}
-function fracToWall(f: number): number { const c = state.coverage!; return c.dayStartMs + f * (c.dayEndMs - c.dayStartMs); }
-
 const Trackbar = observer(class extends preact.Component { render() {
     const c = state.coverage;
     if (!c) return <div />;
@@ -181,11 +206,12 @@ const Trackbar = observer(class extends preact.Component { render() {
     const wpct = (a: number, b: number) => (Math.max(0, (b - a) / span) * 100).toFixed(3) + "%";
     return (
         <div className={css.vbox(4).width("100%")}>
-            <div className={css.relative.width("100%").height(56).hsl(220, 15, 12).border("1px solid hsl(220,15%,28%)")}
+            <div ref={(el: any) => { trackEl = el; }}
+                className={css.relative.width("100%").height(56).hsl(220, 15, 12).border("1px solid hsl(220,15%,28%)")}
                 style={{ cursor: "pointer", userSelect: "none" }}
-                onMouseMove={(e: any) => { if (state.coverage) runInAction(() => { state.hoverWall = fracToWall(trackFrac(e)); }); }}
-                onMouseLeave={() => runInAction(() => { state.hoverWall = null; })}
-                onClick={(e: any) => { if (state.coverage) seekTo(fracToWall(trackFrac(e))); }}>
+                onMouseDown={onTrackDown}
+                onMouseMove={(e: any) => { const w = clientToWall(e.clientX); if (w != null) runInAction(() => { state.hoverWall = w; }); }}
+                onMouseLeave={() => { if (!dragging) runInAction(() => { state.hoverWall = null; }); }}>
                 {c.ranges.map((r, i) => (
                     <div key={i} style={{ position: "absolute", top: 0, bottom: 0, left: pct(r.start), width: wpct(r.start, r.end), background: "hsl(150,45%,30%)" }} />
                 ))}
@@ -202,6 +228,27 @@ const Trackbar = observer(class extends preact.Component { render() {
                 <span className={css.opacity(1)}>{clockHMS(state.hoverWall != null ? state.hoverWall : state.playWall)}</span>
                 <span>{clockHM(c.dayEndMs - 1)}</span>
             </div>
+        </div>
+    );
+} });
+
+function statusLabel(s: PlayStatus): string {
+    return s === "playing" ? "Playing" : s === "paused" ? "Paused" : s === "waiting" ? "Buffering…" : "No video here";
+}
+function statusColor(s: PlayStatus): string {
+    return s === "playing" ? "hsl(150,60%,62%)" : s === "waiting" ? "hsl(45,95%,62%)" : s === "unavailable" ? "hsl(0,75%,64%)" : "hsl(0,0%,72%)";
+}
+
+const Controls = observer(class extends preact.Component { render() {
+    const playing = state.playStatus === "playing";
+    return (
+        <div className={css.hbox(12).alignItems("center").width("100%")}>
+            <button className={playBtnCss} title="Play/Pause (space)"
+                onMouseDown={(e: any) => { e.preventDefault(); player?.togglePlay(); }}>
+                {playing ? "❚❚" : "►"}
+            </button>
+            <span className={css.fontSize(13).width(110)} style={{ color: statusColor(state.playStatus) }}>{statusLabel(state.playStatus)}</span>
+            <span className={css.fontSize(12).opacity(0.6)}>← → seek 5s</span>
         </div>
     );
 } });
@@ -258,8 +305,12 @@ const DayView = observer(class extends preact.Component { render() {
     return (
         <div className={css.vbox(16).width("100%").maxWidth(900).alignItems("center")}>
             <video ref={(el: any) => { videoEl = el; if (el) maybeStartDayPlayer(); }}
-                className={css.width("100%").background("#000").maxHeight("68vh")} controls playsInline muted />
-            {state.coverage ? <Trackbar /> : <div className={css.opacity(0.6).fontSize(13)}>Select a day below…</div>}
+                className={css.width("100%").background("#000").maxHeight("68vh")} playsInline muted
+                style={{ cursor: "pointer" }}
+                onMouseDown={(e: any) => { e.preventDefault(); player?.togglePlay(); }} />
+            {state.coverage
+                ? <div className={css.vbox(8).width("100%")}><Trackbar /><Controls /></div>
+                : <div className={css.opacity(0.6).fontSize(13)}>Select a day below…</div>}
             <div className={css.fontSize(13).opacity(0.75)}>
                 {state.day ? state.day.replace(/\//g, "-") : "No day selected"}{noFootage ? " · no footage this day" : ""}
             </div>
@@ -286,11 +337,29 @@ const App = observer(class extends preact.Component {
 const inputCss = css.fontSize(15).pad2(10, 12).hsl(220, 15, 16).color("inherit").border("1px solid hsl(220,15%,30%)").width("100%").toString();
 const btnCss = css.fontSize(15).pad2(10, 18).hsl(220, 90, 55).color("white").border("none").pointer.toString();
 const navBtnCss = css.fontSize(16).pad2(4, 12).hsl(220, 15, 18).color("inherit").border("1px solid hsl(220,15%,30%)").pointer.toString();
+const playBtnCss = css.fontSize(16).pad2(8, 16).hsl(220, 90, 55).color("white").border("none").pointer.toString();
+
+// Arrow keys seek ±5s (routed through the player's throttled seek-pump, so
+// holding them shows frames instead of endlessly buffering); space toggles play.
+function onKeyDown(e: KeyboardEvent): void {
+    if (state.view !== "browse" || !player || !state.coverage) return;
+    if (e.key === "ArrowRight" || e.key === "ArrowLeft") {
+        e.preventDefault();
+        const base = state.desiredWall || player.currentWall();
+        const w = base + (e.key === "ArrowRight" ? 5000 : -5000);
+        runInAction(() => { state.desiredWall = w; });
+        player.seekTo(w);
+    } else if (e.key === " ") {
+        e.preventDefault();
+        player.togglePlay();
+    }
+}
 
 function main(): void {
     configureMobxNextFrameScheduler();
     preact.render(<App />, document.getElementById("app")!);
     window.addEventListener("popstate", () => { if (state.view === "browse" && api) { const d = getUrlDay(); if (d) void selectDay(d, false); } });
+    window.addEventListener("keydown", onKeyDown);
     if (state.ip.trim() && state.password.trim()) void connect();
 }
 if (!isNode()) main();
