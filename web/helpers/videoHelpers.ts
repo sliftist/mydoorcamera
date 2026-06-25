@@ -43,6 +43,7 @@ export class DayPlayer {
     private targetWall: number;
     private shownWall = -1;
     private pumping = false;
+    private prebufferTimer: ReturnType<typeof setTimeout> | undefined; // deferred trailing-GOP prebuffer (paused seeks)
     private status: PlayStatus = "paused";
     private speed = 1;                  // playback speed for non-live review (1/16 .. 16)
     private live = false;
@@ -145,6 +146,7 @@ export class DayPlayer {
 
     // ---- seeking (click / drag / arrows) ----
     seekTo(wall: number): void {
+        if (this.prebufferTimer) { clearTimeout(this.prebufferTimer); this.prebufferTimer = undefined; } // a new seek cancels pending prebuffer
         this.targetWall = Math.max(this.dayStartMs, Math.min(this.spanEndMs - 1, wall));
         try { this.video.pause(); } catch { /* */ }   // static frames while seeking
         this.refreshStatus();
@@ -168,8 +170,12 @@ export class DayPlayer {
         // Settled on a target. If playing, kick off normal windowed buffering +
         // playback; if paused, still prebuffer a few seconds so hitting play (or a
         // resume) starts immediately.
-        if (this.intent === "play") void this.startPlaybackFrom(this.targetWall);
-        else void this.loadRange(this.targetWall, this.targetWall + PREBUFFER_MS * Math.max(1, this.speed)).catch(() => { /* */ });
+        if (this.intent === "play") { void this.startPlaybackFrom(this.targetWall); return; }
+        // Paused: the target frame is already rendered. DEFER the trailing prebuffer
+        // so a drag (which re-seeks) cancels it — we never download GOPs we're leaving.
+        if (this.prebufferTimer) clearTimeout(this.prebufferTimer);
+        const w = this.targetWall;
+        this.prebufferTimer = setTimeout(() => { void this.loadRange(w, w + PREBUFFER_MS * Math.max(1, this.speed)).catch(() => { /* */ }); }, 150);
     }
 
     private async showFrameAt(wall: number): Promise<void> {
@@ -453,6 +459,7 @@ export class DayPlayer {
 
     teardown(): void {
         this.destroyed = true; // stop the per-frame callback loop
+        if (this.prebufferTimer) clearTimeout(this.prebufferTimer);
         if (this.live) { this.live = false; try { void this.api.stopStream(); } catch { /* */ } }
         if (this.rateTimer) clearInterval(this.rateTimer);
         if (this.watchdogTimer) clearInterval(this.watchdogTimer);
