@@ -103,6 +103,27 @@ export async function setLevel(L: number): Promise<void> {
     saveUrlPosition(state.playWall);
 }
 
+// Jump to the previous (-1) / next (+1) bucket (period at this level), keeping the
+// current zoom span but positioning it at the bucket's start (next) or end (prev),
+// with the playhead at that edge (paused).
+export async function gotoBucket(dir: 1 | -1): Promise<void> {
+    if (!state.coverage) return;
+    const cur = state.coverage;
+    const curSpan = (state.viewStart && state.viewEnd) ? (state.viewEnd - state.viewStart) : (cur.dayEndMs - cur.dayStartMs);
+    const probe = dir === 1 ? cur.dayEndMs : cur.dayStartMs - 1; // a time inside the adjacent bucket
+    const { start, end } = periodBounds(state.level, probe);
+    const useSpan = Math.min(curSpan, end - start);
+    const vs = dir === 1 ? start : end - useSpan;
+    const ve = dir === 1 ? start + useSpan : end;
+    const pos = dir === 1 ? start : end - 1;
+    await selectPeriod(start, true, pos);
+    runInAction(() => {
+        state.viewStart = vs; state.viewEnd = ve;
+        if (state.index) state.viewActivity = { fromMs: vs, toMs: ve, activity: bucketActivity(state.index, vs, ve, 1440) };
+    });
+    saveUrlPosition(state.playWall);
+}
+
 // ---- URL params ----
 export function getUrlDay(): string { try { return new URLSearchParams(location.search).get("day") || ""; } catch { return ""; } }
 function speedSuffix(): string { return state.speed !== 1 ? `&speed=${state.speed}` : ""; }
