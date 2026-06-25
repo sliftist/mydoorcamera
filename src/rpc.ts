@@ -30,9 +30,13 @@ export interface Rpc {
     close(): void;
 }
 
+function rpcLog(dir: "→" | "←", type: string, verb: string): void {
+    try { console.log(`[rpc] ${dir} ${type} ${verb}`); } catch { /* ignore */ }
+}
+
 export function createRpc(channel: Channel, handlers: Handlers = {}): Rpc {
     let nextId = 1;
-    const pending = new Map<number, { resolve: (v: any) => void; reject: (e: any) => void }>();
+    const pending = new Map<number, { resolve: (v: any) => void; reject: (e: any) => void; method: string }>();
 
     channel.onMessage(async (data) => {
         let pkt: Packet;
@@ -40,6 +44,7 @@ export function createRpc(channel: Channel, handlers: Handlers = {}): Rpc {
         catch { return; }
 
         if (pkt.type === "call") {
+            rpcLog("←", "call", pkt.method);              // a call arrived for us to handle
             let reply: Packet;
             const handler = handlers[pkt.method];
             if (!handler) {
@@ -52,6 +57,7 @@ export function createRpc(channel: Channel, handlers: Handlers = {}): Rpc {
                     reply = { type: "result", id: pkt.id, error: { message: String(e?.message ?? e), stack: e?.stack } };
                 }
             }
+            rpcLog("→", "return", pkt.method);            // sending the result back
             try { channel.send(encode(reply)); } catch { /* socket gone */ }
             return;
         }
@@ -59,6 +65,7 @@ export function createRpc(channel: Channel, handlers: Handlers = {}): Rpc {
         if (pkt.type === "result") {
             const p = pending.get(pkt.id);
             if (!p) return;
+            rpcLog("←", "return", p.method);              // result arrived for a call we made
             pending.delete(pkt.id);
             if (pkt.error) {
                 const err = new Error(pkt.error.message);
@@ -79,7 +86,8 @@ export function createRpc(channel: Channel, handlers: Handlers = {}): Rpc {
         call(method, ...args) {
             return new Promise((resolve, reject) => {
                 const id = nextId++;
-                pending.set(id, { resolve, reject });
+                pending.set(id, { resolve, reject, method });
+                rpcLog("→", "call", method);              // making a call
                 try { channel.send(encode({ type: "call", id, method, args })); }
                 catch (e) { pending.delete(id); reject(e); }
             });

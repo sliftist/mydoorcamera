@@ -30,46 +30,58 @@ const LEVELS = ["Year", "Month", "Day", "Hour"];
 let api: CameraApi | undefined;
 let player: Player | undefined;
 let videoEl: HTMLVideoElement | null = null;
+let retryTimer: ReturnType<typeof setTimeout> | undefined;
 
 async function connect(): Promise<void> {
+    if (retryTimer) { clearTimeout(retryTimer); retryTimer = undefined; }
     runInAction(() => { state.error = ""; state.showCertLink = false; state.connecting = true; });
     try {
         api = new CameraApi(state.ip.trim());
         await api.connect(state.password);
         lsSet("mdc_ip", state.ip.trim());
         lsSet("mdc_pw", state.password);
-        const years = await api.listChildren([]);
-        runInAction(() => { state.view = "browse"; state.path = []; state.list = years; state.hourGops = []; });
+        runInAction(() => { state.view = "browse"; });
+        await navigateTo(getUrlPath(), false); // restore the drilled-in location from the URL
     } catch (e: any) {
         runInAction(() => { state.error = e?.message || String(e); state.showCertLink = !!e?.needsCert; });
+        // Only the connection error is transient (cert not accepted yet) — keep
+        // retrying so it connects the instant they accept it. Never retry a
+        // wrong password / blacklist.
+        if (e?.needsCert) retryTimer = setTimeout(() => void connect(), 2000);
     } finally {
         runInAction(() => { state.connecting = false; });
     }
 }
 
-async function descend(name: string): Promise<void> {
-    if (!api) return;
-    const path = [...state.path, name];
-    if (path.length === 4) { await openHour(path); return; }
-    const list = await api.listChildren(path);
-    runInAction(() => { state.path = path; state.list = list; state.hourGops = []; });
-    teardownPlayer();
+// Navigation lives in the URL (?at=YYYY/MM/DD/HH) so refresh, share, and the
+// browser back/forward buttons all preserve where you've drilled in.
+function setUrlPath(parts: string[]): void {
+    const at = parts.join("/");
+    try { history.pushState({}, "", at ? `?at=${at}` : location.pathname); } catch { /* ignore */ }
+}
+function getUrlPath(): string[] {
+    try { return (new URLSearchParams(location.search).get("at") || "").split("/").filter(Boolean); }
+    catch { return []; }
 }
 
-async function gotoLevel(depth: number): Promise<void> {
+// Central navigation: load the right data for `parts`, update state, and (unless
+// we're responding to a popstate) push the new URL.
+async function navigateTo(parts: string[], push = true): Promise<void> {
     if (!api) return;
-    const path = state.path.slice(0, depth);
-    const list = await api.listChildren(path);
-    runInAction(() => { state.path = path; state.list = list; state.hourGops = []; });
-    teardownPlayer();
+    if (push) setUrlPath(parts);
+    if (parts.length === 4) {
+        const gops = await api.getHourIndex(parts);
+        runInAction(() => { state.path = parts; state.hourGops = gops; state.playWall = gops.length ? gops[0].t : 0; });
+        setTimeout(() => startPlayer(parts, gops), 0); // wait for <video> to mount
+    } else {
+        const list = await api.listChildren(parts);
+        runInAction(() => { state.path = parts; state.list = list; state.hourGops = []; });
+        teardownPlayer();
+    }
 }
 
-async function openHour(path: string[]): Promise<void> {
-    if (!api) return;
-    const gops = await api.getHourIndex(path);
-    runInAction(() => { state.path = path; state.hourGops = gops; state.playWall = gops.length ? gops[0].t : 0; });
-    setTimeout(() => startPlayer(path, gops), 0); // wait for <video> to mount
-}
+function descend(name: string): void { void navigateTo([...state.path, name]); }
+function gotoLevel(depth: number): void { void navigateTo(state.path.slice(0, depth)); }
 
 function startPlayer(path: string[], gops: GopEntry[]): void {
     if (!api || !videoEl || !gops.length) return;
@@ -109,7 +121,7 @@ const ConnectView = observer(class extends preact.Component { render() {
                     {state.showCertLink && (
                         <a className={css.fontSize(14).pointer.color("hsl(210,95%,74%)")}
                             href={`https://${state.ip.trim()}:8443/`} target="_blank" rel="noreferrer">
-                            → Click here to open the certificate page and accept it, then connect again.
+                            → Click here to open the certificate page and accept it — it'll connect automatically.
                         </a>
                     )}
                 </div>
@@ -188,6 +200,8 @@ const chipCss = css.fontSize(15).pad2(8, 16).hsl(220, 15, 18).color("inherit").b
 function main(): void {
     configureMobxNextFrameScheduler();
     preact.render(<App />, document.getElementById("app")!);
+    // Back/forward navigates the drill path (which lives in ?at=).
+    window.addEventListener("popstate", () => { if (state.view === "browse" && api) void navigateTo(getUrlPath(), false); });
     // Auto-connect on revisit if we already know the IP + password (and the cert
     // was accepted before). Falls back to the connect screen on failure.
     if (state.ip.trim() && state.password.trim()) void connect();
