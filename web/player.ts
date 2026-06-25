@@ -1,8 +1,8 @@
-// MSE streaming player for one hour of footage. Each immutable GOP is muxed to a
-// fragment with mp4-typescript and placed on a shared media timeline via
-// mediaStartTimeSeconds = (gopTime - hourStart)/1000, so video.currentTime maps
-// directly to wall-clock within the hour and seeking Just Works. GOPs are fetched
-// and appended lazily as the playhead approaches them.
+// Day-based MSE streaming player. The media timeline spans the whole day
+// (video.currentTime = seconds since the day's local midnight), so the trackbar
+// can scrub anywhere in the day. GOP indexes are loaded lazily per hour and
+// GOPs are fetched/muxed/appended in a window around the playhead, across hour
+// boundaries. Old buffer behind the playhead is evicted to stay under quota.
 
 import { CameraApi, GopEntry } from "./api";
 import { splitFramedNals } from "../src/annexb";
@@ -11,102 +11,126 @@ import { FPS } from "../src/config";
 
 function codecFromSps(nals: Buffer[]): string {
     const sps = nals.find(n => (n[0] & 0x1f) === 7);
-    if (!sps || sps.length < 4) return "avc1.4D0028"; // main@4.0 fallback
+    if (!sps || sps.length < 4) return "avc1.4D0028";
     const hex = (b: number) => b.toString(16).padStart(2, "0");
     return `avc1.${hex(sps[1])}${hex(sps[2])}${hex(sps[3])}`;
 }
+function pad2(n: number): string { return String(n).padStart(2, "0"); }
 
-export class Player {
+export class DayPlayer {
     private ms: MediaSource | undefined;
     private sb: SourceBuffer | undefined;
-    private appended = new Set<number>();   // GOP indices already in the SourceBuffer
-    private queue: Buffer[] = [];            // append serialization (one at a time)
+    private appended = new Set<number>();          // gop.t values already in the buffer
+    private queue: Buffer[] = [];
     private flushing = false;
-    readonly hourStart: number;
-    readonly hourEnd: number;
+    private hourCache = new Map<string, GopEntry[]>();
+    onTime: ((wallMs: number) => void) | undefined;
 
-    constructor(public video: HTMLVideoElement, public api: CameraApi, public parts: string[], public gops: GopEntry[]) {
-        this.hourStart = gops.length ? gops[0].t : 0;
-        const last = gops[gops.length - 1];
-        this.hourEnd = last ? last.t + Math.round((last.n / FPS) * 1000) : this.hourStart;
+    constructor(public video: HTMLVideoElement, public api: CameraApi, public dayParts: string[], public dayStartMs: number) {
+        this.video.addEventListener("timeupdate", this.onTimeUpdate);
     }
 
-    durationSec(): number { return (this.hourEnd - this.hourStart) / 1000; }
-    private internalSec(wallMs: number): number { return (wallMs - this.hourStart) / 1000; }
+    private onTimeUpdate = (): void => {
+        const wall = this.dayStartMs + this.video.currentTime * 1000;
+        this.onTime?.(wall);
+        void this.loadRange(wall, wall + 15_000);
+        this.evictBefore(this.video.currentTime - 90);
+    };
 
-    // Index of the last GOP whose keyframe time is <= wallMs (binary search).
-    private findGopIdx(wallMs: number): number {
-        let lo = 0, hi = this.gops.length - 1, res = 0;
-        while (lo <= hi) {
-            const m = (lo + hi) >> 1;
-            if (this.gops[m].t <= wallMs) { res = m; lo = m + 1; } else hi = m - 1;
+    internalSec(wallMs: number): number { return (wallMs - this.dayStartMs) / 1000; }
+    private hourNumOf(wallMs: number): number { return Math.floor((wallMs - this.dayStartMs) / 3600_000); }
+    private gopDurMs(g: GopEntry): number { return Math.round((g.n / FPS) * 1000); }
+
+    private async ensureHour(hourNum: number): Promise<GopEntry[]> {
+        if (hourNum < 0 || hourNum > 23) return [];
+        const hh = pad2(hourNum);
+        if (!this.hourCache.has(hh)) {
+            try { this.hourCache.set(hh, await this.api.getHourIndex([...this.dayParts, hh])); }
+            catch { this.hourCache.set(hh, []); }
         }
-        return res;
+        return this.hourCache.get(hh)!;
     }
 
-    private async fetchNals(idx: number): Promise<Buffer[]> {
-        const g = this.gops[idx];
-        const data = await this.api.getGopData(this.parts, g.f, g.o, g.l);
+    // The GOP covering wallMs (last keyframe at/before it), else the nearest after.
+    private async gopAt(wallMs: number): Promise<{ hh: string; g: GopEntry } | undefined> {
+        const base = this.hourNumOf(wallMs);
+        for (let hn = base; hn >= Math.max(0, base - 3); hn--) {
+            const gops = await this.ensureHour(hn);
+            let found: GopEntry | undefined;
+            for (const g of gops) { if (g.t <= wallMs) found = g; else break; }
+            if (found) return { hh: pad2(hn), g: found };
+        }
+        for (let hn = base; hn <= Math.min(23, base + 3); hn++) {
+            const gops = await this.ensureHour(hn);
+            if (gops.length) return { hh: pad2(hn), g: gops[0] };
+        }
+        return undefined;
+    }
+
+    private async fetchNals(hh: string, g: GopEntry): Promise<Buffer[]> {
+        const data = await this.api.getGopData([...this.dayParts, hh], g.f, g.o, g.l);
         return splitFramedNals(Buffer.from(data));
     }
 
-    private enqueue(buf: Buffer): void { this.queue.push(buf); this.flushQueue(); }
-    private flushQueue(): void {
+    private enqueue(buf: Buffer): void { this.queue.push(buf); this.flush(); }
+    private flush(): void {
         if (this.flushing || !this.sb || this.sb.updating || !this.queue.length) return;
         this.flushing = true;
         const buf = this.queue.shift()!;
-        const done = () => { this.sb!.removeEventListener("updateend", done); this.flushing = false; this.flushQueue(); };
+        const done = () => { this.sb!.removeEventListener("updateend", done); this.flushing = false; this.flush(); };
         this.sb.addEventListener("updateend", done);
         try { this.sb.appendBuffer(buf as any); } catch { this.flushing = false; }
     }
 
-    private async appendGop(idx: number, nals?: Buffer[]): Promise<void> {
-        if (idx < 0 || idx >= this.gops.length || this.appended.has(idx)) return;
-        this.appended.add(idx);
-        const ns = nals || await this.fetchNals(idx);
-        const g = this.gops[idx];
+    private async appendGop(hh: string, g: GopEntry, nals?: Buffer[]): Promise<void> {
+        if (this.appended.has(g.t)) return;
+        this.appended.add(g.t);
+        const ns = nals || await this.fetchNals(hh, g);
         const mp4 = await H264toMP4({ buffer: ns, frameDurationInSeconds: 1 / FPS, mediaStartTimeSeconds: this.internalSec(g.t) });
         this.enqueue(Buffer.from(mp4.buffer));
     }
 
-    private async ensureStarted(idx: number): Promise<void> {
-        if (this.sb) return;
-        this.ms = new MediaSource();
-        this.video.src = URL.createObjectURL(this.ms);
-        await new Promise<void>(res => this.ms!.addEventListener("sourceopen", () => res(), { once: true }));
-        const nals = await this.fetchNals(idx);
-        this.sb = this.ms.addSourceBuffer(`video/mp4; codecs="${codecFromSps(nals)}"`);
-        await this.appendGop(idx, nals);
-        this.video.addEventListener("timeupdate", () => this.bufferAhead());
-    }
-
-    // Seek to a wall-clock time within the hour, decoding from the covering keyframe.
+    // Seek to a wall-clock time in the day and start playing from the covering keyframe.
     async seek(wallMs: number): Promise<void> {
-        if (!this.gops.length) return;
-        const idx = this.findGopIdx(wallMs);
-        await this.ensureStarted(idx);
-        await this.loadRange(this.gops[idx].t, this.gops[idx].t + 10_000); // ~10s ahead
-        this.video.currentTime = this.internalSec(this.gops[idx].t);
-        this.video.play().catch(() => { /* autoplay may be blocked until user gesture */ });
+        const target = await this.gopAt(wallMs);
+        if (!target) return;
+        const nals = await this.fetchNals(target.hh, target.g);
+        if (!this.sb) {
+            this.ms = new MediaSource();
+            this.video.src = URL.createObjectURL(this.ms);
+            await new Promise<void>(res => this.ms!.addEventListener("sourceopen", () => res(), { once: true }));
+            this.sb = this.ms.addSourceBuffer(`video/mp4; codecs="${codecFromSps(nals)}"`);
+        }
+        await this.appendGop(target.hh, target.g, nals);
+        await this.loadRange(target.g.t, target.g.t + 10_000);
+        this.video.currentTime = this.internalSec(target.g.t);
+        this.video.play().catch(() => { /* gesture may be required */ });
     }
 
-    // The time-range helper: ensure all GOPs covering [startWallMs, endWallMs] are
-    // fetched, muxed, and appended (decodes from the keyframe at/just-before start).
-    async loadRange(startWallMs: number, endWallMs: number): Promise<void> {
-        let i = this.findGopIdx(startWallMs);
-        for (; i < this.gops.length && this.gops[i].t <= endWallMs; i++) {
-            if (!this.appended.has(i)) await this.appendGop(i);
+    // Ensure all GOPs covering [startWall, endWall] are fetched + appended.
+    async loadRange(startWall: number, endWall: number): Promise<void> {
+        for (let hn = this.hourNumOf(startWall); hn <= 23 && (this.dayStartMs + hn * 3600_000) <= endWall; hn++) {
+            const hh = pad2(hn);
+            const gops = await this.ensureHour(hn);
+            for (const g of gops) {
+                if (g.t + this.gopDurMs(g) < startWall) continue;
+                if (g.t > endWall) return;
+                if (!this.appended.has(g.t)) await this.appendGop(hh, g);
+            }
         }
     }
 
-    private bufferAhead(): void {
-        const headWall = this.hourStart + this.video.currentTime * 1000;
-        void this.loadRange(headWall, headWall + 15_000); // keep ~15s buffered ahead
+    private evictBefore(sec: number): void {
+        if (!this.sb || this.sb.updating || this.queue.length || sec <= 0) return;
+        try {
+            if (this.sb.buffered.length && this.sb.buffered.start(0) < sec - 5) this.sb.remove(0, sec);
+        } catch { /* ignore */ }
     }
 
     teardown(): void {
+        this.video.removeEventListener("timeupdate", this.onTimeUpdate);
         try { this.video.pause(); this.video.removeAttribute("src"); this.video.load(); } catch { /* ignore */ }
         this.ms = undefined; this.sb = undefined;
-        this.appended.clear(); this.queue = []; this.flushing = false;
+        this.appended.clear(); this.queue = []; this.flushing = false; this.hourCache.clear();
     }
 }

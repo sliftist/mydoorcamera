@@ -20,7 +20,7 @@ function firstLanIp(): string {
     return "127.0.0.1";
 }
 import { createRpc, Channel } from "./rpc";
-import { listChildren, readHourIndex, readGopBytes } from "./storage";
+import { listChildren, readHourIndex, readGopBytes, getAvailableDays, getDayCoverage } from "./storage";
 import { getPassword, checkPassword, isBlacklisted, recordFailedAttempt } from "./auth";
 import { getSystemStats, readEncoderStats } from "./stats";
 
@@ -86,6 +86,8 @@ function start(): void {
                 throw new Error(nowBlack ? "blacklisted" : "wrong password");
             },
             async listChildren(parts: string[]) { requireAuth(); return listChildren(parts); },
+            async getAvailableDays() { requireAuth(); return getAvailableDays(); },
+            async getDayCoverage(parts: string[]) { requireAuth(); return getDayCoverage(parts); },
             async getHourIndex(parts: string[]) { requireAuth(); return readHourIndex(parts); },
             async getGopData(parts: string[], file: string, off: number, len: number) {
                 requireAuth();

@@ -8,7 +8,7 @@
 
 import * as fs from "fs";
 import * as path from "path";
-import { DATA_DIR, RETENTION_BYTES } from "./config";
+import { DATA_DIR, RETENTION_BYTES, FPS } from "./config";
 import { frameNal } from "./annexb";
 
 const SEGMENT_MAX_BYTES = 64 * 1024 * 1024;
@@ -82,6 +82,45 @@ export function readHourIndex(parts: string[]): GopEntry[] {
         const txt = fs.readFileSync(path.join(DATA_DIR, ...parts, "index.ndjson"), "utf8");
         return txt.split("\n").filter(Boolean).map(l => JSON.parse(l) as GopEntry);
     } catch { return []; }
+}
+
+// All days that have footage, as "YYYY/MM/DD" (for the calendar).
+export function getAvailableDays(): string[] {
+    const out: string[] = [];
+    for (const y of listChildren([])) {
+        for (const mo of listChildren([y])) {
+            for (const d of listChildren([y, mo])) out.push(`${y}/${mo}/${d}`);
+        }
+    }
+    return out;
+}
+
+export type DayCoverage = { dayStartMs: number; dayEndMs: number; ranges: { start: number; end: number }[] };
+
+// Coverage for one day: the wall-clock day bounds plus the contiguous ranges
+// where video actually exists (so the trackbar can show gaps / dropouts). Built
+// by merging every hour's GOP spans, joining across gaps under ~2s.
+export function getDayCoverage(parts: string[]): DayCoverage {
+    const [y, mo, d] = parts;
+    const dayStartMs = new Date(Number(y), Number(mo) - 1, Number(d), 0, 0, 0, 0).getTime();
+    const dayEndMs = dayStartMs + 24 * 3600 * 1000;
+
+    const spans: { s: number; e: number }[] = [];
+    for (const h of listChildren(parts)) {
+        for (const g of readHourIndex([...parts, h])) {
+            spans.push({ s: g.t, e: g.t + Math.round((g.n / FPS) * 1000) });
+        }
+    }
+    spans.sort((a, b) => a.s - b.s);
+
+    const ranges: { start: number; end: number }[] = [];
+    const JOIN_MS = 2000;
+    for (const sp of spans) {
+        const last = ranges[ranges.length - 1];
+        if (last && sp.s - last.end <= JOIN_MS) last.end = Math.max(last.end, sp.e);
+        else ranges.push({ start: sp.s, end: sp.e });
+    }
+    return { dayStartMs, dayEndMs, ranges };
 }
 
 export function readGopBytes(parts: string[], file: string, off: number, len: number): Buffer {

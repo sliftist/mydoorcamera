@@ -1,19 +1,21 @@
-// mydoorcamera browser app: connect to the Pi's WSS server, navigate footage by
-// date (year/month/day/hour), and play an hour with a seekable scrubber.
+// mydoorcamera browser app: connect to the Pi's WSS server, pick a day from a
+// calendar, and scrub it on a custom coverage-aware trackbar.
 
 import * as preact from "preact";
 import { observable, runInAction } from "mobx";
 import { observer } from "sliftutils/render-utils/observer";
 import { configureMobxNextFrameScheduler } from "sliftutils/render-utils/mobxTyped";
 import { css, isNode } from "typesafecss";
-import { CameraApi, GopEntry, Stats } from "./api";
-import { Player } from "./player";
-import { FPS } from "../src/config";
+import { CameraApi, DayCoverage, Stats } from "./api";
+import { DayPlayer } from "./player";
 import { formatDateTime } from "socket-function/src/formatting/format";
 import { BUILD_TIMESTAMP } from "../buildVersion";
 
 const lsGet = (k: string) => { try { return localStorage.getItem(k) || ""; } catch { return ""; } };
 const lsSet = (k: string, v: string) => { try { localStorage.setItem(k, v); } catch { /* ignore */ } };
+const pad2 = (n: number) => String(n).padStart(2, "0");
+const clockHM = (ms: number) => new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+const clockHMS = (ms: number) => new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 
 const state = observable({
     view: "connect" as "connect" | "browse",
@@ -22,20 +24,24 @@ const state = observable({
     error: "",
     showCertLink: false,
     connecting: false,
-    path: [] as string[],     // selected [year, month, day, hour] prefix
-    list: [] as string[],     // child folder names at the current level
-    hourGops: [] as GopEntry[],
-    playWall: 0,              // current playhead as wall-clock ms
+    availableDays: [] as string[],   // "YYYY/MM/DD"
+    day: "",                         // selected "YYYY/MM/DD"
+    coverage: null as DayCoverage | null,
+    calMonth: "",                    // "YYYY-MM" shown in the calendar
+    playWall: 0,                     // actual playhead (wall-clock ms)
+    desiredWall: 0,                  // where the user asked to play
+    hoverWall: null as number | null,
     stats: null as Stats | null,
 }, undefined, { deep: false });
 
-const LEVELS = ["Year", "Month", "Day", "Hour"];
 let api: CameraApi | undefined;
-let player: Player | undefined;
+let player: DayPlayer | undefined;
+let playerKey = "";
 let videoEl: HTMLVideoElement | null = null;
 let retryTimer: ReturnType<typeof setTimeout> | undefined;
 let statsTimer: ReturnType<typeof setInterval> | undefined;
 
+// ---- connection ----
 async function connect(): Promise<void> {
     if (retryTimer) { clearTimeout(retryTimer); retryTimer = undefined; }
     runInAction(() => { state.error = ""; state.showCertLink = false; state.connecting = true; });
@@ -44,87 +50,66 @@ async function connect(): Promise<void> {
         await api.connect(state.password);
         lsSet("mdc_ip", state.ip.trim());
         lsSet("mdc_pw", state.password);
-        runInAction(() => { state.view = "browse"; });
+        const days = await api.getAvailableDays();
+        runInAction(() => { state.view = "browse"; state.availableDays = days; });
         startStatsPoll();
-        await navigateTo(getUrlPath(), false); // restore the drilled-in location from the URL
+        const urlDay = getUrlDay();
+        const initial = (urlDay && days.includes(urlDay)) ? urlDay : (days[days.length - 1] || "");
+        if (initial) await selectDay(initial, false);
+        else runInAction(() => { state.calMonth = thisMonth(); });
     } catch (e: any) {
         runInAction(() => { state.error = e?.message || String(e); state.showCertLink = !!e?.needsCert; });
-        // Only the connection error is transient (cert not accepted yet) — keep
-        // retrying so it connects the instant they accept it. Never retry a
-        // wrong password / blacklist.
         if (e?.needsCert) retryTimer = setTimeout(() => void connect(), 2000);
     } finally {
         runInAction(() => { state.connecting = false; });
     }
 }
 
-// Navigation lives in the URL (?at=YYYY/MM/DD/HH) so refresh, share, and the
-// browser back/forward buttons all preserve where you've drilled in.
-function setUrlPath(parts: string[]): void {
-    const at = parts.join("/");
-    try { history.pushState({}, "", at ? `?at=${at}` : location.pathname); } catch { /* ignore */ }
-}
-function getUrlPath(): string[] {
-    try { return (new URLSearchParams(location.search).get("at") || "").split("/").filter(Boolean); }
-    catch { return []; }
-}
+function thisMonth(): string { const d = new Date(); return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}`; }
 
-// Central navigation: load the right data for `parts`, update state, and (unless
-// we're responding to a popstate) push the new URL.
-async function navigateTo(parts: string[], push = true): Promise<void> {
+// ---- day selection ----
+function getUrlDay(): string { try { return new URLSearchParams(location.search).get("day") || ""; } catch { return ""; } }
+function setUrlDay(day: string): void { try { history.pushState({}, "", day ? `?day=${day}` : location.pathname); } catch { /* ignore */ } }
+
+async function selectDay(dayStr: string, push = true): Promise<void> {
     if (!api) return;
-    if (push) setUrlPath(parts);
-    if (parts.length === 4) {
-        const gops = await api.getHourIndex(parts);
-        runInAction(() => { state.path = parts; state.hourGops = gops; state.playWall = gops.length ? gops[0].t : 0; });
-        maybeStartPlayer(); // starts now if the <video> is already mounted; else the ref starts it
-    } else {
-        const list = await api.listChildren(parts);
-        runInAction(() => { state.path = parts; state.list = list; state.hourGops = []; });
-        teardownPlayer();
-    }
+    if (push) setUrlDay(dayStr);
+    const cov = await api.getDayCoverage(dayStr.split("/"));
+    const startWall = cov.ranges.length ? cov.ranges[0].start : cov.dayStartMs;
+    runInAction(() => {
+        state.day = dayStr;
+        state.coverage = cov;
+        state.calMonth = dayStr.slice(0, 7).replace("/", "-");
+        state.playWall = startWall; state.desiredWall = startWall; state.hoverWall = null;
+    });
+    maybeStartDayPlayer();
 }
 
-function descend(name: string): void { void navigateTo([...state.path, name]); }
-function gotoLevel(depth: number): void { void navigateTo(state.path.slice(0, depth)); }
-
-// Create the player once the <video> is actually mounted and we have GOPs.
-// Idempotent + keyed on the hour, so it's safe to call from both the ref
-// callback and navigateTo (whichever happens last wins).
-let playerKey = "";
-function maybeStartPlayer(): void {
-    if (!api || !videoEl || !state.hourGops.length) return;
-    const key = state.path.join("/");
-    if (player && playerKey === key) return;
+function maybeStartDayPlayer(): void {
+    if (!api || !videoEl || !state.coverage || !state.day) return;
+    if (player && playerKey === state.day) return;
     teardownPlayer();
-    playerKey = key;
-    player = new Player(videoEl, api, state.path.slice(), state.hourGops);
-    videoEl.ontimeupdate = () => { if (player) runInAction(() => { state.playWall = player!.hourStart + videoEl!.currentTime * 1000; }); };
-    void player.seek(state.hourGops[0].t).catch(e => console.error("[player] seek failed:", e));
+    playerKey = state.day;
+    player = new DayPlayer(videoEl, api, state.day.split("/"), state.coverage.dayStartMs);
+    player.onTime = (wall) => runInAction(() => { state.playWall = wall; });
+    const startWall = state.coverage.ranges.length ? state.coverage.ranges[0].start : state.coverage.dayStartMs;
+    void player.seek(startWall).catch(e => console.error("[player] seek failed:", e));
 }
 
-// Duration of the current hour, derived from the (observable) GOP index so the
-// UI reacts even before the player object exists.
-function hourDurationSec(): number {
-    const g = state.hourGops;
-    if (!g.length) return 0;
-    const last = g[g.length - 1];
-    return (last.t + Math.round((last.n / FPS) * 1000) - g[0].t) / 1000;
+function teardownPlayer(): void { if (player) { player.teardown(); player = undefined; } playerKey = ""; }
+
+function seekTo(wall: number): void {
+    runInAction(() => { state.desiredWall = wall; });
+    void player?.seek(wall).catch(e => console.error("[player] seek failed:", e));
 }
 
-function teardownPlayer(): void { if (player) { player.teardown(); player = undefined; } }
-
-// Poll system + encoder stats every 5s while connected (shown in the footer).
+// ---- stats ----
 function startStatsPoll(): void {
     if (statsTimer) return;
-    const tick = async () => {
-        if (!api) return;
-        try { const s = await api.getStats(); runInAction(() => { state.stats = s; }); } catch { /* ignore */ }
-    };
+    const tick = async () => { if (!api) return; try { const s = await api.getStats(); runInAction(() => { state.stats = s; }); } catch { /* ignore */ } };
     void tick();
     statsTimer = setInterval(() => void tick(), 5000);
 }
-
 function gb(b: number): string { return (b / 1073741824).toFixed(1); }
 function formatStats(s: Stats): string {
     const sy = s.system;
@@ -132,9 +117,7 @@ function formatStats(s: Stats): string {
     return `CPU ${sy.cpuPct}% · RAM ${gb(sy.ramUsedBytes)}/${gb(sy.ramTotalBytes)} GB · Disk ${gb(sy.diskUsedBytes)}/${gb(sy.diskTotalBytes)} GB · ${enc}`;
 }
 
-function fmtClock(ms: number): string { return new Date(ms).toLocaleTimeString(); }
-function pad(n: number): string { return String(n).padStart(2, "0"); }
-
+// ---- views ----
 const ConnectView = observer(class extends preact.Component { render() {
     return (
         <div className={css.vbox(14).width("100%").maxWidth(440)}>
@@ -169,54 +152,103 @@ const ConnectView = observer(class extends preact.Component { render() {
     );
 } });
 
-const BrowseView = observer(class extends preact.Component { render() {
-    const atHour = state.path.length === 4 && state.hourGops.length > 0;
+function trackFrac(e: any): number {
+    const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    return Math.min(1, Math.max(0, (e.clientX - r.left) / r.width));
+}
+function fracToWall(f: number): number { const c = state.coverage!; return c.dayStartMs + f * (c.dayEndMs - c.dayStartMs); }
+
+const Trackbar = observer(class extends preact.Component { render() {
+    const c = state.coverage;
+    if (!c) return <div />;
+    const span = c.dayEndMs - c.dayStartMs;
+    const pct = (w: number) => (Math.min(1, Math.max(0, (w - c.dayStartMs) / span)) * 100).toFixed(3) + "%";
+    const wpct = (a: number, b: number) => (Math.max(0, (b - a) / span) * 100).toFixed(3) + "%";
     return (
-        <div className={css.vbox(16).width("100%").maxWidth(900)}>
-            {/* breadcrumb */}
-            <div className={css.hbox(8).fontSize(14)}>
-                <span className={css.pointer.color("hsl(210,90%,70%)")} onClick={() => void gotoLevel(0)}>All</span>
-                {state.path.map((p, i) => (
-                    <span key={i} className={css.hbox(8)}>
-                        <span className={css.opacity(0.5)}>/</span>
-                        <span className={css.pointer.color("hsl(210,90%,70%)")} onClick={() => void gotoLevel(i + 1)}>{p}</span>
-                    </span>
+        <div className={css.vbox(4).width("100%")}>
+            <div className={css.relative.width("100%").height(56).hsl(220, 15, 12).border("1px solid hsl(220,15%,28%)")}
+                style={{ cursor: "pointer", userSelect: "none" }}
+                onMouseMove={(e: any) => { if (state.coverage) runInAction(() => { state.hoverWall = fracToWall(trackFrac(e)); }); }}
+                onMouseLeave={() => runInAction(() => { state.hoverWall = null; })}
+                onClick={(e: any) => { if (state.coverage) seekTo(fracToWall(trackFrac(e))); }}>
+                {c.ranges.map((r, i) => (
+                    <div key={i} style={{ position: "absolute", top: 0, bottom: 0, left: pct(r.start), width: wpct(r.start, r.end), background: "hsl(150,45%,30%)" }} />
                 ))}
-            </div>
-
-            {!atHour && (
-                <div className={css.vbox(8)}>
-                    <div className={css.fontSize(12).opacity(0.7)}>Select {LEVELS[state.path.length] || "item"}</div>
-                    <div className={css.hbox(8).wrap}>
-                        {state.list.length === 0 && <div className={css.opacity(0.5)}>No footage here yet.</div>}
-                        {state.list.map(name => (
-                            <button key={name} className={chipCss} onClick={() => void descend(name)}>{name}</button>
-                        ))}
+                <div style={{ position: "absolute", top: 0, bottom: 0, left: pct(state.desiredWall), width: "2px", background: "hsl(45,100%,58%)" }} title="seek target" />
+                <div style={{ position: "absolute", top: 0, bottom: 0, left: pct(state.playWall), width: "2px", background: "hsl(210,100%,66%)" }} title="playing" />
+                {state.hoverWall != null && (
+                    <div style={{ position: "absolute", top: 0, bottom: 0, left: pct(state.hoverWall), width: "1px", background: "rgba(255,255,255,0.65)" }}>
+                        <div style={{ position: "absolute", bottom: "100%", transform: "translateX(-50%)", background: "#000", padding: "2px 6px", fontSize: "11px", whiteSpace: "nowrap", border: "1px solid hsl(220,15%,35%)" }}>{clockHMS(state.hoverWall)}</div>
                     </div>
-                </div>
-            )}
-
-            {atHour && <PlayerView />}
+                )}
+            </div>
+            <div className={css.hbox(8).fontSize(11).opacity(0.75)} style={{ justifyContent: "space-between" }}>
+                <span>{clockHM(c.dayStartMs)}</span>
+                <span className={css.opacity(1)}>{clockHMS(state.hoverWall != null ? state.hoverWall : state.playWall)}</span>
+                <span>{clockHM(c.dayEndMs - 1)}</span>
+            </div>
         </div>
     );
 } });
 
-const PlayerView = observer(class extends preact.Component { render() {
-    const start = state.hourGops.length ? state.hourGops[0].t : 0;
-    const durSec = hourDurationSec();
-    const posSec = Math.max(0, (state.playWall - start) / 1000);
+const WEEKDAYS = ["S", "M", "T", "W", "T", "F", "S"];
+function shiftMonth(delta: number): void {
+    const [y, m] = state.calMonth.split("-").map(Number);
+    const d = new Date(y, (m - 1) + delta, 1);
+    runInAction(() => { state.calMonth = `${d.getFullYear()}-${pad2(d.getMonth() + 1)}`; });
+}
+
+const Calendar = observer(class extends preact.Component { render() {
+    const days = new Set(state.availableDays);
+    const [y, m] = (state.calMonth || thisMonth()).split("-").map(Number);
+    if (!y || !m) return <div />;
+    const monthName = new Date(y, m - 1, 1).toLocaleString([], { month: "long", year: "numeric" });
+    const firstWd = new Date(y, m - 1, 1).getDay();
+    const numDays = new Date(y, m, 0).getDate();
+    const cells: (number | null)[] = [];
+    for (let i = 0; i < firstWd; i++) cells.push(null);
+    for (let dd = 1; dd <= numDays; dd++) cells.push(dd);
     return (
-        <div className={css.vbox(10).width("100%")}>
-            <video ref={(el: any) => { videoEl = el; if (el) maybeStartPlayer(); }} className={css.width("100%").background("#000").maxHeight("70vh")}
-                controls playsInline muted />
-            <div className={css.hbox(10).alignItems("center")}>
-                <span className={css.fontSize(12).opacity(0.8).width(96)}>{fmtClock(state.playWall)}</span>
-                <input type="range" className={css.flexGrow(1)} min={0} max={Math.max(1, Math.floor(durSec))} step={1}
-                    value={Math.floor(posSec)}
-                    onInput={e => { const v = Number((e.target as HTMLInputElement).value); if (player) void player.seek(start + v * 1000); }} />
-                <span className={css.fontSize(12).opacity(0.6).width(110)}>{pad(Math.floor(durSec / 60))}:{pad(Math.floor(durSec % 60))} total</span>
+        <div className={css.vbox(8).width("100%").maxWidth(340)}>
+            <div className={css.hbox(10).alignItems("center")} style={{ justifyContent: "space-between" }}>
+                <button className={navBtnCss} onClick={() => shiftMonth(-1)}>‹</button>
+                <span className={css.fontSize(14)}>{monthName}</span>
+                <button className={navBtnCss} onClick={() => shiftMonth(1)}>›</button>
             </div>
-            <div className={css.fontSize(12).opacity(0.6)}>{state.hourGops.length} segments · {Math.round(durSec)}s of footage</div>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(7,1fr)", gap: "4px" }}>
+                {WEEKDAYS.map((w, i) => <div key={"w" + i} className={css.fontSize(11).opacity(0.5)} style={{ textAlign: "center" }}>{w}</div>)}
+                {cells.map((dd, i) => {
+                    if (dd == null) return <div key={i} />;
+                    const key = `${y}/${pad2(m)}/${pad2(dd)}`;
+                    const has = days.has(key);
+                    const sel = state.day === key;
+                    return (
+                        <div key={i} className={css.fontSize(13).pad2(7, 0)}
+                            style={{
+                                textAlign: "center", borderRadius: "4px", cursor: has ? "pointer" : "default",
+                                background: sel ? "hsl(210,90%,45%)" : (has ? "hsl(150,40%,26%)" : "transparent"),
+                                color: has || sel ? "#fff" : "hsl(0,0%,38%)",
+                            }}
+                            onClick={() => { if (has) void selectDay(key); }}>{dd}</div>
+                    );
+                })}
+            </div>
+            <div className={css.fontSize(11).opacity(0.5)}>Green = has footage. Pick a day to scrub it above.</div>
+        </div>
+    );
+} });
+
+const DayView = observer(class extends preact.Component { render() {
+    const noFootage = state.coverage && state.coverage.ranges.length === 0;
+    return (
+        <div className={css.vbox(16).width("100%").maxWidth(900).alignItems("center")}>
+            <video ref={(el: any) => { videoEl = el; if (el) maybeStartDayPlayer(); }}
+                className={css.width("100%").background("#000").maxHeight("68vh")} controls playsInline muted />
+            {state.coverage ? <Trackbar /> : <div className={css.opacity(0.6).fontSize(13)}>Select a day below…</div>}
+            <div className={css.fontSize(13).opacity(0.75)}>
+                {state.day ? state.day.replace(/\//g, "-") : "No day selected"}{noFootage ? " · no footage this day" : ""}
+            </div>
+            <Calendar />
         </div>
     );
 } });
@@ -224,8 +256,8 @@ const PlayerView = observer(class extends preact.Component { render() {
 const App = observer(class extends preact.Component {
     render() {
         return (
-            <div className={css.vbox(20).alignItems("center").minHeight("100vh").pad2(36, 20)}>
-                {state.view === "connect" ? <ConnectView /> : <BrowseView />}
+            <div className={css.vbox(20).alignItems("center").minHeight("100vh").pad2(28, 16)}>
+                {state.view === "connect" ? <ConnectView /> : <DayView />}
                 <div className={css.hbox(12).wrap.center.fontSize(11).opacity(0.5)}>
                     {state.stats && <span>{formatStats(state.stats)}</span>}
                     <span>Build {formatDateTime(BUILD_TIMESTAMP)}</span>
@@ -237,15 +269,12 @@ const App = observer(class extends preact.Component {
 
 const inputCss = css.fontSize(15).pad2(10, 12).hsl(220, 15, 16).color("inherit").border("1px solid hsl(220,15%,30%)").width("100%").toString();
 const btnCss = css.fontSize(15).pad2(10, 18).hsl(220, 90, 55).color("white").border("none").pointer.toString();
-const chipCss = css.fontSize(15).pad2(8, 16).hsl(220, 15, 18).color("inherit").border("1px solid hsl(220,15%,30%)").pointer.toString();
+const navBtnCss = css.fontSize(16).pad2(4, 12).hsl(220, 15, 18).color("inherit").border("1px solid hsl(220,15%,30%)").pointer.toString();
 
 function main(): void {
     configureMobxNextFrameScheduler();
     preact.render(<App />, document.getElementById("app")!);
-    // Back/forward navigates the drill path (which lives in ?at=).
-    window.addEventListener("popstate", () => { if (state.view === "browse" && api) void navigateTo(getUrlPath(), false); });
-    // Auto-connect on revisit if we already know the IP + password (and the cert
-    // was accepted before). Falls back to the connect screen on failure.
+    window.addEventListener("popstate", () => { if (state.view === "browse" && api) { const d = getUrlDay(); if (d) void selectDay(d, false); } });
     if (state.ip.trim() && state.password.trim()) void connect();
 }
 if (!isNode()) main();

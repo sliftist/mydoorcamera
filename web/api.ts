@@ -5,6 +5,7 @@
 import { createRpc, browserWsChannel, Rpc } from "../src/rpc";
 
 export type GopEntry = { t: number; f: string; o: number; l: number; n: number };
+export type DayCoverage = { dayStartMs: number; dayEndMs: number; ranges: { start: number; end: number }[] };
 
 export type Stats = {
     system: {
@@ -37,6 +38,8 @@ export class CameraApi {
     }
 
     listChildren(parts: string[]): Promise<string[]> { return this.rpc!.call("listChildren", parts); }
+    getAvailableDays(): Promise<string[]> { return this.rpc!.call("getAvailableDays"); }
+    getDayCoverage(parts: string[]): Promise<DayCoverage> { return this.rpc!.call("getDayCoverage", parts); }
     getHourIndex(parts: string[]): Promise<GopEntry[]> { return this.rpc!.call("getHourIndex", parts); }
     getGopData(parts: string[], file: string, off: number, len: number): Promise<Uint8Array> {
         return this.rpc!.call("getGopData", parts, file, off, len);
