@@ -7,6 +7,11 @@ import { VIDEO_DEVICE, WIDTH, HEIGHT, FPS, BITRATE, GOP } from "./config";
 import { AnnexBSplitter, nalType } from "./annexb";
 import { StorageWriter, enforceRetention } from "./storage";
 import { ProcCpuSampler, writeEncoderStats } from "./stats";
+import { getTimezone } from "./timezone";
+
+// Set the timezone before any Date use or spawning gst, so the on-disk date
+// folders and the burned-in clock overlay both render local time in our zone.
+process.env.TZ = getTimezone();
 
 // FPS-tuned 1080p30 pipeline (see capture-pipeline tuning notes). queue elements
 // + videoconvert n-threads=4 spread software JPEG-decode across the 4 cores so we
@@ -20,6 +25,7 @@ function pipelineArgs(): string[] {
         "queue", "!", "jpegdec", "!",
         "queue", "!", "videoconvert", "n-threads=4", "!",
         `video/x-raw,format=I420,width=${WIDTH},height=${HEIGHT}`, "!",
+        "clockoverlay", "time-format=%Y-%m-%d %H:%M:%S %Z", "font-desc=Sans Bold 18", "!",
         "queue", "!",
         "v4l2h264enc", `extra-controls=encode,video_bitrate=${BITRATE},h264_i_frame_period=${GOP}`, "!",
         "video/x-h264,level=(string)4,profile=main", "!",

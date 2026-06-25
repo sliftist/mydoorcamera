@@ -23,6 +23,10 @@ import { createRpc, Channel } from "./rpc";
 import { listChildren, readHourIndex, readGopBytes, getAvailableDays, getDayCoverage } from "./storage";
 import { getPassword, checkPassword, isBlacklisted, recordFailedAttempt } from "./auth";
 import { getSystemStats, readEncoderStats } from "./stats";
+import { getTimezone } from "./timezone";
+
+// Match the capture daemon's zone so day boundaries / folders line up.
+process.env.TZ = getTimezone();
 
 function ensureCert(): { key: Buffer; cert: Buffer } {
     const keyPath = path.join(CERT_DIR, "key.pem");
