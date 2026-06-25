@@ -124,6 +124,28 @@ export async function gotoBucket(dir: 1 | -1): Promise<void> {
     saveUrlPosition(state.playWall);
 }
 
+// Prev/next control: if the zoom window isn't yet at the bucket edge, shift it
+// (and the playhead) by half a window in that direction; once at the edge, jump
+// to the adjacent bucket.
+export async function nudgeBucket(dir: 1 | -1): Promise<void> {
+    if (!state.coverage) return;
+    const c = state.coverage;
+    const vs = state.viewStart || c.dayStartMs, ve = state.viewEnd || c.dayEndMs;
+    const atEdge = dir === 1 ? ve >= c.dayEndMs - 1 : vs <= c.dayStartMs + 1;
+    if (atEdge) { await gotoBucket(dir); return; }
+    const shift = dir * (ve - vs) / 2;
+    let nvs = vs + shift, nve = ve + shift;
+    if (nvs < c.dayStartMs) { nve += c.dayStartMs - nvs; nvs = c.dayStartMs; }
+    if (nve > c.dayEndMs) { nvs -= nve - c.dayEndMs; nve = c.dayEndMs; }
+    const pos = Math.max(c.dayStartMs, Math.min(c.dayEndMs - 1, state.playWall + shift));
+    runInAction(() => {
+        state.viewStart = nvs; state.viewEnd = nve; state.desiredWall = pos;
+        if (state.index) state.viewActivity = { fromMs: nvs, toMs: nve, activity: bucketActivity(state.index, nvs, nve, 1440) };
+    });
+    player?.seekTo(pos);
+    saveUrlPosition(pos);
+}
+
 // ---- URL params ----
 export function getUrlDay(): string { try { return new URLSearchParams(location.search).get("day") || ""; } catch { return ""; } }
 function speedSuffix(): string { return state.speed !== 1 ? `&speed=${state.speed}` : ""; }

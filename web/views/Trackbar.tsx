@@ -7,9 +7,9 @@ import { state } from "../helpers/appState";
 import { clockHMS } from "../helpers/format";
 import { navBtnCss } from "../helpers/styles";
 import { setTrackRef, onTrackDown, onTrackHover, onTrackLeave, resetZoom, getTrackWidth } from "../helpers/trackbarHelpers";
-import { saveUrlPosition } from "../helpers/navigation";
+import { saveUrlPosition, nudgeBucket } from "../helpers/navigation";
 import { frameCount } from "../helpers/indexBuffer";
-import { levelGopSpanSec } from "../../src/config";
+import { levelGopSpanSec, levelPeriod } from "../../src/config";
 
 const TICKS = [0, 1, 2, 3, 4]; // label positions across the bar (fractions of /4), incl. both ends
 
@@ -40,10 +40,14 @@ export class Trackbar extends preact.Component {
                         if (((g.e - g.t) / span) * widthPx <= 5) continue;
                         marks.push(<div key={g.t} style={{ position: "absolute", top: 0, bottom: 0, left: pct(g.t), width: `calc(${wpct(g.t, g.e)} - 3px)`, background: "hsl(210,45%,52%)" }} />);
                     }
-                    return <div className={css.relative.width("100%")} style={{ height: "3px" }}>{marks}</div>;
+                    return <div style={{ position: "relative", height: "3px", marginLeft: "36px", marginRight: "36px" }}>{marks}</div>;
                 })()}
+                {/* Bar flanked by prev/next buttons that match the bar's height. */}
+                <div className={css.hbox(6).width("100%").alignItems("stretch")}>
+                <button className={navBtnCss} style={{ width: "30px", padding: 0, fontSize: "16px", display: "flex", alignItems: "center", justifyContent: "center" }}
+                    title={`Previous ${levelPeriod(state.level)} (or shift back)`} onClick={() => void nudgeBucket(-1)}>«</button>
                 <div ref={setTrackRef as any}
-                    className={css.relative.width("100%").height(56).hsl(220, 15, 12).border("1px solid hsl(220,15%,28%)")}
+                    className={css.relative.flexGrow(1).minWidth(0).height(56).hsl(220, 15, 12).border("1px solid hsl(220,15%,28%)")}
                     style={{ cursor: "pointer", userSelect: "none", overflow: "hidden" }}
                     onMouseDown={onTrackDown}
                     onMouseMove={(e: any) => onTrackHover(e.clientX)}
@@ -102,7 +106,10 @@ export class Trackbar extends preact.Component {
                         </div>
                     )}
                 </div>
-                <div className={css.hbox(8).fontSize(11).opacity(0.8).alignItems("center")} style={{ justifyContent: "space-between" }}>
+                <button className={navBtnCss} style={{ width: "30px", padding: 0, fontSize: "16px", display: "flex", alignItems: "center", justifyContent: "center" }}
+                    title={`Next ${levelPeriod(state.level)} (or shift forward)`} onClick={() => void nudgeBucket(1)}>»</button>
+                </div>
+                <div className={css.hbox(8).fontSize(11).opacity(0.8).alignItems("center")} style={{ justifyContent: "space-between", marginLeft: "36px", marginRight: "36px" }}>
                     <span style={{ whiteSpace: "nowrap", color: "hsl(265,90%,76%)" }}>{formatDateTime(state.hoverWall != null ? state.hoverWall : state.desiredWall)}</span>
                     {state.index && <span className={css.opacity(0.55)}>{frameCount(state.index, vs, ve).toLocaleString()} frames in view</span>}
                     <span className={css.hbox(4).alignItems("center").opacity(0.6)} title="Activity chart curve (gamma) — lower emphasizes small activity">

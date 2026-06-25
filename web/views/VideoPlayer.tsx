@@ -3,10 +3,9 @@ import { observer } from "sliftutils/render-utils/observer";
 import { css } from "typesafecss";
 import { state } from "../helpers/appState";
 import { player, setVideoEl, exitLive } from "../helpers/session";
-import { saveUrlPosition, gotoBucket } from "../helpers/navigation";
+import { saveUrlPosition } from "../helpers/navigation";
 import { rateColor, rateLabel } from "../helpers/format";
-import { playBtnCss, navBtnCss } from "../helpers/styles";
-import { levelPeriod } from "../../src/config";
+import { playBtnCss } from "../helpers/styles";
 import { Trackbar } from "./Trackbar";
 import { Controls } from "./Controls";
 import { DatePicker } from "./DatePicker";
@@ -37,15 +36,7 @@ export class VideoPlayer extends preact.Component {
                             <span className={css.fontSize(13).opacity(0.8)}>buffered {state.bufferSec.toFixed(1)}s</span>
                         </div>
                         : state.coverage
-                            ? <div className={css.vbox(8).width("100%")}>
-                                <LevelSelector />
-                                <div className={css.hbox(6).width("100%").alignItems("center")}>
-                                    <button className={navBtnCss} title={`Previous ${levelPeriod(state.level)}`} onClick={() => void gotoBucket(-1)}>«</button>
-                                    <div className={css.flexGrow(1).minWidth(0)}><Trackbar /></div>
-                                    <button className={navBtnCss} title={`Next ${levelPeriod(state.level)}`} onClick={() => void gotoBucket(1)}>»</button>
-                                </div>
-                                <Controls />
-                            </div>
+                            ? <div className={css.vbox(8).width("100%")}><LevelSelector /><Trackbar /><Controls /></div>
                             : <LevelSelector />}
                 </div>
                 {!state.live && <div className={css.fontSize(13).opacity(0.75)}>
