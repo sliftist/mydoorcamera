@@ -12,7 +12,7 @@ import { splitFramedNals } from "./annexb";
 
 const W = 64, H = 36, FRAME = W * H;   // tiny grayscale frame
 const NOISE = 16;                       // per-pixel change below this is treated as sensor noise
-const BATCH = 4;                        // keyframes per decode pass (4/s keeps up with live + backfills,
+const BATCH = 2;                        // 2/s: keeps up with live (1/s) + slow backfill, minimal CPU
 const PERIOD_MS = 1000;                 // while leaving the shared codec block mostly free for the encoder
 const START_CODE = Buffer.from([0, 0, 0, 1]);
 
