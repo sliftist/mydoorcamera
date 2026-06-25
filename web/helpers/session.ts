@@ -7,7 +7,7 @@ import { CameraApi } from "./api";
 import { DayPlayer } from "./videoHelpers";
 import { state, lsSet } from "./appState";
 import {
-    selectPeriod, refreshLevels, saveUrlPosition, rewatchDay, reloadIndex,
+    selectPeriod, refreshLevels, saveUrlPosition, rewatchDay, reloadIndex, applyUrlZoom,
     periodStartFromKey, todayStart,
     getUrlSpeed, getUrlLevel, getUrlDay, getUrlLive, setUrlLive,
 } from "./navigation";
@@ -45,7 +45,7 @@ export async function connect(): Promise<void> {
         runInAction(() => { state.speed = getUrlSpeed(); state.level = getUrlLevel(); }); // restore speed + level before the player is created
         const urlDay = getUrlDay();
         const anchor = urlDay ? periodStartFromKey(urlDay) : (days.length ? periodStartFromKey(days[days.length - 1]) : 0);
-        if (anchor) await selectPeriod(anchor, false);
+        if (anchor) { await selectPeriod(anchor, false); applyUrlZoom(); }
         else runInAction(() => { state.pickerAnchorMs = Date.now(); });
         if (getUrlLive()) void enterLive(); // resume live mode across refresh
     } catch (e: any) {

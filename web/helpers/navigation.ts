@@ -94,7 +94,27 @@ export async function setLevel(L: number): Promise<void> {
 export function getUrlDay(): string { try { return new URLSearchParams(location.search).get("day") || ""; } catch { return ""; } }
 function speedSuffix(): string { return state.speed !== 1 ? `&speed=${state.speed}` : ""; }
 function lvlSuffix(): string { return state.level !== 0 ? `&lvl=${state.level}` : ""; }
-function extraSuffix(): string { return lvlSuffix() + speedSuffix(); }
+// Trackbar zoom window as seconds-into-period: &z=start-end (omitted when not zoomed).
+function zoomSuffix(): string {
+    if (!state.coverage) return "";
+    const start = state.coverage.dayStartMs, end = state.coverage.dayEndMs;
+    const vs = state.viewStart || start, ve = state.viewEnd || end;
+    if (vs <= start + 500 && ve >= end - 500) return "";
+    return `&z=${Math.round((vs - start) / 1000)}-${Math.round((ve - start) / 1000)}`;
+}
+function extraSuffix(): string { return lvlSuffix() + speedSuffix() + zoomSuffix(); }
+export function getUrlZoom(): { vs: number; ve: number } | null {
+    try { const v = new URLSearchParams(location.search).get("z"); if (!v) return null; const [a, b] = v.split("-").map(Number); return isFinite(a) && isFinite(b) && b > a ? { vs: a, ve: b } : null; } catch { return null; }
+}
+// Restore the trackbar zoom from ?z onto the current period (used on initial load).
+export function applyUrlZoom(): void {
+    const z = getUrlZoom();
+    if (!z || !state.coverage || !state.index) return;
+    const start = state.coverage.dayStartMs, end = state.coverage.dayEndMs;
+    const vs = Math.max(start, start + z.vs * 1000), ve = Math.min(end, start + z.ve * 1000);
+    if (ve - vs < 1000) return;
+    runInAction(() => { state.viewStart = vs; state.viewEnd = ve; state.viewActivity = { fromMs: vs, toMs: ve, activity: bucketActivity(state.index!, vs, ve, 1440) }; });
+}
 export function getUrlSpeed(): number { try { const n = Number(new URLSearchParams(location.search).get("speed")); return SPEEDS.includes(n) ? n : 1; } catch { return 1; } }
 export function getUrlLevel(): number { try { const n = Number(new URLSearchParams(location.search).get("lvl")); return n >= 1 && n <= 8 ? Math.floor(n) : 0; } catch { return 0; } }
 export function setUrlDay(day: string): void { try { history.pushState({}, "", day ? `?day=${day}${extraSuffix()}` : location.pathname); } catch { /* ignore */ } }

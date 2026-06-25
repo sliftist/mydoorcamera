@@ -200,13 +200,17 @@ export class DayPlayer {
         if (!this.coveredAt(wall)) { this.setStatus("unavailable"); return; }
         const target = await this.gopAt(wall);
         if (!target) { this.setStatus("unavailable"); return; }
+        // Append only the GOP at the play point, then start immediately — don't
+        // wait for the whole buffer window. The rest streams in the background
+        // (onTimeUpdate keeps buffering ahead), so seeks/play feel instant.
         await this.ensureSourceBuffer(target);
-        await this.loadRange(wall, wall + this.bufferWindowMs()).catch(() => { /* */ });
+        await this.appendGop(target.hh, target.g);
         if (this.intent !== "play") return;
         if (Math.abs(this.currentWall() - wall) > 1500) { try { this.video.currentTime = this.internalSec(wall); } catch { /* */ } }
         try { this.video.playbackRate = this.speed; } catch { /* */ }
         try { await this.video.play(); } catch { /* gesture needed */ }
         this.refreshStatus();
+        void this.loadRange(wall, wall + this.bufferWindowMs()).catch(() => { /* */ }); // buffer ahead in the background
     }
 
     private onTimeUpdate = (): void => {

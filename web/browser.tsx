@@ -9,7 +9,7 @@ import { isNode } from "typesafecss";
 import { state } from "./helpers/appState";
 import { App } from "./views/App";
 import { connect, player } from "./helpers/session";
-import { selectPeriod, periodStartFromKey, getUrlDay } from "./helpers/navigation";
+import { selectPeriod, periodStartFromKey, getUrlDay, applyUrlZoom } from "./helpers/navigation";
 
 // Arrow keys seek (step scaled by the level's time density, routed through the
 // player's throttled seek-pump); space toggles play.
@@ -31,7 +31,7 @@ function onKeyDown(e: KeyboardEvent): void {
 function main(): void {
     configureMobxNextFrameScheduler();
     preact.render(<App />, document.getElementById("app")!);
-    window.addEventListener("popstate", () => { if (state.view === "browse") { const d = getUrlDay(); if (d) void selectPeriod(periodStartFromKey(d), false); } });
+    window.addEventListener("popstate", () => { if (state.view === "browse") { const d = getUrlDay(); if (d) void selectPeriod(periodStartFromKey(d), false).then(() => applyUrlZoom()); } });
     window.addEventListener("keydown", onKeyDown);
     if (state.ip.trim() && state.password.trim()) void connect();
 }

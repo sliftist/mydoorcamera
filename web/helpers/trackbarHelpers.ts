@@ -18,6 +18,10 @@ function recomputeViewActivity(): void {
     runInAction(() => { state.viewActivity = { fromMs: from, toMs: to, activity: bucketActivity(state.index!, from, to, 1440) }; });
 }
 
+// Persist the zoom window to the URL (debounced; ?z is part of saveUrlPosition's suffix).
+let urlTimer: ReturnType<typeof setTimeout> | undefined;
+function persistView(): void { if (urlTimer) clearTimeout(urlTimer); urlTimer = setTimeout(() => saveUrlPosition(state.playWall), 350); }
+
 // The visible trackbar window (zoomable). Falls back to the full day.
 export function viewBounds(): { vs: number; ve: number } {
     const c = state.coverage!;
@@ -36,6 +40,7 @@ export function resetZoom(): void {
     if (!state.coverage) return;
     runInAction(() => { state.viewStart = state.coverage!.dayStartMs; state.viewEnd = state.coverage!.dayEndMs; });
     recomputeViewActivity();
+    persistView();
 }
 
 // Scroll wheel zooms in/out around the cursor, keeping the time under the cursor fixed.
@@ -57,6 +62,7 @@ function onTrackWheel(e: WheelEvent): void {
     if (ne > c.dayEndMs) { ne = c.dayEndMs; ns = ne - newSpan; }
     runInAction(() => { state.viewStart = Math.max(c.dayStartMs, ns); state.viewEnd = ne; });
     recomputeViewActivity();
+    persistView();
 }
 
 function seekToWall(wall: number): void {
@@ -96,6 +102,7 @@ function onPanDrag(e: MouseEvent): void {
     if (ne > c.dayEndMs) { ns -= ne - c.dayEndMs; ne = c.dayEndMs; }
     runInAction(() => { state.viewStart = Math.max(c.dayStartMs, ns); state.viewEnd = ne; });
     recomputeViewActivity();
+    persistView();
 }
 function onPanUp(): void {
     panning = false;
