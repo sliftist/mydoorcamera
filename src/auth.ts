@@ -16,15 +16,18 @@ const BLACKLIST_FILE = path.join(SECRET_DIR, "blacklist.json");
 const WORDS: string[] = (require("./words1024.json") as string[]).slice(0, WORDLIST_SIZE);
 
 function normalize(s: string): string {
-    return s.trim().toLowerCase().replace(/\s+/g, " ");
+    // The password is just a sequence of words, so keep only alphabet letters
+    // (lowercased) and drop spaces/punctuation/casing. Makes it forgiving of
+    // voice typing, which sprinkles in commas, periods and stray capitalization.
+    return s.toLowerCase().replace(/[^a-z]/g, "");
 }
 
 let cachedPassword = "";
 export function getPassword(): string {
     if (cachedPassword) return cachedPassword;
     try {
-        const fromDisk = normalize(fs.readFileSync(PASSWORD_FILE, "utf8"));
-        if (fromDisk) { cachedPassword = fromDisk; return cachedPassword; }
+        const fromDisk = fs.readFileSync(PASSWORD_FILE, "utf8").trim();
+        if (fromDisk) { cachedPassword = fromDisk; return cachedPassword; } // keep display form (with spaces)
     } catch { /* not generated yet */ }
     const picked = Array.from({ length: PASSWORD_WORD_COUNT }, () => WORDS[crypto.randomInt(WORDS.length)]);
     cachedPassword = picked.join(" ");
@@ -34,9 +37,9 @@ export function getPassword(): string {
 }
 
 export function checkPassword(input: string): boolean {
-    // Constant-ish comparison on normalized forms.
+    // Compare on the alpha-only normalized form of both sides.
     const a = Buffer.from(normalize(input));
-    const b = Buffer.from(getPassword());
+    const b = Buffer.from(normalize(getPassword()));
     return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
 

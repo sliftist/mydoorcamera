@@ -16,7 +16,7 @@ const lsSet = (k: string, v: string) => { try { localStorage.setItem(k, v); } ca
 const state = observable({
     view: "connect" as "connect" | "browse",
     ip: lsGet("mdc_ip"),
-    password: "",
+    password: lsGet("mdc_pw"),
     error: "",
     connecting: false,
     path: [] as string[],     // selected [year, month, day, hour] prefix
@@ -36,6 +36,7 @@ async function connect(): Promise<void> {
         api = new CameraApi(state.ip.trim());
         await api.connect(state.password);
         lsSet("mdc_ip", state.ip.trim());
+        lsSet("mdc_pw", state.password);
         const years = await api.listChildren([]);
         runInAction(() => { state.view = "browse"; state.path = []; state.list = years; state.hourGops = []; });
     } catch (e: any) {
@@ -100,7 +101,7 @@ const ConnectView = observer(class extends preact.Component { render() {
             )}
             <label className={css.vbox(4)}>
                 <span className={css.fontSize(12).opacity(0.7)}>Password (4 words)</span>
-                <input className={inputCss} type="password" placeholder="four words" value={state.password}
+                <input className={inputCss} type="text" autoComplete="off" placeholder="four words" value={state.password}
                     onInput={e => runInAction(() => { state.password = (e.target as HTMLInputElement).value; })}
                     onKeyDown={e => { if (e.key === "Enter") void connect(); }} />
             </label>
@@ -182,5 +183,8 @@ const chipCss = css.fontSize(15).pad2(8, 16).hsl(220, 15, 18).color("inherit").b
 function main(): void {
     configureMobxNextFrameScheduler();
     preact.render(<App />, document.getElementById("app")!);
+    // Auto-connect on revisit if we already know the IP + password (and the cert
+    // was accepted before). Falls back to the connect screen on failure.
+    if (state.ip.trim() && state.password.trim()) void connect();
 }
 if (!isNode()) main();
