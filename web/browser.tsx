@@ -8,6 +8,8 @@ import { configureMobxNextFrameScheduler } from "sliftutils/render-utils/mobxTyp
 import { css, isNode } from "typesafecss";
 import { CameraApi, GopEntry } from "./api";
 import { Player } from "./player";
+import { FPS } from "../src/config";
+import { formatDateTime } from "socket-function/src/formatting/format";
 import { BUILD_TIMESTAMP } from "../buildVersion";
 
 const lsGet = (k: string) => { try { return localStorage.getItem(k) || ""; } catch { return ""; } };
@@ -72,7 +74,7 @@ async function navigateTo(parts: string[], push = true): Promise<void> {
     if (parts.length === 4) {
         const gops = await api.getHourIndex(parts);
         runInAction(() => { state.path = parts; state.hourGops = gops; state.playWall = gops.length ? gops[0].t : 0; });
-        setTimeout(() => startPlayer(parts, gops), 0); // wait for <video> to mount
+        maybeStartPlayer(); // starts now if the <video> is already mounted; else the ref starts it
     } else {
         const list = await api.listChildren(parts);
         runInAction(() => { state.path = parts; state.list = list; state.hourGops = []; });
@@ -83,12 +85,28 @@ async function navigateTo(parts: string[], push = true): Promise<void> {
 function descend(name: string): void { void navigateTo([...state.path, name]); }
 function gotoLevel(depth: number): void { void navigateTo(state.path.slice(0, depth)); }
 
-function startPlayer(path: string[], gops: GopEntry[]): void {
-    if (!api || !videoEl || !gops.length) return;
+// Create the player once the <video> is actually mounted and we have GOPs.
+// Idempotent + keyed on the hour, so it's safe to call from both the ref
+// callback and navigateTo (whichever happens last wins).
+let playerKey = "";
+function maybeStartPlayer(): void {
+    if (!api || !videoEl || !state.hourGops.length) return;
+    const key = state.path.join("/");
+    if (player && playerKey === key) return;
     teardownPlayer();
-    player = new Player(videoEl, api, path, gops);
+    playerKey = key;
+    player = new Player(videoEl, api, state.path.slice(), state.hourGops);
     videoEl.ontimeupdate = () => { if (player) runInAction(() => { state.playWall = player!.hourStart + videoEl!.currentTime * 1000; }); };
-    void player.seek(gops[0].t);
+    void player.seek(state.hourGops[0].t).catch(e => console.error("[player] seek failed:", e));
+}
+
+// Duration of the current hour, derived from the (observable) GOP index so the
+// UI reacts even before the player object exists.
+function hourDurationSec(): number {
+    const g = state.hourGops;
+    if (!g.length) return 0;
+    const last = g[g.length - 1];
+    return (last.t + Math.round((last.n / FPS) * 1000) - g[0].t) / 1000;
 }
 
 function teardownPlayer(): void { if (player) { player.teardown(); player = undefined; } }
@@ -164,11 +182,11 @@ const BrowseView = observer(class extends preact.Component { render() {
 
 const PlayerView = observer(class extends preact.Component { render() {
     const start = state.hourGops.length ? state.hourGops[0].t : 0;
-    const durSec = player ? player.durationSec() : 0;
+    const durSec = hourDurationSec();
     const posSec = Math.max(0, (state.playWall - start) / 1000);
     return (
         <div className={css.vbox(10).width("100%")}>
-            <video ref={(el: any) => { videoEl = el; }} className={css.width("100%").background("#000").maxHeight("70vh")}
+            <video ref={(el: any) => { videoEl = el; if (el) maybeStartPlayer(); }} className={css.width("100%").background("#000").maxHeight("70vh")}
                 controls playsInline muted />
             <div className={css.hbox(10).alignItems("center")}>
                 <span className={css.fontSize(12).opacity(0.8).width(96)}>{fmtClock(state.playWall)}</span>
@@ -187,7 +205,7 @@ const App = observer(class extends preact.Component {
         return (
             <div className={css.vbox(20).alignItems("center").minHeight("100vh").pad2(36, 20)}>
                 {state.view === "connect" ? <ConnectView /> : <BrowseView />}
-                <div className={css.fontSize(11).opacity(0.4)}>Build {BUILD_TIMESTAMP}</div>
+                <div className={css.fontSize(11).opacity(0.4)}>Build {formatDateTime(BUILD_TIMESTAMP)}</div>
             </div>
         );
     }
