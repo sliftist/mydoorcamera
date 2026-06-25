@@ -151,7 +151,7 @@ function applyIndex(gops: IndexGop[], start: number, end: number): { start: numb
     runInAction(() => {
         state.index = gops;
         state.coverage = { dayStartMs: start, dayEndMs: end, ranges, badRanges: [], activity: [] };
-        if (player) player.ranges = ranges;
+        if (player) { player.ranges = ranges; player.invalidateIndex(); } // new footage -> player's index cache is stale
         const vs = state.viewStart || start, ve = state.viewEnd || end;
         state.viewActivity = { fromMs: vs, toMs: ve, activity: bucketActivity(gops, vs, ve, 1440) };
     });

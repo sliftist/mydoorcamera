@@ -128,6 +128,10 @@ export class DayPlayer {
     }
     private coveredAt(wall: number): boolean { return this.ranges.some(r => wall >= r.start && wall <= r.end + 500); }
 
+    // Drop the cached index so the next lookup re-fetches it — called when new
+    // footage appears (live-grow), since our index cache would otherwise miss it.
+    invalidateIndex(): void { this.hourCache.clear(); this.levelReady = undefined; }
+
     get playStatus(): PlayStatus { return this.status; }
     get wantsPlay(): boolean { return this.intent === "play"; }
     // Real seconds per playback second at this level (30^level) — used to scale the
@@ -187,7 +191,13 @@ export class DayPlayer {
 
     private async showFrameAt(wall: number): Promise<void> {
         if (!this.coveredAt(wall)) { this.setStatus("unavailable"); return; }
-        const target = await this.gopAt(wall);
+        let target = await this.gopAt(wall);
+        // Coverage says there's footage here but our cached index ends well before
+        // it — the cache is stale (live edge). Re-fetch once and retry.
+        if (target && wall - target.g.e > Math.max(2000, this.gopDurMs(target.g))) {
+            this.invalidateIndex();
+            target = await this.gopAt(wall);
+        }
         if (!target) { this.setStatus("unavailable"); return; }
         try {
             await this.ensureSourceBuffer(target);
