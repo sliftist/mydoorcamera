@@ -35,6 +35,7 @@ const state = observable({
     online: true,
     playStatus: "paused" as PlayStatus,
     live: false,
+    playbackRate: 1,
 }, undefined, { deep: false });
 
 let api: CameraApi | undefined;
@@ -145,6 +146,7 @@ function maybeStartDayPlayer(): void {
     player = new DayPlayer(videoEl, api, state.day.split("/"), state.coverage.dayStartMs, state.coverage.ranges);
     player.onTime = (wall) => runInAction(() => { state.playWall = wall; });
     player.onStatus = (s) => runInAction(() => { state.playStatus = s; });
+    player.onRate = (r) => runInAction(() => { state.playbackRate = r; });
     player.seekTo(state.desiredWall); // show the initial / resumed frame (paused), set by selectDay
 }
 
@@ -290,6 +292,14 @@ function statusLabel(s: PlayStatus): string {
 function statusColor(s: PlayStatus): string {
     return s === "playing" ? "hsl(150,60%,62%)" : s === "waiting" ? "hsl(45,95%,62%)" : s === "unavailable" ? "hsl(0,75%,64%)" : "hsl(0,0%,72%)";
 }
+function rateLabel(r: number): string {
+    if (Math.abs(r - 1) < 0.005) return "1.00× · in sync";
+    const pct = Math.round(Math.abs(r - 1) * 100);
+    return `${r.toFixed(2)}× · ${r > 1 ? "catching up +" + pct + "%" : "slowing −" + pct + "%"}`;
+}
+function rateColor(r: number): string {
+    return r > 1.001 ? "hsl(150,60%,60%)" : r < 0.999 ? "hsl(45,90%,62%)" : "hsl(0,0%,65%)";
+}
 
 const Controls = observer(class extends preact.Component { render() {
     const playing = state.playStatus === "playing";
@@ -362,9 +372,10 @@ const DayView = observer(class extends preact.Component { render() {
                 style={{ cursor: "pointer" }}
                 onMouseDown={(e: any) => { e.preventDefault(); player?.togglePlay(); saveUrlPosition(state.playWall); }} />
             {state.live
-                ? <div className={css.hbox(14).alignItems("center")}>
+                ? <div className={css.hbox(14).alignItems("center").width("100%")}>
                     <span className={css.color("hsl(0,85%,62%)").fontSize(15)}>● LIVE</span>
                     <button className={playBtnCss} onMouseDown={(e: any) => { e.preventDefault(); void exitLive(); }}>Exit Live</button>
+                    <span className={css.fontSize(13)} style={{ color: rateColor(state.playbackRate) }}>{rateLabel(state.playbackRate)}</span>
                 </div>
                 : state.coverage
                     ? <div className={css.vbox(8).width("100%")}><Trackbar /><Controls /></div>

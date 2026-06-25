@@ -43,6 +43,7 @@ export class DayPlayer {
 
     onStatus: ((s: PlayStatus) => void) | undefined;
     onTime: ((wallMs: number) => void) | undefined;
+    onRate: ((rate: number) => void) | undefined;
 
     constructor(
         public video: HTMLVideoElement,
@@ -252,6 +253,7 @@ export class DayPlayer {
     async stopLive(): Promise<void> {
         this.live = false;
         try { this.video.playbackRate = 1; } catch { /* */ }
+        this.onRate?.(1);
         try { await this.api.stopStream(); } catch { /* */ }
         this.intent = "pause"; this.refreshStatus();
     }
@@ -291,6 +293,7 @@ export class DayPlayer {
         else if (ahead < 1) rate = 0.98;
         else if (ahead < 1.7) rate = 0.99;
         if (Math.abs(this.video.playbackRate - rate) > 0.001) { try { this.video.playbackRate = rate; } catch { /* */ } }
+        this.onRate?.(this.video.playbackRate);
         this.evictBefore(this.video.currentTime - 20);
     }
 
