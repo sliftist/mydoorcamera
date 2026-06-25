@@ -23,6 +23,7 @@ function codecFromSps(nals: Buffer[]): string {
 }
 function pad2(n: number): string { return String(n).padStart(2, "0"); }
 const DAY_MS = 24 * 3600 * 1000;
+const PREBUFFER_MS = 4000; // buffer this much ahead after a seek so play is instant (LAN server)
 
 export class DayPlayer {
     private ms: MediaSource | undefined;
@@ -92,7 +93,11 @@ export class DayPlayer {
         } finally {
             this.pumping = false;
         }
+        // Settled on a target. If playing, kick off normal windowed buffering +
+        // playback; if paused, still prebuffer a few seconds so hitting play (or a
+        // resume) starts immediately.
         if (this.intent === "play") void this.startPlaybackFrom(this.targetWall);
+        else void this.loadRange(this.targetWall, this.targetWall + PREBUFFER_MS).catch(() => { /* */ });
     }
 
     private async showFrameAt(wall: number): Promise<void> {
