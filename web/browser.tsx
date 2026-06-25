@@ -24,6 +24,13 @@ function onKeyDown(e: KeyboardEvent): void {
         const w = base + (e.key === "ArrowRight" ? step : -step);
         runInAction(() => { state.desiredWall = w; });
         player.seekTo(w);
+    } else if (e.key === "," || e.key === ".") {
+        e.preventDefault();
+        const base = state.desiredWall || player.currentWall();
+        const frameStep = (player.compression || 1) / 30 * 1000; // one frame = 1/30 playback sec = comp/30 real sec
+        const w = base + (e.key === "." ? frameStep : -frameStep);
+        runInAction(() => { state.desiredWall = w; });
+        player.seekTo(w);
     } else if (e.key === " ") {
         e.preventDefault();
         player.togglePlay();
