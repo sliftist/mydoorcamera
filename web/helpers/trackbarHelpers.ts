@@ -66,11 +66,41 @@ function seekToWall(wall: number): void {
 
 export function onTrackDown(e: any): void {
     if (!state.coverage) return;
+    if (e.button === 1) { startPan(e); return; }  // middle-button = pan the zoom window
+    if (e.button !== 0) return;
     e.preventDefault();
     dragging = true;
     const w = clientToWall(e.clientX); if (w != null) { seekToWall(w); saveUrlPosition(w); }
     window.addEventListener("mousemove", onTrackDrag);
     window.addEventListener("mouseup", onTrackUp);
+}
+
+// ---- middle-button drag to pan the zoomed view ----
+let panning = false, panStartX = 0, panStartVs = 0, panStartVe = 0;
+function startPan(e: MouseEvent): void {
+    e.preventDefault();
+    panning = true;
+    panStartX = e.clientX;
+    const { vs, ve } = viewBounds();
+    panStartVs = vs; panStartVe = ve;
+    window.addEventListener("mousemove", onPanDrag);
+    window.addEventListener("mouseup", onPanUp);
+}
+function onPanDrag(e: MouseEvent): void {
+    if (!panning || !trackEl || !state.coverage) return;
+    const c = state.coverage;
+    const span = panStartVe - panStartVs;
+    const wallDelta = ((e.clientX - panStartX) / trackEl.getBoundingClientRect().width) * span; // grab-and-drag the content
+    let ns = panStartVs - wallDelta, ne = panStartVe - wallDelta;
+    if (ns < c.dayStartMs) { ne += c.dayStartMs - ns; ns = c.dayStartMs; }
+    if (ne > c.dayEndMs) { ns -= ne - c.dayEndMs; ne = c.dayEndMs; }
+    runInAction(() => { state.viewStart = Math.max(c.dayStartMs, ns); state.viewEnd = ne; });
+    recomputeViewActivity();
+}
+function onPanUp(): void {
+    panning = false;
+    window.removeEventListener("mousemove", onPanDrag);
+    window.removeEventListener("mouseup", onPanUp);
 }
 function onTrackDrag(e: MouseEvent): void {
     if (!dragging) return;
