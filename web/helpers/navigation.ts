@@ -74,6 +74,10 @@ export async function setLevel(L: number): Promise<void> {
     if (state.live) await exitLive();
     const anchor = state.playWall || state.desiredWall || (state.coverage ? state.coverage.dayStartMs : Date.now());
     const cur = state.coverage ? { start: state.coverage.dayStartMs, end: state.coverage.dayEndMs } : periodBounds(state.level, anchor);
+    // The trackbar zoom is just [viewStart, viewEnd] in absolute time — keep it
+    // across the level change (clamped to the new period) so it just works.
+    const wasZoomed = !!(state.coverage && state.viewStart && state.viewEnd && (state.viewEnd - state.viewStart) < (cur.end - cur.start) - 1000);
+    const keepVs = state.viewStart, keepVe = state.viewEnd;
     runInAction(() => { state.level = L; });
     let target: number;
     let pos: number | undefined;
@@ -87,6 +91,11 @@ export async function setLevel(L: number): Promise<void> {
     }
     if (pos != null) { const b = periodBounds(L, target); if (pos < b.start || pos >= b.end) pos = undefined; }
     await selectPeriod(target, false, pos);
+    if (wasZoomed && state.coverage && state.index) {
+        const ps = state.coverage.dayStartMs, pe = state.coverage.dayEndMs;
+        const nvs = Math.max(ps, keepVs), nve = Math.min(pe, keepVe);
+        if (nve - nvs > 1000) runInAction(() => { state.viewStart = nvs; state.viewEnd = nve; state.viewActivity = { fromMs: nvs, toMs: nve, activity: bucketActivity(state.index!, nvs, nve, 1440) }; });
+    }
     saveUrlPosition(state.playWall);
 }
 

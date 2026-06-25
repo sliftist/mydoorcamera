@@ -1,8 +1,9 @@
 import * as preact from "preact";
+import { runInAction } from "mobx";
 import { observer } from "sliftutils/render-utils/observer";
 import { css } from "typesafecss";
 import { formatDateTime } from "socket-function/src/formatting/format";
-import { state } from "../helpers/appState";
+import { state, lsSet } from "../helpers/appState";
 import { clockHMS } from "../helpers/format";
 import { navBtnCss } from "../helpers/styles";
 import { setTrackRef, onTrackDown, onTrackHover, onTrackLeave, resetZoom } from "../helpers/trackbarHelpers";
@@ -55,7 +56,7 @@ export class Trackbar extends preact.Component {
                         for (let i = 0; i < act.length; i++) {
                             const xf = (from + i * bucketMs - vs) / span;
                             if (xf < -0.02 || xf > 1.02) continue;
-                            pts.push(`${(xf * 1000).toFixed(1)},${(100 - Math.min(1, act[i] / scale) * 100).toFixed(1)}`);
+                            pts.push(`${(xf * 1000).toFixed(1)},${(100 - Math.pow(Math.min(1, act[i] / scale), state.activityExp) * 100).toFixed(1)}`);
                         }
                         return (
                             <svg viewBox="0 0 1000 100" preserveAspectRatio="none" style={{ position: "absolute", inset: 0, width: "100%", height: "100%", pointerEvents: "none" }}>
@@ -88,6 +89,12 @@ export class Trackbar extends preact.Component {
                 <div className={css.hbox(8).fontSize(11).opacity(0.8).alignItems("center")} style={{ justifyContent: "space-between" }}>
                     <span style={{ whiteSpace: "nowrap", color: "hsl(265,90%,76%)" }}>{formatDateTime(state.hoverWall != null ? state.hoverWall : state.desiredWall)}</span>
                     {state.index && <span className={css.opacity(0.55)}>{frameCount(state.index, vs, ve).toLocaleString()} frames in view</span>}
+                    <span className={css.hbox(4).alignItems("center").opacity(0.6)} title="Activity chart curve (gamma) — lower emphasizes small activity">
+                        activity curve
+                        <input type="number" step="0.05" min="0.05" max="3" value={state.activityExp}
+                            onInput={(e: any) => { const v = Number(e.target.value) || 0.4; runInAction(() => { state.activityExp = v; }); lsSet("mdc_actexp", String(v)); }}
+                            style={{ width: "52px", fontSize: "11px", padding: "1px 4px", background: "hsl(220,15%,16%)", color: "inherit", border: "1px solid hsl(220,15%,30%)" }} />
+                    </span>
                     {zoomed
                         ? <button className={navBtnCss} style={{ fontSize: "11px", padding: "2px 8px" }} onClick={resetZoom} title="Reset zoom (show the whole period)">⤢ reset zoom</button>
                         : <span className={css.opacity(0.5)}>scroll to zoom</span>}
