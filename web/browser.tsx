@@ -18,6 +18,7 @@ const state = observable({
     ip: lsGet("mdc_ip"),
     password: lsGet("mdc_pw"),
     error: "",
+    showCertLink: false,
     connecting: false,
     path: [] as string[],     // selected [year, month, day, hour] prefix
     list: [] as string[],     // child folder names at the current level
@@ -31,7 +32,7 @@ let player: Player | undefined;
 let videoEl: HTMLVideoElement | null = null;
 
 async function connect(): Promise<void> {
-    runInAction(() => { state.error = ""; state.connecting = true; });
+    runInAction(() => { state.error = ""; state.showCertLink = false; state.connecting = true; });
     try {
         api = new CameraApi(state.ip.trim());
         await api.connect(state.password);
@@ -40,7 +41,7 @@ async function connect(): Promise<void> {
         const years = await api.listChildren([]);
         runInAction(() => { state.view = "browse"; state.path = []; state.list = years; state.hourGops = []; });
     } catch (e: any) {
-        runInAction(() => { state.error = e?.message || String(e); });
+        runInAction(() => { state.error = e?.message || String(e); state.showCertLink = !!e?.needsCert; });
     } finally {
         runInAction(() => { state.connecting = false; });
     }
@@ -93,12 +94,6 @@ const ConnectView = observer(class extends preact.Component { render() {
                 <input className={inputCss} placeholder="e.g. 10.0.0.189" value={state.ip}
                     onInput={e => runInAction(() => { state.ip = (e.target as HTMLInputElement).value; })} />
             </label>
-            {state.ip.trim() && (
-                <div className={css.fontSize(12).opacity(0.8)}>
-                    First time on this device? <a className={css.color("hsl(210,90%,70%)")} href={`https://${state.ip.trim()}:8443/`} target="_blank" rel="noreferrer">
-                        open the certificate page</a> and accept the self-signed certificate, then come back.
-                </div>
-            )}
             <label className={css.vbox(4)}>
                 <span className={css.fontSize(12).opacity(0.7)}>Password (4 words)</span>
                 <input className={inputCss} type="text" autoComplete="off" placeholder="four words" value={state.password}
@@ -108,7 +103,17 @@ const ConnectView = observer(class extends preact.Component { render() {
             <button className={btnCss} disabled={state.connecting || !state.ip.trim()} onClick={() => void connect()}>
                 {state.connecting ? "Connecting…" : "Connect"}
             </button>
-            {state.error && <div className={css.color("hsl(0,80%,70%)").fontSize(13)}>{state.error}</div>}
+            {state.error && (
+                <div className={css.vbox(8).pad2(12, 14).hsl(0, 35, 14).border("1px solid hsl(0,45%,32%)")}>
+                    <div className={css.color("hsl(0,80%,76%)").fontSize(13)}>{state.error}</div>
+                    {state.showCertLink && (
+                        <a className={css.fontSize(14).pointer.color("hsl(210,95%,74%)")}
+                            href={`https://${state.ip.trim()}:8443/`} target="_blank" rel="noreferrer">
+                            → Click here to open the certificate page and accept it, then connect again.
+                        </a>
+                    )}
+                </div>
+            )}
         </div>
     );
 } });

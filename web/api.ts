@@ -17,7 +17,11 @@ export class CameraApi {
         const ws = new WebSocket(`wss://${this.ip}:${this.port}`);
         await new Promise<void>((resolve, reject) => {
             ws.onopen = () => resolve();
-            ws.onerror = () => reject(new Error("Could not connect — open the certificate page and accept it, then retry."));
+            ws.onerror = () => {
+                const e: any = new Error("Couldn't reach the camera server — the self-signed certificate probably isn't accepted yet.");
+                e.needsCert = true; // signals the UI to surface the certificate link
+                reject(e);
+            };
         });
         this.rpc = createRpc(browserWsChannel(ws), {});
         await this.rpc.call("login", password); // rejects on wrong password / blacklist
