@@ -6,7 +6,7 @@ import { observable, runInAction } from "mobx";
 import { observer } from "sliftutils/render-utils/observer";
 import { configureMobxNextFrameScheduler } from "sliftutils/render-utils/mobxTyped";
 import { css, isNode } from "typesafecss";
-import { CameraApi, DayCoverage, Stats } from "./api";
+import { CameraApi, DayCoverage, Stats, LevelInfo } from "./api";
 import { DayPlayer, PlayStatus } from "./player";
 import { formatDateTime } from "socket-function/src/formatting/format";
 import { BUILD_TIMESTAMP } from "../buildVersion";
@@ -38,6 +38,8 @@ const state = observable({
     playbackRate: 1,
     bufferSec: 0,
     speed: 1,
+    level: 0,                        // thinning level being viewed (0 = full res)
+    levels: [] as LevelInfo[],       // discovery info for the levels panel
 }, undefined, { deep: false });
 
 let api: CameraApi | undefined;
@@ -63,8 +65,9 @@ async function connect(): Promise<void> {
         const days = await api.getAvailableDays();
         runInAction(() => { state.view = "browse"; state.availableDays = days; });
         startStatsPoll();
-        if (!posTimer) posTimer = setInterval(() => { if (state.day && state.coverage) saveUrlPosition(state.playWall); }, 30000);
-        runInAction(() => { state.speed = getUrlSpeed(); }); // restore playback speed before the player is created
+        if (!posTimer) posTimer = setInterval(() => { if (state.day && state.coverage) saveUrlPosition(state.playWall); void refreshLevels(); }, 30000);
+        void refreshLevels();
+        runInAction(() => { state.speed = getUrlSpeed(); state.level = getUrlLevel(); }); // restore speed + level before the player is created
         const urlDay = getUrlDay();
         const initial = (urlDay && days.includes(urlDay)) ? urlDay : (days[days.length - 1] || "");
         if (initial) await selectDay(initial, false);
@@ -80,28 +83,73 @@ async function connect(): Promise<void> {
 
 function thisMonth(): string { const d = new Date(); return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}`; }
 
+// ---- thinning levels ----
+// Coverage for a day at the current level. L0 uses the day index; thinned levels
+// pull the day's window from the level index (same DayCoverage shape).
+async function fetchCoverage(dayStr: string, level: number): Promise<DayCoverage> {
+    const [y, mo, d] = dayStr.split("/").map(Number);
+    const dayStartMs = new Date(y, mo - 1, d, 0, 0, 0, 0).getTime();
+    const dayEndMs = dayStartMs + 24 * 3600 * 1000;
+    if (level === 0) return api!.getDayCoverage(dayStr.split("/"));
+    const c = await api!.getLevelCoverage(level, dayStartMs, dayEndMs, 1440);
+    return { dayStartMs, dayEndMs, ranges: c.ranges, badRanges: c.badRanges, activity: c.activity };
+}
+
+async function refreshLevels(): Promise<void> {
+    if (!api) return;
+    try { const ls = await api.getLevels(); runInAction(() => { state.levels = ls; }); } catch { /* */ }
+}
+
+async function setLevel(L: number): Promise<void> {
+    if (L === state.level) return;
+    if (state.live) await exitLive();             // live is full-res real-time only
+    runInAction(() => { state.level = L; });
+    if (state.day) await selectDay(state.day, false); // refetch coverage + recreate player at new level
+    saveUrlPosition(state.playWall);              // persist &lvl (+t)
+}
+
+// Human duration: "30 s" / "15 min" / "7.5 hr" / "3.2 d" / "5 mo" / "2 yr".
+function fmtDur(sec: number): string {
+    if (sec <= 0) return "—";
+    if (sec < 90) return `${Math.round(sec)} s`;
+    const min = sec / 60; if (min < 90) return `${min < 10 ? min.toFixed(1) : Math.round(min)} min`;
+    const hr = min / 60; if (hr < 48) return `${hr < 10 ? hr.toFixed(1) : Math.round(hr)} hr`;
+    const day = hr / 24; if (day < 60) return `${day < 10 ? day.toFixed(1) : Math.round(day)} d`;
+    const mo = day / 30.44; if (mo < 24) return `${mo < 10 ? mo.toFixed(1) : Math.round(mo)} mo`;
+    return `${(day / 365).toFixed(1)} yr`;
+}
+// Level label by time-per-playback-second.
+function tpsLabel(l: LevelInfo): string { return l.level === 0 ? "1× real-time" : `${fmtDur(l.timePerSec)} / s`; }
+function levelOptions(): LevelInfo[] {
+    const ls = state.levels.filter(l => l.level === 0 || l.usedBytes > 0);
+    return ls.length ? ls : [{ level: 0, timePerSec: 1, gopSpanSec: 1, budgetBytes: 0, usedBytes: 0, earliestMs: 0, latestMs: 0 }];
+}
+
 // ---- day selection ----
 function getUrlDay(): string { try { return new URLSearchParams(location.search).get("day") || ""; } catch { return ""; } }
 function speedSuffix(): string { return state.speed !== 1 ? `&speed=${state.speed}` : ""; }
+function lvlSuffix(): string { return state.level !== 0 ? `&lvl=${state.level}` : ""; }
+function extraSuffix(): string { return lvlSuffix() + speedSuffix(); }
 function getUrlSpeed(): number { try { const n = Number(new URLSearchParams(location.search).get("speed")); return SPEEDS.includes(n) ? n : 1; } catch { return 1; } }
-function setUrlDay(day: string): void { try { history.pushState({}, "", day ? `?day=${day}${speedSuffix()}` : location.pathname); } catch { /* ignore */ } }
+function getUrlLevel(): number { try { const n = Number(new URLSearchParams(location.search).get("lvl")); return n >= 1 && n <= 8 ? Math.floor(n) : 0; } catch { return 0; } }
+function setUrlDay(day: string): void { try { history.pushState({}, "", day ? `?day=${day}${extraSuffix()}` : location.pathname); } catch { /* ignore */ } }
 function getUrlT(): number | null { try { const v = new URLSearchParams(location.search).get("t"); return v == null || v === "" ? null : Number(v); } catch { return null; } }
 function getUrlLive(): boolean { try { return new URLSearchParams(location.search).get("live") === "1"; } catch { return false; } }
 function setUrlLive(on: boolean): void {
     if (!state.day) return;
-    try { history.replaceState({}, "", on ? `?day=${state.day}&live=1${speedSuffix()}` : `?day=${state.day}${speedSuffix()}`); } catch { /* ignore */ }
+    try { history.replaceState({}, "", on ? `?day=${state.day}&live=1${extraSuffix()}` : `?day=${state.day}${extraSuffix()}`); } catch { /* ignore */ }
 }
 // Persist the current position as seconds-of-day in ?t (replaceState, no history spam). Skipped in live mode.
 function saveUrlPosition(wall: number): void {
     if (state.live || !state.day || !state.coverage) return;
     const t = Math.max(0, Math.round((wall - state.coverage.dayStartMs) / 1000));
-    try { history.replaceState({}, "", `?day=${state.day}&t=${t}${speedSuffix()}`); } catch { /* ignore */ }
+    try { history.replaceState({}, "", `?day=${state.day}&t=${t}${extraSuffix()}`); } catch { /* ignore */ }
 }
 
 async function selectDay(dayStr: string, push = true): Promise<void> {
     if (!api) return;
     if (push) setUrlDay(dayStr);
-    const cov = await api.getDayCoverage(dayStr.split("/"));
+    const cov = await fetchCoverage(dayStr, state.level);
     let startWall = cov.ranges.length ? cov.ranges[0].start : cov.dayStartMs;
     if (!push) { const t = getUrlT(); if (t != null) startWall = cov.dayStartMs + t * 1000; } // resume saved position
     runInAction(() => {
@@ -111,7 +159,9 @@ async function selectDay(dayStr: string, push = true): Promise<void> {
         state.playWall = startWall; state.desiredWall = startWall; state.hoverWall = null;
     });
     maybeStartDayPlayer();
-    watchSelectedDay(dayStr);
+    // Live-grow watch only makes sense for the full-res day index.
+    if (state.level === 0) watchSelectedDay(dayStr);
+    else if (lastWatchedDay) { api.unwatchDay(lastWatchedDay); lastWatchedDay = ""; }
 }
 
 // Watch a day so the trackbar grows as the live capture appends new footage.
@@ -131,7 +181,9 @@ function todayDayStr(): string { const d = new Date(); return `${d.getFullYear()
 async function enterLive(): Promise<void> {
     if (!api) return;
     const today = todayDayStr();
-    if (state.day !== today) await selectDay(today, true);
+    const needReselect = state.day !== today || state.level !== 0;
+    if (state.level !== 0) runInAction(() => { state.level = 0; }); // live is full-res real-time
+    if (needReselect) await selectDay(today, true);
     if (!player) return;
     runInAction(() => { state.live = true; });
     setUrlLive(true);
@@ -153,10 +205,11 @@ async function exitLive(): Promise<void> {
 
 function maybeStartDayPlayer(): void {
     if (!api || !videoEl || !state.coverage || !state.day) return;
-    if (player && playerKey === state.day) return;
+    const key = `${state.day}#${state.level}`;
+    if (player && playerKey === key) return;
     teardownPlayer();
-    playerKey = state.day;
-    player = new DayPlayer(videoEl, api, state.day.split("/"), state.coverage.dayStartMs, state.coverage.ranges);
+    playerKey = key;
+    player = new DayPlayer(videoEl, api, state.day.split("/"), state.coverage.dayStartMs, state.coverage.ranges, state.level);
     player.setSpeed(state.speed); // adopt the current (possibly URL-restored) playback speed
     player.onTime = (wall) => runInAction(() => { state.playWall = wall; });
     player.onStatus = (s) => runInAction(() => { state.playStatus = s; });
@@ -174,7 +227,8 @@ async function onReconnected(): Promise<void> {
     try {
         const days = await api.getAvailableDays();
         runInAction(() => { state.availableDays = days; });
-        if (state.day) { const cov = await api.getDayCoverage(state.day.split("/")); runInAction(() => { state.coverage = cov; }); if (player) player.ranges = cov.ranges; }
+        void refreshLevels();
+        if (state.day) { const cov = await fetchCoverage(state.day, state.level); runInAction(() => { state.coverage = cov; }); if (player) player.ranges = cov.ranges; }
     } catch { /* ignore */ }
     if (state.day) { lastWatchedDay = ""; watchSelectedDay(state.day); }
     if (state.live && player) { try { await player.startLive(); } catch { /* */ } }
@@ -342,6 +396,11 @@ const Controls = observer(class extends preact.Component { render() {
             </button>
             <span className={css.fontSize(13).width(110)} style={{ color: statusColor(state.playStatus) }}>{statusLabel(state.playStatus)}</span>
             <span className={css.fontSize(12).opacity(0.6).flexGrow(1)}>← → seek 5s</span>
+            <span className={css.fontSize(13).opacity(0.7)} title="Thinning level — real time per playback second">🔍</span>
+            <select className={selectCss} value={String(state.level)} title="Thinning level"
+                onChange={(e: any) => void setLevel(Number(e.target.value))}>
+                {levelOptions().map(l => <option key={l.level} value={String(l.level)}>{tpsLabel(l)}</option>)}
+            </select>
             <span className={css.fontSize(13).opacity(0.7)}>⏩</span>
             <select className={selectCss} value={String(state.speed)}
                 onChange={(e: any) => { const s = Number(e.target.value); runInAction(() => { state.speed = s; }); player?.setSpeed(s); saveUrlPosition(state.playWall); }}>
@@ -361,6 +420,34 @@ function shiftMonth(delta: number): void {
     const d = new Date(y, (m - 1) + delta, 1);
     runInAction(() => { state.calMonth = `${d.getFullYear()}-${pad2(d.getMonth() + 1)}`; });
 }
+
+const LevelsPanel = observer(class extends preact.Component { render() {
+    if (!state.levels.length) return <div />;
+    return (
+        <div className={css.vbox(6).width("100%").maxWidth(420)}>
+            <div className={css.fontSize(12).opacity(0.7)}>Thinning levels — how far back each reaches (click to view)</div>
+            {state.levels.map(l => {
+                const heldSec = l.latestMs > l.earliestMs ? (l.latestMs - l.earliestMs) / 1000 : 0;
+                const capSec = l.usedBytes > 0 ? heldSec * l.budgetBytes / l.usedBytes : 0;
+                const frac = l.budgetBytes > 0 ? Math.min(1, l.usedBytes / l.budgetBytes) : 0;
+                const sel = state.level === l.level;
+                return (
+                    <div key={l.level} onClick={() => void setLevel(l.level)} className={css.vbox(3).pad2(6, 8).pointer}
+                        style={{ background: sel ? "hsl(210,55%,20%)" : "hsl(220,15%,13%)", border: "1px solid " + (sel ? "hsl(210,80%,50%)" : "hsl(220,15%,24%)"), borderRadius: "4px" }}>
+                        <div className={css.hbox(8).fontSize(12).alignItems("baseline")} style={{ justifyContent: "space-between" }}>
+                            <span style={{ fontWeight: 600 }}>{tpsLabel(l)}</span>
+                            <span className={css.opacity(0.85)}>{heldSec > 0 ? `held ${fmtDur(heldSec)}` : "empty"}{capSec > 0 ? ` / ~${fmtDur(capSec)} capacity` : ""}</span>
+                        </div>
+                        <div style={{ position: "relative", height: "5px", background: "hsl(220,15%,22%)", borderRadius: "3px" }}>
+                            <div style={{ position: "absolute", top: 0, bottom: 0, left: 0, width: (frac * 100).toFixed(1) + "%", background: sel ? "hsl(210,90%,58%)" : "hsl(150,45%,40%)", borderRadius: "3px" }} />
+                        </div>
+                        <div className={css.fontSize(10).opacity(0.5)}>{gb(l.usedBytes)} / {gb(l.budgetBytes)} GB</div>
+                    </div>
+                );
+            })}
+        </div>
+    );
+} });
 
 const Calendar = observer(class extends preact.Component { render() {
     const days = new Set(state.availableDays);
@@ -427,6 +514,7 @@ const DayView = observer(class extends preact.Component { render() {
                 {state.day ? state.day.replace(/\//g, "-") : "No day selected"}{noFootage ? " · no footage this day" : ""}
             </div>}
             {!state.live && <Calendar />}
+            {!state.live && <LevelsPanel />}
             <div style={{ height: "48px" }} />
         </div>
     );

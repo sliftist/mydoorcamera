@@ -5,9 +5,14 @@
 import { createRpc, browserWsChannel, Rpc } from "../src/rpc";
 
 export type Range = { start: number; end: number };
-export type GopEntry = { t: number; e: number; f: string; o: number; l: number; n: number; a: number };
+export type GopEntry = { t: number; e: number; f: string; o: number; l: number; n: number; a: number; aMax: number };
 export type HourIndex = { gops: GopEntry[]; badRanges: Range[] };
 export type DayCoverage = { dayStartMs: number; dayEndMs: number; ranges: Range[]; badRanges: Range[]; activity: number[] };
+export type LevelCoverage = { fromMs: number; toMs: number; ranges: Range[]; badRanges: Range[]; activity: number[] };
+export type LevelInfo = {
+    level: number; timePerSec: number; gopSpanSec: number;
+    budgetBytes: number; usedBytes: number; earliestMs: number; latestMs: number;
+};
 
 export type Stats = {
     system: {
@@ -106,6 +111,18 @@ export class CameraApi {
         return this.call("getGopData", parts, file, off, len);
     }
     getStats(): Promise<Stats> { return this.call("getStats"); }
+
+    // ---- thinning levels ----
+    getLevels(): Promise<LevelInfo[]> { return this.call("getLevels"); }
+    getLevelCoverage(level: number, fromMs: number, toMs: number, buckets?: number): Promise<LevelCoverage> {
+        return this.call("getLevelCoverage", level, fromMs, toMs, buckets);
+    }
+    getLevelIndex(level: number, fromMs: number, toMs: number): Promise<HourIndex> {
+        return this.call("getLevelIndex", level, fromMs, toMs);
+    }
+    getLevelGopData(level: number, t: number, file: string, off: number, len: number): Promise<Uint8Array> {
+        return this.call("getLevelGopData", level, t, file, off, len);
+    }
 
     // ---- live streaming ----
     async startStream(day: string, cb: (meta: any, bytes: Uint8Array) => void): Promise<void> {

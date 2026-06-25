@@ -32,6 +32,12 @@ export class DayPlayer {
     private queue: { buf: Buffer; resolve: () => void }[] = [];
     private flushing = false;
     private hourCache = new Map<string, GopEntry[]>();
+    // Thinned-level playback (level>0): all the day's thinned GOPs are tiny, so we
+    // load them once. `comp` (= 30^level) compresses real time into MSE time, so a
+    // GOP at real time g.t plays at (g.t - dayStart)/1000/comp seconds.
+    private comp = 1;
+    private levelGops: GopEntry[] = [];
+    private levelReady: Promise<void> | undefined;
 
     private intent: "play" | "pause" = "pause";
     private targetWall: number;
@@ -60,7 +66,9 @@ export class DayPlayer {
         public dayParts: string[],
         public dayStartMs: number,
         public ranges: { start: number; end: number }[],
+        public level = 0,
     ) {
+        this.comp = Math.pow(30, level);
         this.targetWall = dayStartMs;
         this.video.addEventListener("timeupdate", this.onTimeUpdate);
         for (const ev of ["playing", "waiting", "pause", "seeked", "ended", "stalled", "canplay"]) {
@@ -70,10 +78,19 @@ export class DayPlayer {
     }
 
     // ---- helpers ----
-    internalSec(wall: number): number { return (wall - this.dayStartMs) / 1000; }
-    currentWall(): number { return this.dayStartMs + this.video.currentTime * 1000; }
+    internalSec(wall: number): number { return (wall - this.dayStartMs) / 1000 / this.comp; }
+    currentWall(): number { return this.dayStartMs + this.video.currentTime * 1000 * this.comp; }
     private hourNumOf(wall: number): number { return Math.floor((wall - this.dayStartMs) / 3600_000); }
-    private gopDurMs(g: GopEntry): number { return Math.round((g.n / FPS) * 1000); }
+    private gopDurMs(g: GopEntry): number { return this.level > 0 ? Math.max(1, g.e - g.t) : Math.round((g.n / FPS) * 1000); }
+
+    // Load all of the day's thinned GOPs once (level>0). Levels are small.
+    private ensureLevelLoaded(): Promise<void> {
+        if (!this.levelReady) this.levelReady = (async () => {
+            try { const r = await this.api.getLevelIndex(this.level, this.dayStartMs, this.dayStartMs + DAY_MS); this.levelGops = ((r && r.gops) || []).slice().sort((a, b) => a.t - b.t); }
+            catch { this.levelGops = []; }
+        })();
+        return this.levelReady;
+    }
     private coveredAt(wall: number): boolean { return this.ranges.some(r => wall >= r.start && wall <= r.end + 500); }
 
     get playStatus(): PlayStatus { return this.status; }
@@ -89,7 +106,10 @@ export class DayPlayer {
         this.speed = s;
         if (!this.live) { try { this.video.playbackRate = s; } catch { /* */ } }
     }
-    private bufferWindowMs(): number { return Math.min(60_000, Math.max(8_000, 15_000 * this.speed)); }
+    // Real-time buffer window. At a thinned level, one playback second consumes
+    // `comp` real seconds, so the real-time window scales by comp to keep the same
+    // amount of *playback* buffered.
+    private bufferWindowMs(): number { return Math.min(60_000, Math.max(8_000, 15_000 * this.speed)) * this.comp; }
 
     // ---- seeking (click / drag / arrows) ----
     seekTo(wall: number): void {
@@ -205,6 +225,13 @@ export class DayPlayer {
     }
 
     private async gopAt(wall: number): Promise<{ hh: string; g: GopEntry } | undefined> {
+        if (this.level > 0) {
+            await this.ensureLevelLoaded();
+            let found: GopEntry | undefined;
+            for (const g of this.levelGops) { if (g.t <= wall) found = g; else break; }
+            if (!found && this.levelGops.length) found = this.levelGops[0];
+            return found ? { hh: "", g: found } : undefined;
+        }
         const base = this.hourNumOf(wall);
         for (let hn = base; hn >= Math.max(0, base - 3); hn--) {
             const gops = await this.ensureHour(hn);
@@ -220,8 +247,10 @@ export class DayPlayer {
     }
 
     private async fetchNals(_hh: string, g: GopEntry): Promise<Buffer[]> {
-        // The data file (g.f = "<HH>.<session>.data") lives in the day directory.
-        const data = await this.api.getGopData(this.dayParts, g.f, g.o, g.l);
+        // L0: data file lives in the day directory. Thinned levels: fetch by level + t.
+        const data = this.level > 0
+            ? await this.api.getLevelGopData(this.level, g.t, g.f, g.o, g.l)
+            : await this.api.getGopData(this.dayParts, g.f, g.o, g.l);
         return splitFramedNals(Buffer.from(data));
     }
 
@@ -248,6 +277,15 @@ export class DayPlayer {
     }
 
     async loadRange(startWall: number, endWall: number): Promise<void> {
+        if (this.level > 0) {
+            await this.ensureLevelLoaded();
+            for (const g of this.levelGops) {
+                if (g.t + this.gopDurMs(g) < startWall) continue;
+                if (g.t > endWall) return;
+                if (!this.appended.has(g.t)) { try { await this.appendGop("", g); } catch { return; } }
+            }
+            return;
+        }
         for (let hn = this.hourNumOf(startWall); hn <= 23 && (this.dayStartMs + hn * 3600_000) <= endWall; hn++) {
             const hh = pad2(hn);
             for (const g of await this.ensureHour(hn)) {
