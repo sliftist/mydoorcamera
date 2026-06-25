@@ -59,10 +59,15 @@ export class DayPlayer {
     private spanEndMs = 0;              // end of the navigable period (day/month/year)
     private destroyed = false;
 
+    private seekingState = false;
+
     onStatus: ((s: PlayStatus) => void) | undefined;
     onTime: ((wallMs: number) => void) | undefined;
     onRate: ((rate: number) => void) | undefined;
     onBuffer: ((sec: number) => void) | undefined;
+    onSeeking: ((seeking: boolean) => void) | undefined; // true while chasing a seek target we haven't shown yet
+
+    private setSeeking(s: boolean): void { if (s !== this.seekingState) { this.seekingState = s; this.onSeeking?.(s); } }
 
     constructor(
         public video: HTMLVideoElement,
@@ -158,6 +163,7 @@ export class DayPlayer {
     private async runSeekPump(): Promise<void> {
         if (this.pumping) return;
         this.pumping = true;
+        this.setSeeking(true); // haven't shown the target frame yet
         try {
             while (this.shownWall !== this.targetWall) {
                 const t = this.targetWall;        // always chase the latest
@@ -167,6 +173,7 @@ export class DayPlayer {
         } finally {
             this.pumping = false;
         }
+        this.setSeeking(false); // target frame is now shown
         // Settled on a target. If playing, kick off normal windowed buffering +
         // playback; if paused, still prebuffer a few seconds so hitting play (or a
         // resume) starts immediately.

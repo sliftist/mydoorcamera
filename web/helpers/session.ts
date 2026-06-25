@@ -100,6 +100,7 @@ export function maybeStartDayPlayer(): void {
         if (player && player.wantsPlay && !state.live) state.desiredWall = wall;
     });
     player.onStatus = (s) => runInAction(() => { state.playStatus = s; });
+    player.onSeeking = (s) => runInAction(() => { state.seeking = s; });
     player.onRate = (r) => runInAction(() => { state.playbackRate = r; });
     player.onBuffer = (s) => runInAction(() => { state.bufferSec = s; });
     player.seekTo(state.desiredWall); // show the initial / resumed frame (paused), set by selectDay

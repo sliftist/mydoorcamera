@@ -28,6 +28,7 @@ export const state = observable({
     stats: null as Stats | null,
     online: true,
     playStatus: "paused" as PlayStatus,
+    seeking: false,                  // chasing a seek target whose frame isn't shown yet
     live: false,
     playbackRate: 1,
     bufferSec: 0,

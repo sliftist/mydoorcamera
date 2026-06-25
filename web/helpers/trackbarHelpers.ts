@@ -128,6 +128,9 @@ export function setTrackRef(el: HTMLElement | null): void {
     if (el) el.addEventListener("wheel", onTrackWheel as any, { passive: false });
 }
 
+// Current rendered width of the trackbar in px (for deciding GOP-marker visibility).
+export function getTrackWidth(): number { return trackEl ? trackEl.getBoundingClientRect().width : 0; }
+
 // Hover handlers used by the Trackbar component.
 export function onTrackHover(clientX: number): void { const w = clientToWall(clientX); if (w != null) runInAction(() => { state.hoverWall = w; }); }
 export function onTrackLeave(): void { if (!dragging) runInAction(() => { state.hoverWall = null; }); }

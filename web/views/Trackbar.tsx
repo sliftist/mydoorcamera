@@ -6,9 +6,10 @@ import { formatDateTime } from "socket-function/src/formatting/format";
 import { state } from "../helpers/appState";
 import { clockHMS } from "../helpers/format";
 import { navBtnCss } from "../helpers/styles";
-import { setTrackRef, onTrackDown, onTrackHover, onTrackLeave, resetZoom } from "../helpers/trackbarHelpers";
+import { setTrackRef, onTrackDown, onTrackHover, onTrackLeave, resetZoom, getTrackWidth } from "../helpers/trackbarHelpers";
 import { saveUrlPosition } from "../helpers/navigation";
 import { frameCount } from "../helpers/indexBuffer";
+import { levelGopSpanSec } from "../../src/config";
 
 const TICKS = [0, 1, 2, 3, 4]; // label positions across the bar (fractions of /4), incl. both ends
 
@@ -27,6 +28,20 @@ export class Trackbar extends preact.Component {
         const inView = (a: number, b: number) => b > vs && a < ve;
         return (
             <div className={css.vbox(4).width("100%")}>
+                {/* When zoomed enough that each GOP is wider than ~5px, mark them above
+                    the bar: a line over each GOP's range with a 3px gap at the end. */}
+                {(() => {
+                    const idx = state.index, widthPx = getTrackWidth();
+                    if (!idx || !idx.length || !widthPx) return null;
+                    if ((levelGopSpanSec(state.level) * 1000 / span) * widthPx <= 5) return null;
+                    const marks: any[] = [];
+                    for (const g of idx) {
+                        if (g.e <= vs || g.t >= ve) continue;
+                        if (((g.e - g.t) / span) * widthPx <= 5) continue;
+                        marks.push(<div key={g.t} style={{ position: "absolute", top: 0, bottom: 0, left: pct(g.t), width: `calc(${wpct(g.t, g.e)} - 3px)`, background: "hsl(210,45%,52%)" }} />);
+                    }
+                    return <div className={css.relative.width("100%")} style={{ height: "3px" }}>{marks}</div>;
+                })()}
                 <div ref={setTrackRef as any}
                     className={css.relative.width("100%").height(56).hsl(220, 15, 12).border("1px solid hsl(220,15%,28%)")}
                     style={{ cursor: "pointer", userSelect: "none", overflow: "hidden" }}
