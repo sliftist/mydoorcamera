@@ -225,6 +225,33 @@ export function readIdxIncremental(parts: string[], idxFile: string, fromByte: n
     } finally { fs.closeSync(fd); }
 }
 
+// ---- activity worker helpers ----
+
+// Backfill one record's activity float in place (fixed-size field; framing untouched).
+export function writeActivity(parts: string[], idxFile: string, recordStart: number, activity: number): void {
+    const fd = fs.openSync(path.join(DATA_DIR, ...parts, idxFile), "r+");
+    try { const b = Buffer.allocUnsafe(8); b.writeDoubleLE(activity, 0); fs.writeSync(fd, b, 0, 8, recordStart + ACTIVITY_BYTE_OFFSET); }
+    finally { fs.closeSync(fd); }
+}
+
+// Oldest records still needing activity (a === -1), in time order, bounded.
+export function findPendingActivity(limit: number): { parts: string[]; idxFile: string; start: number; gop: GopEntry }[] {
+    const out: { parts: string[]; idxFile: string; start: number; gop: GopEntry }[] = [];
+    for (const y of listChildren([])) for (const mo of listChildren([y])) for (const d of listChildren([y, mo])) {
+        const parts = [y, mo, d];
+        let files: string[]; try { files = fs.readdirSync(path.join(DATA_DIR, ...parts)); } catch { continue; }
+        for (const f of files.filter(x => x.endsWith(".idx")).sort()) {
+            const buf = (() => { try { return fs.readFileSync(path.join(DATA_DIR, ...parts, f)); } catch { return null; } })();
+            if (!buf) continue;
+            const { gops, starts } = decodeRecords(buf, f.slice(0, -4) + ".data");
+            for (let i = 0; i < gops.length; i++) {
+                if (gops[i].a === -1) { out.push({ parts, idxFile: f, start: starts[i], gop: gops[i] }); if (out.length >= limit) return out; }
+            }
+        }
+    }
+    return out;
+}
+
 export function dataReady(parts: string[], dataFile: string, o: number, l: number): boolean {
     try { return fs.statSync(path.join(DATA_DIR, ...parts, dataFile)).size >= o + l; } catch { return false; }
 }
