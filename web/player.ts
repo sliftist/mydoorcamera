@@ -41,6 +41,12 @@ export class DayPlayer {
     private live = false;
     private firstLive = true;
     private lastReceivedEnd = 0; // max end-time of any GOP received from the live stream
+    private rate = 1;
+    private minBuffer = Infinity;      // buffer trough since the last rate tick
+    private rateTimer: ReturnType<typeof setInterval> | undefined;
+    private wdLastTime = -1;           // stall watchdog
+    private wdStall = 0;
+    private watchdogTimer: ReturnType<typeof setInterval> | undefined;
 
     onStatus: ((s: PlayStatus) => void) | undefined;
     onTime: ((wallMs: number) => void) | undefined;
@@ -59,6 +65,7 @@ export class DayPlayer {
         for (const ev of ["playing", "waiting", "pause", "seeked", "ended", "stalled", "canplay"]) {
             this.video.addEventListener(ev, this.refreshStatus);
         }
+        this.watchdogTimer = setInterval(() => this.watchdog(), 500);
     }
 
     // ---- helpers ----
@@ -142,7 +149,13 @@ export class DayPlayer {
     }
 
     private onTimeUpdate = (): void => {
-        if (this.live) { this.adjustLiveRate(); this.onTime?.(this.currentWall()); return; }
+        if (this.live) {
+            const buf = this.bufferedSec();
+            this.minBuffer = Math.min(this.minBuffer, buf); // track the trough for the rate decision
+            this.onBuffer?.(buf);
+            this.onTime?.(this.currentWall());
+            return;
+        }
         const wall = this.currentWall();
         this.onTime?.(wall);
         if (this.intent === "play" && !this.video.paused && !this.pumping) {
@@ -246,8 +259,10 @@ export class DayPlayer {
 
     async startLive(): Promise<void> {
         this.live = true; this.intent = "play"; this.firstLive = true;
-        this.lastReceivedEnd = 0;
+        this.lastReceivedEnd = 0; this.rate = 1; this.minBuffer = Infinity;
         this.teardownMse(); // fresh timeline starting at the live edge
+        if (this.rateTimer) clearInterval(this.rateTimer);
+        this.rateTimer = setInterval(() => this.tickRate(), 1000);
         try { await this.api.startStream(this.dayParts.join("/"), (meta, bytes) => void this.onLiveData(meta, bytes)); }
         catch (e) { this.live = false; throw e; }
         this.refreshStatus();
@@ -255,6 +270,8 @@ export class DayPlayer {
 
     async stopLive(): Promise<void> {
         this.live = false;
+        if (this.rateTimer) { clearInterval(this.rateTimer); this.rateTimer = undefined; }
+        this.rate = 1;
         try { this.video.playbackRate = 1; } catch { /* */ }
         this.onRate?.(1);
         this.onBuffer?.(0);
@@ -291,19 +308,44 @@ export class DayPlayer {
         }
     }
 
-    // Hold ~2s of buffer at the live edge with gentle ±1-2% rate nudges.
-    private adjustLiveRate(): void {
-        if (!this.sb || !this.sb.buffered.length) return;
-        const ahead = this.sb.buffered.end(this.sb.buffered.length - 1) - this.video.currentTime;
-        let rate = 1;
-        if (ahead > 3) rate = 1.02;
-        else if (ahead > 2.3) rate = 1.01;
-        else if (ahead < 1) rate = 0.98;
-        else if (ahead < 1.7) rate = 0.99;
-        if (Math.abs(this.video.playbackRate - rate) > 0.001) { try { this.video.playbackRate = rate; } catch { /* */ } }
-        this.onRate?.(this.video.playbackRate);
-        this.onBuffer?.(this.bufferedSec());
+    // Rate control, once per second, measured at the buffer trough. Target a
+    // 1-2s buffer: under 1s slow down 1%, over 2s speed up 1%, otherwise ease
+    // back toward 1.0×. Clamped so we never get silly.
+    private tickRate(): void {
+        if (!this.live) return;
+        const buf = isFinite(this.minBuffer) ? this.minBuffer : this.bufferedSec();
+        this.minBuffer = Infinity;
+        if (buf < 1) this.rate = Math.max(0.90, this.rate - 0.01);
+        else if (buf > 2) this.rate = Math.min(1.10, this.rate + 0.01);
+        else if (this.rate > 1.0001) this.rate = Math.max(1, this.rate - 0.01);
+        else if (this.rate < 0.9999) this.rate = Math.min(1, this.rate + 0.01);
+        try { this.video.playbackRate = this.rate; } catch { /* */ }
+        this.onRate?.(this.rate);
         this.evictBefore(this.video.currentTime - 20);
+    }
+
+    // Stall watchdog: if we want to play but currentTime isn't advancing while
+    // there's buffered data ahead (an MSE gap the browser won't cross), jump
+    // past it to the next buffered range.
+    private watchdog(): void {
+        if (this.intent !== "play" || this.video.paused) { this.wdLastTime = this.video.currentTime; this.wdStall = 0; return; }
+        const ct = this.video.currentTime;
+        if (Math.abs(ct - this.wdLastTime) < 0.02) {
+            if (++this.wdStall >= 2) { this.jumpOverGap(); this.wdStall = 0; }
+        } else { this.wdStall = 0; }
+        this.wdLastTime = ct;
+    }
+    private jumpOverGap(): void {
+        if (!this.sb || !this.sb.buffered.length) return;
+        const ct = this.video.currentTime, b = this.sb.buffered;
+        let target = -1;
+        for (let i = 0; i < b.length; i++) {
+            if (b.start(i) > ct + 0.02) { target = b.start(i); break; }                       // a later range starts after a gap
+            if (ct <= b.end(i) + 0.02 && i + 1 < b.length) { target = b.start(i + 1); break; } // sitting at this range's end
+        }
+        if (target >= 0) {
+            try { this.video.currentTime = target + 0.05; void this.video.play(); } catch { /* */ } // jump a touch past the next frame
+        }
     }
 
     private teardownMse(): void {
@@ -314,6 +356,8 @@ export class DayPlayer {
 
     teardown(): void {
         if (this.live) { this.live = false; try { void this.api.stopStream(); } catch { /* */ } }
+        if (this.rateTimer) clearInterval(this.rateTimer);
+        if (this.watchdogTimer) clearInterval(this.watchdogTimer);
         this.video.removeEventListener("timeupdate", this.onTimeUpdate);
         for (const ev of ["playing", "waiting", "pause", "seeked", "ended", "stalled", "canplay"]) {
             this.video.removeEventListener(ev, this.refreshStatus);
