@@ -19,8 +19,8 @@ function firstLanIp(): string {
     }
     return "127.0.0.1";
 }
-import { createRpc, Channel } from "./rpc";
-import { listChildren, combineHour, readGopBytes, getAvailableDays, getDayCoverage } from "./storage";
+import { createRpc, Channel, Rpc } from "./rpc";
+import { listChildren, combineHour, readGopBytes, getAvailableDays, getDayCoverage, latestIdxFile, readIdxIncremental, dataReady, daySignature } from "./storage";
 import { getPassword, checkPassword, isBlacklisted, recordFailedAttempt } from "./auth";
 import { getSystemStats, readEncoderStats } from "./stats";
 import { getTimezone } from "./timezone";
@@ -82,7 +82,45 @@ function start(): void {
         let authed = false;
         const requireAuth = () => { if (!authed) throw new Error("not authenticated"); };
 
-        createRpc(nodeWsChannel(ws), {
+        // Live stream + day-watch state (server pushes by calling back the client).
+        let rpc: Rpc;
+        let streamTimer: ReturnType<typeof setInterval> | undefined;
+        let stream: { parts: string[]; file: string; offset: number } | undefined;
+        const watched = new Map<string, string>(); // "Y/M/D" -> last signature
+        let watchTimer: ReturnType<typeof setInterval> | undefined;
+
+        function stopStream(): void {
+            if (streamTimer) { clearInterval(streamTimer); streamTimer = undefined; }
+            stream = undefined;
+        }
+        function pollStream(): void {
+            if (!stream) return;
+            const live = latestIdxFile(stream.parts);
+            if (!live) return;
+            if (live !== stream.file) { stream.file = live; stream.offset = 0; } // hour rolled / restart
+            const { records, ends } = readIdxIncremental(stream.parts, stream.file, stream.offset);
+            for (let i = 0; i < records.length; i++) {
+                const r = records[i];
+                if (!dataReady(stream.parts, r.f, r.o, r.l)) break; // not flushed yet — retry next tick
+                const bytes = readGopBytes(stream.parts, r.f, r.o, r.l);
+                rpc.call("onStreamData", { t: r.t, e: r.e, n: r.n }, bytes).catch(() => { /* */ });
+                stream.offset = ends[i];
+            }
+        }
+        function pollWatched(): void {
+            for (const day of watched.keys()) {
+                const parts = day.split("/");
+                const sig = daySignature(parts);
+                if (sig !== watched.get(day)) {
+                    watched.set(day, sig);
+                    rpc.call("onRangesUpdated", day, getDayCoverage(parts)).catch(() => { /* */ });
+                }
+            }
+        }
+
+        ws.on("close", () => { stopStream(); if (watchTimer) clearInterval(watchTimer); });
+
+        rpc = createRpc(nodeWsChannel(ws), {
             async login(pw: string) {
                 if (isBlacklisted(clientIp)) throw new Error("blacklisted");
                 if (checkPassword(pw)) { authed = true; return { ok: true }; }
@@ -99,6 +137,30 @@ function start(): void {
             },
             async serverInfo() { requireAuth(); return { ip, port: SERVER_PORT }; },
             async getStats() { requireAuth(); return { system: await getSystemStats(DATA_DIR), encoder: readEncoderStats() }; },
+
+            // ---- live streaming ----
+            async startStream(day: string) {
+                requireAuth();
+                stopStream();
+                const parts = day.split("/");
+                // Start at the live edge: skip the existing backlog of the current file.
+                const live = latestIdxFile(parts);
+                let offset = 0;
+                if (live) { try { offset = readIdxIncremental(parts, live, 0).nextByte; } catch { offset = 0; } }
+                stream = { parts, file: live || "", offset };
+                streamTimer = setInterval(pollStream, 500);
+                return { ok: true };
+            },
+            async stopStream() { stopStream(); return { ok: true }; },
+
+            // ---- watch a day for growing coverage ----
+            async watchDay(day: string) {
+                requireAuth();
+                watched.set(day, daySignature(day.split("/")));
+                if (!watchTimer) watchTimer = setInterval(pollWatched, 2000);
+                return { ok: true };
+            },
+            async unwatchDay(day: string) { watched.delete(day); return { ok: true }; },
         });
     });
 

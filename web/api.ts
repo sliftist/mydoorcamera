@@ -27,6 +27,9 @@ export class CameraApi {
     // Optional hooks for the UI: connection up/down, and "just reconnected".
     onStatus: ((connected: boolean) => void) | undefined;
     onReconnect: (() => void) | undefined;
+    // Server-push routing.
+    private streamCb: ((meta: any, bytes: Uint8Array) => void) | undefined;
+    private watchCbs = new Map<string, (cov: DayCoverage) => void>();
 
     constructor(public ip: string, public port = 8443) {}
 
@@ -50,7 +53,15 @@ export class CameraApi {
                 reject(e);
             };
         });
-        const rpc = createRpc(browserWsChannel(ws), {});
+        const rpc = createRpc(browserWsChannel(ws), {
+            // Server pushes live GOPs here while streaming.
+            onStreamData: async (meta: any, bytes: Uint8Array) => {
+                if (this.streamCb) this.streamCb(meta, bytes);
+                else this.rpc?.call("stopStream").catch(() => { /* */ }); // never get stuck streaming
+            },
+            // Server pushes a day's new coverage as capture grows it.
+            onRangesUpdated: async (day: string, cov: DayCoverage) => { this.watchCbs.get(day)?.(cov); },
+        });
         await rpc.call("login", this.password); // rejects on wrong password / blacklist
         this.rpc = rpc;
         this.connected = true;
@@ -94,4 +105,24 @@ export class CameraApi {
         return this.call("getGopData", parts, file, off, len);
     }
     getStats(): Promise<Stats> { return this.call("getStats"); }
+
+    // ---- live streaming ----
+    async startStream(day: string, cb: (meta: any, bytes: Uint8Array) => void): Promise<void> {
+        this.streamCb = cb;
+        await this.call("startStream", day);
+    }
+    async stopStream(): Promise<void> {
+        this.streamCb = undefined;
+        if (this.rpc) await this.call("stopStream");
+    }
+
+    // ---- watch a day for growing coverage ----
+    async watchDay(day: string, cb: (cov: DayCoverage) => void): Promise<void> {
+        this.watchCbs.set(day, cb);
+        await this.call("watchDay", day);
+    }
+    unwatchDay(day: string): void {
+        this.watchCbs.delete(day);
+        if (this.rpc) this.call("unwatchDay", day).catch(() => { /* */ });
+    }
 }

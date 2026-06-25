@@ -38,6 +38,8 @@ export class DayPlayer {
     private shownWall = -1;
     private pumping = false;
     private status: PlayStatus = "paused";
+    private live = false;
+    private firstLive = true;
 
     onStatus: ((s: PlayStatus) => void) | undefined;
     onTime: ((wallMs: number) => void) | undefined;
@@ -137,6 +139,7 @@ export class DayPlayer {
     }
 
     private onTimeUpdate = (): void => {
+        if (this.live) { this.adjustLiveRate(); this.onTime?.(this.currentWall()); return; }
         const wall = this.currentWall();
         this.onTime?.(wall);
         if (this.intent === "play" && !this.video.paused && !this.pumping) {
@@ -235,7 +238,70 @@ export class DayPlayer {
         try { if (this.sb.buffered.length && this.sb.buffered.start(0) < sec - 5) this.sb.remove(0, sec); } catch { /* */ }
     }
 
+    // ---- live streaming ----
+    get isLive(): boolean { return this.live; }
+
+    async startLive(): Promise<void> {
+        this.live = true; this.intent = "play"; this.firstLive = true;
+        this.teardownMse(); // fresh timeline starting at the live edge
+        try { await this.api.startStream(this.dayParts.join("/"), (meta, bytes) => void this.onLiveData(meta, bytes)); }
+        catch (e) { this.live = false; throw e; }
+        this.refreshStatus();
+    }
+
+    async stopLive(): Promise<void> {
+        this.live = false;
+        try { this.video.playbackRate = 1; } catch { /* */ }
+        try { await this.api.stopStream(); } catch { /* */ }
+        this.intent = "pause"; this.refreshStatus();
+    }
+
+    private async ensureSourceBufferWithNals(nals: Buffer[]): Promise<void> {
+        if (this.sb) return;
+        this.ms = new MediaSource();
+        this.video.src = URL.createObjectURL(this.ms);
+        await new Promise<void>(res => this.ms!.addEventListener("sourceopen", () => res(), { once: true }));
+        this.sb = this.ms.addSourceBuffer(`video/mp4; codecs="${codecFromSps(nals)}"`);
+    }
+
+    private async onLiveData(meta: { t: number; e: number; n: number }, bytes: Uint8Array): Promise<void> {
+        if (!this.live) return;
+        const nals = splitFramedNals(Buffer.from(bytes));
+        await this.ensureSourceBufferWithNals(nals);
+        if (this.appended.has(meta.t)) return;
+        this.appended.add(meta.t);
+        try {
+            const mp4 = await H264toMP4({ buffer: nals, frameDurationInSeconds: 1 / FPS, mediaStartTimeSeconds: this.internalSec(meta.t) });
+            await this.enqueue(Buffer.from(mp4.buffer));
+        } catch { this.appended.delete(meta.t); return; }
+        if (this.firstLive) {
+            this.firstLive = false;
+            this.video.currentTime = this.internalSec(meta.t);
+            this.video.play().catch(() => { /* */ });
+        }
+    }
+
+    // Hold ~2s of buffer at the live edge with gentle ±1-2% rate nudges.
+    private adjustLiveRate(): void {
+        if (!this.sb || !this.sb.buffered.length) return;
+        const ahead = this.sb.buffered.end(this.sb.buffered.length - 1) - this.video.currentTime;
+        let rate = 1;
+        if (ahead > 3) rate = 1.02;
+        else if (ahead > 2.3) rate = 1.01;
+        else if (ahead < 1) rate = 0.98;
+        else if (ahead < 1.7) rate = 0.99;
+        if (Math.abs(this.video.playbackRate - rate) > 0.001) { try { this.video.playbackRate = rate; } catch { /* */ } }
+        this.evictBefore(this.video.currentTime - 20);
+    }
+
+    private teardownMse(): void {
+        try { this.video.pause(); this.video.removeAttribute("src"); this.video.load(); } catch { /* */ }
+        this.ms = undefined; this.sb = undefined;
+        this.appended.clear(); this.queue = []; this.flushing = false;
+    }
+
     teardown(): void {
+        if (this.live) { this.live = false; try { void this.api.stopStream(); } catch { /* */ } }
         this.video.removeEventListener("timeupdate", this.onTimeUpdate);
         for (const ev of ["playing", "waiting", "pause", "seeked", "ended", "stalled", "canplay"]) {
             this.video.removeEventListener(ev, this.refreshStatus);

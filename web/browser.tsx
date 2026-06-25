@@ -34,6 +34,7 @@ const state = observable({
     stats: null as Stats | null,
     online: true,
     playStatus: "paused" as PlayStatus,
+    live: false,
 }, undefined, { deep: false });
 
 let api: CameraApi | undefined;
@@ -43,6 +44,7 @@ let videoEl: HTMLVideoElement | null = null;
 let retryTimer: ReturnType<typeof setTimeout> | undefined;
 let statsTimer: ReturnType<typeof setInterval> | undefined;
 let posTimer: ReturnType<typeof setInterval> | undefined;
+let lastWatchedDay = "";
 
 // ---- connection ----
 async function connect(): Promise<void> {
@@ -97,6 +99,42 @@ async function selectDay(dayStr: string, push = true): Promise<void> {
         state.playWall = startWall; state.desiredWall = startWall; state.hoverWall = null;
     });
     maybeStartDayPlayer();
+    watchSelectedDay(dayStr);
+}
+
+// Watch a day so the trackbar grows as the live capture appends new footage.
+function watchSelectedDay(dayStr: string): void {
+    if (!api) return;
+    if (lastWatchedDay && lastWatchedDay !== dayStr) api.unwatchDay(lastWatchedDay);
+    lastWatchedDay = dayStr;
+    api.watchDay(dayStr, (cov) => {
+        if (state.day !== dayStr) return;
+        runInAction(() => { state.coverage = cov; });
+        if (player) player.ranges = cov.ranges; // so coveredAt sees the freshly-added data
+    }).catch(() => { /* */ });
+}
+
+function todayDayStr(): string { const d = new Date(); return `${d.getFullYear()}/${pad2(d.getMonth() + 1)}/${pad2(d.getDate())}`; }
+
+async function enterLive(): Promise<void> {
+    if (!api) return;
+    const today = todayDayStr();
+    if (state.day !== today) await selectDay(today, true);
+    if (!player) return;
+    runInAction(() => { state.live = true; });
+    try { await player.startLive(); }
+    catch (e) { runInAction(() => { state.live = false; }); console.error("[live] start failed:", e); }
+}
+
+async function exitLive(): Promise<void> {
+    runInAction(() => { state.live = false; });
+    if (player) await player.stopLive();
+    if (player && state.coverage && state.coverage.ranges.length) {
+        const wall = state.coverage.ranges[state.coverage.ranges.length - 1].end;
+        runInAction(() => { state.desiredWall = wall; });
+        player.seekTo(wall);
+        saveUrlPosition(wall);
+    }
 }
 
 function maybeStartDayPlayer(): void {
@@ -119,9 +157,11 @@ async function onReconnected(): Promise<void> {
     try {
         const days = await api.getAvailableDays();
         runInAction(() => { state.availableDays = days; });
-        if (state.day) { const cov = await api.getDayCoverage(state.day.split("/")); runInAction(() => { state.coverage = cov; }); }
+        if (state.day) { const cov = await api.getDayCoverage(state.day.split("/")); runInAction(() => { state.coverage = cov; }); if (player) player.ranges = cov.ranges; }
     } catch { /* ignore */ }
-    if (player) player.seekTo(state.playWall);
+    if (state.day) { lastWatchedDay = ""; watchSelectedDay(state.day); }
+    if (state.live && player) { try { await player.startLive(); } catch { /* */ } }
+    else if (player) player.seekTo(state.playWall);
 }
 
 // Trackbar drag-seek. We seek on mousedown (responsive), keep seeking while
@@ -260,7 +300,8 @@ const Controls = observer(class extends preact.Component { render() {
                 {playing ? "❚❚" : "►"}
             </button>
             <span className={css.fontSize(13).width(110)} style={{ color: statusColor(state.playStatus) }}>{statusLabel(state.playStatus)}</span>
-            <span className={css.fontSize(12).opacity(0.6)}>← → seek 5s</span>
+            <span className={css.fontSize(12).opacity(0.6).flexGrow(1)}>← → seek 5s</span>
+            <button className={liveBtnCss} title="Jump to live" onMouseDown={(e: any) => { e.preventDefault(); void enterLive(); }}>● Live</button>
         </div>
     );
 } });
@@ -320,13 +361,18 @@ const DayView = observer(class extends preact.Component { render() {
                 className={css.width("100%").background("#000").maxHeight("68vh")} playsInline muted
                 style={{ cursor: "pointer" }}
                 onMouseDown={(e: any) => { e.preventDefault(); player?.togglePlay(); saveUrlPosition(state.playWall); }} />
-            {state.coverage
-                ? <div className={css.vbox(8).width("100%")}><Trackbar /><Controls /></div>
-                : <div className={css.opacity(0.6).fontSize(13)}>Select a day below…</div>}
-            <div className={css.fontSize(13).opacity(0.75)}>
+            {state.live
+                ? <div className={css.hbox(14).alignItems("center")}>
+                    <span className={css.color("hsl(0,85%,62%)").fontSize(15)}>● LIVE</span>
+                    <button className={playBtnCss} onMouseDown={(e: any) => { e.preventDefault(); void exitLive(); }}>Exit Live</button>
+                </div>
+                : state.coverage
+                    ? <div className={css.vbox(8).width("100%")}><Trackbar /><Controls /></div>
+                    : <div className={css.opacity(0.6).fontSize(13)}>Select a day below…</div>}
+            {!state.live && <div className={css.fontSize(13).opacity(0.75)}>
                 {state.day ? state.day.replace(/\//g, "-") : "No day selected"}{noFootage ? " · no footage this day" : ""}
-            </div>
-            <Calendar />
+            </div>}
+            {!state.live && <Calendar />}
         </div>
     );
 } });
@@ -350,6 +396,7 @@ const inputCss = css.fontSize(15).pad2(10, 12).hsl(220, 15, 16).color("inherit")
 const btnCss = css.fontSize(15).pad2(10, 18).hsl(220, 90, 55).color("white").border("none").pointer.toString();
 const navBtnCss = css.fontSize(16).pad2(4, 12).hsl(220, 15, 18).color("inherit").border("1px solid hsl(220,15%,30%)").pointer.toString();
 const playBtnCss = css.fontSize(16).pad2(8, 16).hsl(220, 90, 55).color("white").border("none").pointer.toString();
+const liveBtnCss = css.fontSize(14).pad2(8, 14).hsl(0, 75, 48).color("white").border("none").pointer.toString();
 
 // Arrow keys seek ±5s (routed through the player's throttled seek-pump, so
 // holding them shows frames instead of endlessly buffering); space toggles play.

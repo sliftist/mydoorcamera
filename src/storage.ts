@@ -149,6 +149,66 @@ export function getDayCoverage(parts: string[]): DayCoverage {
     return { dayStartMs, dayEndMs, ranges: mergeRanges(good, 2500), badRanges: mergeRanges(bad) };
 }
 
+// ---- live streaming helpers ----
+
+// The most-recently-written index file for a day (the live edge).
+export function latestIdxFile(parts: string[]): string | undefined {
+    const dir = path.join(DATA_DIR, ...parts);
+    let files: string[]; try { files = fs.readdirSync(dir); } catch { return undefined; }
+    let best: string | undefined, bestM = -1;
+    for (const f of files) {
+        if (!f.endsWith(".idx")) continue;
+        try { const m = fs.statSync(path.join(dir, f)).mtimeMs; if (m > bestM) { bestM = m; best = f; } } catch { /* */ }
+    }
+    return best;
+}
+
+// Read COMPLETE index records appended after `fromByte`. A partially-written
+// trailing line (no \n yet) is left for next time. `ends[i]` is the byte offset
+// just past record i's line, so a caller can advance only through records it
+// actually consumed.
+export function readIdxIncremental(parts: string[], idxFile: string, fromByte: number): { records: GopEntry[]; ends: number[]; nextByte: number } {
+    const p = path.join(DATA_DIR, ...parts, idxFile);
+    let size: number; try { size = fs.statSync(p).size; } catch { return { records: [], ends: [], nextByte: fromByte }; }
+    if (size <= fromByte) return { records: [], ends: [], nextByte: fromByte };
+    const fd = fs.openSync(p, "r");
+    try {
+        const buf = Buffer.allocUnsafe(size - fromByte);
+        fs.readSync(fd, buf, 0, size - fromByte, fromByte);
+        const text = buf.toString("utf8");
+        const lastNl = text.lastIndexOf("\n");
+        if (lastNl < 0) return { records: [], ends: [], nextByte: fromByte };
+        const complete = text.slice(0, lastNl);
+        const dataFile = idxFile.slice(0, -4) + ".data";
+        const records: GopEntry[] = [], ends: number[] = [];
+        let acc = fromByte;
+        for (const line of complete.split("\n")) {
+            acc += Buffer.byteLength(line, "utf8") + 1;
+            if (!line) continue;
+            try { const r = JSON.parse(line); records.push({ t: r.t, e: r.e, f: dataFile, o: r.o, l: r.l, n: r.n }); ends.push(acc); } catch { /* */ }
+        }
+        return { records, ends, nextByte: acc };
+    } finally { fs.closeSync(fd); }
+}
+
+// True once the GOP's bytes are actually on disk (data is written before index,
+// but guard anyway so a reader never serves a hole).
+export function dataReady(parts: string[], dataFile: string, o: number, l: number): boolean {
+    try { return fs.statSync(path.join(DATA_DIR, ...parts, dataFile)).size >= o + l; } catch { return false; }
+}
+
+// Cheap change signature for a day (to detect new data for watchers).
+export function daySignature(parts: string[]): string {
+    const dir = path.join(DATA_DIR, ...parts);
+    let files: string[]; try { files = fs.readdirSync(dir); } catch { return ""; }
+    let sig = "";
+    for (const f of files.sort()) {
+        if (!f.endsWith(".idx")) continue;
+        try { const s = fs.statSync(path.join(dir, f)); sig += `${f}:${s.size};`; } catch { /* */ }
+    }
+    return sig;
+}
+
 // `parts` is the day [Y,MM,DD]; `file` is the <HH>.<session>.data name.
 export function readGopBytes(parts: string[], file: string, off: number, len: number): Buffer {
     const fd = fs.openSync(path.join(DATA_DIR, ...parts, file), "r");
