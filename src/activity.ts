@@ -12,6 +12,9 @@ import { splitFramedNals } from "./annexb";
 
 const W = 64, H = 36, FRAME = W * H;   // tiny grayscale frame
 const NOISE = 16;                       // per-pixel change below this is treated as sensor noise
+// Ignore the burned-in timestamp (top-left) so its ticking digits aren't read as
+// activity. Generous box over the clock overlay in the downscaled WxH frame.
+const MASK_ROWS = 4, MASK_COLS = 18;
 const PENDING_LIMIT = 12;               // records examined per pass
 const PERIOD_MS = 1000;
 const SAMPLE_INTERVAL_MS = 3000;        // only decode/diff one keyframe every ~3s (the rest get 0)
@@ -58,9 +61,14 @@ function decode(stream: Buffer): Promise<Buffer[]> {
 
 function activityOf(cur: Buffer, prev?: Buffer): number {
     if (!prev) return 0;
-    let changed = 0;
-    for (let i = 0; i < FRAME; i++) if (Math.abs(cur[i] - prev[i]) > NOISE) changed++;
-    return changed / FRAME;
+    let changed = 0, counted = 0;
+    for (let i = 0; i < FRAME; i++) {
+        const row = (i / W) | 0, col = i % W;
+        if (row < MASK_ROWS && col < MASK_COLS) continue; // skip the timestamp area
+        counted++;
+        if (Math.abs(cur[i] - prev[i]) > NOISE) changed++;
+    }
+    return counted ? changed / counted : 0;
 }
 
 async function loop(): Promise<void> {

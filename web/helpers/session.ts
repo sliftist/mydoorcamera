@@ -9,7 +9,7 @@ import { state, lsSet } from "./appState";
 import {
     selectPeriod, refreshLevels, saveUrlPosition, rewatchDay, reloadIndex, applyUrlZoom,
     periodStartFromKey, todayStart,
-    getUrlSpeed, getUrlLevel, getUrlDay, getUrlLive, setUrlLive,
+    getUrlSpeed, getUrlLevel, getUrlActivityExp, getUrlDay, getUrlLive, setUrlLive,
 } from "./navigation";
 
 export let api: CameraApi | undefined;
@@ -42,7 +42,7 @@ export async function connect(): Promise<void> {
         }, 1000);
         if (!posTimer) posTimer = setInterval(() => { if (state.day && state.coverage) saveUrlPosition(state.playWall); void refreshLevels(); }, 30000);
         void refreshLevels();
-        runInAction(() => { state.speed = getUrlSpeed(); state.level = getUrlLevel(); }); // restore speed + level before the player is created
+        runInAction(() => { state.speed = getUrlSpeed(); state.level = getUrlLevel(); state.activityExp = getUrlActivityExp(); }); // restore settings before the player is created
         const urlDay = getUrlDay();
         const anchor = urlDay ? periodStartFromKey(urlDay) : (days.length ? periodStartFromKey(days[days.length - 1]) : 0);
         if (anchor) { await selectPeriod(anchor, false); applyUrlZoom(); }

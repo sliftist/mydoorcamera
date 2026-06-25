@@ -115,7 +115,9 @@ function zoomSuffix(): string {
     if (vs <= start + 500 && ve >= end - 500) return "";
     return `&z=${Math.round(vs - start)}-${Math.round(ve - start)}`;
 }
-function extraSuffix(): string { return lvlSuffix() + speedSuffix() + zoomSuffix(); }
+function acSuffix(): string { return state.activityExp !== 0.4 ? `&ac=${state.activityExp}` : ""; }
+function extraSuffix(): string { return lvlSuffix() + speedSuffix() + zoomSuffix() + acSuffix(); }
+export function getUrlActivityExp(): number { try { const n = Number(new URLSearchParams(location.search).get("ac")); return n > 0 && n <= 5 ? n : 0.4; } catch { return 0.4; } }
 export function getUrlZoom(): { vs: number; ve: number } | null {
     try { const v = new URLSearchParams(location.search).get("z"); if (!v) return null; const [a, b] = v.split("-").map(Number); return isFinite(a) && isFinite(b) && b > a ? { vs: a, ve: b } : null; } catch { return null; }
 }

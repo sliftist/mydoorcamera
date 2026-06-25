@@ -3,10 +3,11 @@ import { runInAction } from "mobx";
 import { observer } from "sliftutils/render-utils/observer";
 import { css } from "typesafecss";
 import { formatDateTime } from "socket-function/src/formatting/format";
-import { state, lsSet } from "../helpers/appState";
+import { state } from "../helpers/appState";
 import { clockHMS } from "../helpers/format";
 import { navBtnCss } from "../helpers/styles";
 import { setTrackRef, onTrackDown, onTrackHover, onTrackLeave, resetZoom } from "../helpers/trackbarHelpers";
+import { saveUrlPosition } from "../helpers/navigation";
 import { frameCount } from "../helpers/indexBuffer";
 
 const TICKS = [0, 1, 2, 3, 4]; // label positions across the bar (fractions of /4), incl. both ends
@@ -92,7 +93,7 @@ export class Trackbar extends preact.Component {
                     <span className={css.hbox(4).alignItems("center").opacity(0.6)} title="Activity chart curve (gamma) — lower emphasizes small activity">
                         activity curve
                         <input type="number" step="0.05" min="0.05" max="3" value={state.activityExp}
-                            onInput={(e: any) => { const v = Number(e.target.value) || 0.4; runInAction(() => { state.activityExp = v; }); lsSet("mdc_actexp", String(v)); }}
+                            onInput={(e: any) => { const v = Number(e.target.value) || 0.4; runInAction(() => { state.activityExp = v; }); saveUrlPosition(state.playWall); }}
                             style={{ width: "52px", fontSize: "11px", padding: "1px 4px", background: "hsl(220,15%,16%)", color: "inherit", border: "1px solid hsl(220,15%,30%)" }} />
                     </span>
                     {zoomed
