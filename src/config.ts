@@ -7,7 +7,8 @@
 declare const process: any;
 const env = (typeof process !== "undefined" && process.env) || {};
 
-export const DATA_DIR = env.MYDOORCAMERA_DATA || "/var/lib/mydoorcamera/data";
+// New storage format lives here (renamed from the old /data so we start fresh).
+export const DATA_DIR = env.MYDOORCAMERA_DATA || "/var/lib/mydoorcamera/recordings";
 
 // Capture — the FPS-tuned 1080p30 hardware-encode pipeline (see capture.ts).
 export const VIDEO_DEVICE = env.MYDOORCAMERA_VIDEO || "/dev/video0";

@@ -28,14 +28,22 @@ async function main(): Promise<void> {
     const pw = fs.readFileSync("/var/lib/mydoorcamera/password.txt", "utf8").trim();
     console.log("✓ login:", JSON.stringify(await rpc.call("login", pw)));
 
-    const years = await rpc.call("listChildren", []);
-    const y = years[0], mo = (await rpc.call("listChildren", [y]))[0],
-        d = (await rpc.call("listChildren", [y, mo]))[0], h = (await rpc.call("listChildren", [y, mo, d]))[0];
-    const idx = await rpc.call("getHourIndex", [y, mo, d, h]);
-    console.log(`✓ nav ${y}/${mo}/${d}/${h}: ${idx.length} GOPs, first=`, JSON.stringify(idx[0]));
+    const days = await rpc.call("getAvailableDays");
+    console.log("✓ availableDays:", JSON.stringify(days));
+    const dayParts = days[days.length - 1].split("/");
+    const cov = await rpc.call("getDayCoverage", dayParts);
+    console.log(`✓ dayCoverage: ${cov.ranges.length} range(s), ${cov.badRanges.length} bad range(s)`);
 
-    const g = idx[0];
-    const buf = await rpc.call("getGopData", [y, mo, d, h], g.f, g.o, g.l);
+    let gops: any[] = [], usedHour = "";
+    for (let h = 0; h < 24; h++) {
+        const hh = String(h).padStart(2, "0");
+        const r = await rpc.call("getHourIndex", [...dayParts, hh]);
+        if (r.gops.length) { gops = r.gops; usedHour = hh; break; }
+    }
+    console.log(`✓ hour ${usedHour}: ${gops.length} GOPs, first=`, JSON.stringify(gops[0]));
+
+    const g = gops[0];
+    const buf = await rpc.call("getGopData", dayParts, g.f, g.o, g.l);
     const ok = (buf instanceof Uint8Array) && buf.length === g.l;
     console.log(`✓ getGopData: ${ok ? "binary " + buf.length + " bytes (native, matches index)" : "WRONG: " + typeof buf}`);
 

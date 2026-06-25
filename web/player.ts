@@ -165,7 +165,7 @@ export class DayPlayer {
         if (hourNum < 0 || hourNum > 23) return [];
         const hh = pad2(hourNum);
         if (!this.hourCache.has(hh)) {
-            try { this.hourCache.set(hh, await this.api.getHourIndex([...this.dayParts, hh])); }
+            try { const r = await this.api.getHourIndex([...this.dayParts, hh]); this.hourCache.set(hh, (r && r.gops) || []); }
             catch { return []; }
         }
         return this.hourCache.get(hh) || [];
@@ -186,8 +186,9 @@ export class DayPlayer {
         return undefined;
     }
 
-    private async fetchNals(hh: string, g: GopEntry): Promise<Buffer[]> {
-        const data = await this.api.getGopData([...this.dayParts, hh], g.f, g.o, g.l);
+    private async fetchNals(_hh: string, g: GopEntry): Promise<Buffer[]> {
+        // The data file (g.f = "<HH>.<session>.data") lives in the day directory.
+        const data = await this.api.getGopData(this.dayParts, g.f, g.o, g.l);
         return splitFramedNals(Buffer.from(data));
     }
 

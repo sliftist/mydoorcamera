@@ -1,166 +1,180 @@
-// On-disk video store. Layout under DATA_DIR:
-//   YYYY/MM/DD/HH/seg_<ms>.nal      length-prefixed NAL bytes (rolling segments)
-//   YYYY/MM/DD/HH/index.ndjson      one JSON line per GOP: {t,f,o,l,n}
+// On-disk video store (v2). Per capture session + hour we stream two files
+// side by side into the day's directory:
+//   YYYY/MM/DD/<HH>.<sessionId>.data   length-prefixed NAL bytes (one GOP after another)
+//   YYYY/MM/DD/<HH>.<sessionId>.idx    one JSON line per GOP: {t,e,o,l,n}
 //
-// Each GOP is self-contained and immutable: [SPS, PPS, IDR, ...dependent frames].
-// The index makes "where are the NALs for time T" an O(log n) lookup: find the
-// GOP whose keyframe time is at/just-before T, then read its byte range.
+// A restart makes a new sessionId, so an hour can have several file pairs. On
+// read we combine them, ordered by sessionId (the stable "id"). Each GOP's
+// [t,e] interval is RESERVED by the first session to claim it; any later GOP
+// overlapping a reserved interval is dropped from the index (never served),
+// console.warn'd, and reported as a "bad range" so the UI can flag it. We expect
+// sessions to be end-to-end at worst; interlaced/overlapping data is the warning.
 
 import * as fs from "fs";
 import * as path from "path";
 import { DATA_DIR, RETENTION_BYTES, FPS } from "./config";
 import { frameNal } from "./annexb";
 
-const SEGMENT_MAX_BYTES = 64 * 1024 * 1024;
+export type Range = { start: number; end: number };
+export type GopEntry = { t: number; e: number; f: string; o: number; l: number; n: number };
+export type HourIndex = { gops: GopEntry[]; badRanges: Range[] };
+export type DayCoverage = { dayStartMs: number; dayEndMs: number; ranges: Range[]; badRanges: Range[] };
 
-// One GOP's index record. Short keys keep the index file small.
-export type GopEntry = {
-    t: number;   // keyframe wall-clock time (ms)
-    f: string;   // segment file name
-    o: number;   // byte offset of the GOP within the file
-    l: number;   // byte length of the GOP
-    n: number;   // frame count in the GOP
-};
+function pad2(n: number): string { return String(n).padStart(2, "0"); }
+function dayPartsOf(ms: number): string[] { const d = new Date(ms); return [String(d.getFullYear()), pad2(d.getMonth() + 1), pad2(d.getDate())]; }
+function hourOf(ms: number): string { return pad2(new Date(ms).getHours()); }
 
-function pad(n: number, w = 2): string { return String(n).padStart(w, "0"); }
-
-export function hourPartsForTime(ms: number): string[] {
-    const d = new Date(ms);
-    return [String(d.getFullYear()), pad(d.getMonth() + 1), pad(d.getDate()), pad(d.getHours())];
-}
-
-export class StorageWriter {
-    private hourDir = "";
-    private segFile = "";
-    private segPath = "";
-    private indexPath = "";
-    private segOffset = 0;
-
-    private ensureTarget(ms: number): void {
-        const dir = path.join(DATA_DIR, ...hourPartsForTime(ms));
-        if (dir === this.hourDir && this.segOffset < SEGMENT_MAX_BYTES) return;
-        if (dir !== this.hourDir) {
-            fs.mkdirSync(dir, { recursive: true });
-            this.hourDir = dir;
-            this.indexPath = path.join(dir, "index.ndjson");
-        }
-        this.newSegment(ms);
-    }
-
-    private newSegment(ms: number): void {
-        this.segFile = `seg_${ms}.nal`;
-        this.segPath = path.join(this.hourDir, this.segFile);
-        this.segOffset = 0;
-        fs.writeFileSync(this.segPath, Buffer.alloc(0));
-    }
-
-    // Persist one self-contained GOP. `nals` = [SPS, PPS, IDR, ...frames].
-    writeGop(nals: Buffer[], timeMs: number, frameCount: number): void {
-        this.ensureTarget(timeMs);
-        const body = Buffer.concat(nals.map(frameNal));
-        fs.appendFileSync(this.segPath, body);
-        const entry: GopEntry = { t: timeMs, f: this.segFile, o: this.segOffset, l: body.length, n: frameCount };
-        fs.appendFileSync(this.indexPath, JSON.stringify(entry) + "\n");
-        this.segOffset += body.length;
-    }
-}
-
-// ---- Read side (used by the server) ----
-
-// List immediate subfolders at a path level (years -> months -> days -> hours).
-export function listChildren(parts: string[]): string[] {
-    try {
-        return fs.readdirSync(path.join(DATA_DIR, ...parts), { withFileTypes: true })
-            .filter(e => e.isDirectory())
-            .map(e => e.name)
-            .sort();
-    } catch { return []; }
-}
-
-export function readHourIndex(parts: string[]): GopEntry[] {
-    try {
-        const txt = fs.readFileSync(path.join(DATA_DIR, ...parts, "index.ndjson"), "utf8");
-        return txt.split("\n").filter(Boolean).map(l => JSON.parse(l) as GopEntry);
-    } catch { return []; }
-}
-
-// All days that have footage, as "YYYY/MM/DD" (for the calendar).
-export function getAvailableDays(): string[] {
-    const out: string[] = [];
-    for (const y of listChildren([])) {
-        for (const mo of listChildren([y])) {
-            for (const d of listChildren([y, mo])) out.push(`${y}/${mo}/${d}`);
-        }
+// Merge overlapping/adjacent ranges. joinMs bridges small gaps (consecutive GOPs
+// sit ~1/fps apart, so continuous footage shows as one band, not hundreds).
+function mergeRanges(rs: Range[], joinMs = 0): Range[] {
+    if (!rs.length) return [];
+    const s = [...rs].sort((a, b) => a.start - b.start);
+    const out: Range[] = [{ ...s[0] }];
+    for (let i = 1; i < s.length; i++) {
+        const last = out[out.length - 1];
+        if (s[i].start <= last.end + joinMs) last.end = Math.max(last.end, s[i].end);
+        else out.push({ ...s[i] });
     }
     return out;
 }
 
-export type DayCoverage = { dayStartMs: number; dayEndMs: number; ranges: { start: number; end: number }[] };
+// Unique per process run — distinguishes file pairs written across restarts.
+const SESSION = Date.now();
 
-// Coverage for one day: the wall-clock day bounds plus the contiguous ranges
-// where video actually exists (so the trackbar can show gaps / dropouts). Built
-// by merging every hour's GOP spans, joining across gaps under ~2s.
+export class StorageWriter {
+    private dayDir = "";
+    private hour = "";
+    private dataPath = "";
+    private idxPath = "";
+    private offset = 0;
+
+    private ensureTarget(ms: number): void {
+        const dir = path.join(DATA_DIR, ...dayPartsOf(ms));
+        const hh = hourOf(ms);
+        if (dir === this.dayDir && hh === this.hour) return;
+        fs.mkdirSync(dir, { recursive: true });
+        this.dayDir = dir; this.hour = hh;
+        this.dataPath = path.join(dir, `${hh}.${SESSION}.data`);
+        this.idxPath = path.join(dir, `${hh}.${SESSION}.idx`);
+        try { this.offset = fs.statSync(this.dataPath).size; } catch { this.offset = 0; }
+    }
+
+    // One self-contained GOP: [SPS, PPS, IDR, ...frames]; timeMs = keyframe wall-clock.
+    writeGop(nals: Buffer[], timeMs: number, frameCount: number): void {
+        this.ensureTarget(timeMs);
+        const body = Buffer.concat(nals.map(frameNal));
+        fs.appendFileSync(this.dataPath, body);
+        const e = timeMs + Math.round((frameCount / FPS) * 1000);
+        fs.appendFileSync(this.idxPath, JSON.stringify({ t: timeMs, e, o: this.offset, l: body.length, n: frameCount }) + "\n");
+        this.offset += body.length;
+    }
+}
+
+// ---- read side ----
+
+export function listChildren(parts: string[]): string[] {
+    try {
+        return fs.readdirSync(path.join(DATA_DIR, ...parts), { withFileTypes: true })
+            .filter(e => e.isDirectory()).map(e => e.name).sort();
+    } catch { return []; }
+}
+
+export function getAvailableDays(): string[] {
+    const out: string[] = [];
+    for (const y of listChildren([]))
+        for (const mo of listChildren([y]))
+            for (const d of listChildren([y, mo])) out.push(`${y}/${mo}/${d}`);
+    return out;
+}
+
+// Combine every session file for one hour, applying the reservation rule.
+export function combineHour(parts: string[]): HourIndex {
+    const [y, mo, d, hh] = parts;
+    const dir = path.join(DATA_DIR, y, mo, d);
+    let files: string[];
+    try { files = fs.readdirSync(dir); } catch { return { gops: [], badRanges: [] }; }
+
+    const idxFiles = files
+        .filter(f => f.startsWith(hh + ".") && f.endsWith(".idx"))
+        .map(f => ({ f, session: Number(f.split(".")[1]) || 0 }))
+        .sort((a, b) => a.session - b.session); // stable order by session id
+
+    const reserved: Range[] = [];
+    const gops: GopEntry[] = [];
+    const bad: Range[] = [];
+    const overlaps = (s: number, e: number) => reserved.some(r => s < r.end && e > r.start);
+    const reserve = (s: number, e: number) => {
+        const last = reserved[reserved.length - 1];
+        if (last && s <= last.end && s >= last.start) last.end = Math.max(last.end, e);
+        else reserved.push({ start: s, end: e });
+    };
+
+    for (const { f } of idxFiles) {
+        const dataFile = f.slice(0, -4) + ".data";
+        let lines: string[];
+        try { lines = fs.readFileSync(path.join(dir, f), "utf8").split("\n"); } catch { continue; }
+        for (const line of lines) {
+            if (!line) continue;
+            let rec: any; try { rec = JSON.parse(line); } catch { continue; }
+            if (overlaps(rec.t, rec.e)) { bad.push({ start: rec.t, end: rec.e }); continue; }
+            reserve(rec.t, rec.e);
+            gops.push({ t: rec.t, e: rec.e, f: dataFile, o: rec.o, l: rec.l, n: rec.n });
+        }
+    }
+    gops.sort((a, b) => a.t - b.t);
+    const badRanges = mergeRanges(bad);
+    if (badRanges.length) {
+        console.warn(`[storage] interlaced/overlapping data in ${y}/${mo}/${d} ${hh}h: ${bad.length} conflicting GOP(s) ignored across ${badRanges.length} range(s)`);
+    }
+    return { gops, badRanges };
+}
+
 export function getDayCoverage(parts: string[]): DayCoverage {
     const [y, mo, d] = parts;
     const dayStartMs = new Date(Number(y), Number(mo) - 1, Number(d), 0, 0, 0, 0).getTime();
     const dayEndMs = dayStartMs + 24 * 3600 * 1000;
-
-    const spans: { s: number; e: number }[] = [];
-    for (const h of listChildren(parts)) {
-        for (const g of readHourIndex([...parts, h])) {
-            spans.push({ s: g.t, e: g.t + Math.round((g.n / FPS) * 1000) });
-        }
+    const good: Range[] = [];
+    const bad: Range[] = [];
+    for (let h = 0; h < 24; h++) {
+        const { gops, badRanges } = combineHour([y, mo, d, pad2(h)]);
+        for (const g of gops) good.push({ start: g.t, end: g.e });
+        bad.push(...badRanges);
     }
-    spans.sort((a, b) => a.s - b.s);
-
-    const ranges: { start: number; end: number }[] = [];
-    const JOIN_MS = 2000;
-    for (const sp of spans) {
-        const last = ranges[ranges.length - 1];
-        if (last && sp.s - last.end <= JOIN_MS) last.end = Math.max(last.end, sp.e);
-        else ranges.push({ start: sp.s, end: sp.e });
-    }
-    return { dayStartMs, dayEndMs, ranges };
+    // Bridge sub-2.5s gaps so continuous capture is one band; bigger gaps = real dropouts.
+    return { dayStartMs, dayEndMs, ranges: mergeRanges(good, 2500), badRanges: mergeRanges(bad) };
 }
 
+// `parts` is the day [Y,MM,DD]; `file` is the <HH>.<session>.data name.
 export function readGopBytes(parts: string[], file: string, off: number, len: number): Buffer {
     const fd = fs.openSync(path.join(DATA_DIR, ...parts, file), "r");
-    try {
-        const b = Buffer.allocUnsafe(len);
-        fs.readSync(fd, b, 0, len, off);
-        return b;
-    } finally { fs.closeSync(fd); }
+    try { const b = Buffer.allocUnsafe(len); fs.readSync(fd, b, 0, len, off); return b; }
+    finally { fs.closeSync(fd); }
 }
 
-// Rolling retention: delete whole oldest hour-folders until under the byte cap.
-// Whole-hour deletion keeps each hour's index self-consistent.
-export function enforceRetention(): { deletedHours: string[]; totalBytes: number } {
-    const hours: { dir: string; key: string; bytes: number }[] = [];
-    const walk = (dir: string, depth: number, keyParts: string[]): void => {
-        let entries: fs.Dirent[];
-        try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
-        if (depth === 4) {
-            let bytes = 0;
-            for (const e of entries) {
-                if (e.isFile() && e.name.startsWith("seg_")) {
-                    try { bytes += fs.statSync(path.join(dir, e.name)).size; } catch { /* ignore */ }
-                }
-            }
-            hours.push({ dir, key: keyParts.join("/"), bytes });
-            return;
+// Rolling retention: delete oldest (day/hour/session) file pairs until under cap.
+export function enforceRetention(): { deleted: string[]; totalBytes: number } {
+    const items: { data: string; idx: string; key: string; bytes: number }[] = [];
+    for (const y of listChildren([])) for (const mo of listChildren([y])) for (const d of listChildren([y, mo])) {
+        const dir = path.join(DATA_DIR, y, mo, d);
+        let files: string[]; try { files = fs.readdirSync(dir); } catch { continue; }
+        for (const f of files) {
+            if (!f.endsWith(".data")) continue;
+            let bytes = 0; try { bytes = fs.statSync(path.join(dir, f)).size; } catch { /* */ }
+            items.push({ data: path.join(dir, f), idx: path.join(dir, f.slice(0, -5) + ".idx"), key: `${y}/${mo}/${d}/${f}`, bytes });
         }
-        for (const e of entries) if (e.isDirectory()) walk(path.join(dir, e.name), depth + 1, [...keyParts, e.name]);
-    };
-    walk(DATA_DIR, 0, []);
-
-    let total = hours.reduce((s, h) => s + h.bytes, 0);
-    hours.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0)); // chronological (zero-padded)
-    const deletedHours: string[] = [];
-    for (const h of hours) {
-        if (total <= RETENTION_BYTES) break;
-        fs.rmSync(h.dir, { recursive: true, force: true });
-        total -= h.bytes;
-        deletedHours.push(h.key);
     }
-    return { deletedHours, totalBytes: total };
+    let total = items.reduce((s, i) => s + i.bytes, 0);
+    items.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+    const deleted: string[] = [];
+    for (const it of items) {
+        if (total <= RETENTION_BYTES) break;
+        try { fs.rmSync(it.data, { force: true }); fs.rmSync(it.idx, { force: true }); } catch { /* */ }
+        total -= it.bytes; deleted.push(it.key);
+    }
+    // prune now-empty day folders
+    for (const y of listChildren([])) for (const mo of listChildren([y])) for (const d of listChildren([y, mo])) {
+        const dir = path.join(DATA_DIR, y, mo, d);
+        try { if (fs.readdirSync(dir).length === 0) fs.rmdirSync(dir); } catch { /* */ }
+    }
+    return { deleted, totalBytes: total };
 }

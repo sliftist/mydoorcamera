@@ -4,8 +4,10 @@
 
 import { createRpc, browserWsChannel, Rpc } from "../src/rpc";
 
-export type GopEntry = { t: number; f: string; o: number; l: number; n: number };
-export type DayCoverage = { dayStartMs: number; dayEndMs: number; ranges: { start: number; end: number }[] };
+export type Range = { start: number; end: number };
+export type GopEntry = { t: number; e: number; f: string; o: number; l: number; n: number };
+export type HourIndex = { gops: GopEntry[]; badRanges: Range[] };
+export type DayCoverage = { dayStartMs: number; dayEndMs: number; ranges: Range[]; badRanges: Range[] };
 
 export type Stats = {
     system: {
@@ -87,7 +89,7 @@ export class CameraApi {
     listChildren(parts: string[]): Promise<string[]> { return this.call("listChildren", parts); }
     getAvailableDays(): Promise<string[]> { return this.call("getAvailableDays"); }
     getDayCoverage(parts: string[]): Promise<DayCoverage> { return this.call("getDayCoverage", parts); }
-    getHourIndex(parts: string[]): Promise<GopEntry[]> { return this.call("getHourIndex", parts); }
+    getHourIndex(parts: string[]): Promise<HourIndex> { return this.call("getHourIndex", parts); }
     getGopData(parts: string[], file: string, off: number, len: number): Promise<Uint8Array> {
         return this.call("getGopData", parts, file, off, len);
     }

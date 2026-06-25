@@ -111,8 +111,8 @@ setInterval(() => {
 setInterval(() => {
     try {
         const r = enforceRetention();
-        if (r.deletedHours.length) {
-            console.log(`[capture] retention: deleted ${r.deletedHours.length} hour(s), now ${(r.totalBytes / 1e9).toFixed(2)} GB`);
+        if (r.deleted.length) {
+            console.log(`[capture] retention: deleted ${r.deleted.length} file pair(s), now ${(r.totalBytes / 1e9).toFixed(2)} GB`);
         }
     } catch (e) { console.error("[capture] retention failed:", (e as Error).message); }
 }, 60_000);

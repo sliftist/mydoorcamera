@@ -42,6 +42,7 @@ let playerKey = "";
 let videoEl: HTMLVideoElement | null = null;
 let retryTimer: ReturnType<typeof setTimeout> | undefined;
 let statsTimer: ReturnType<typeof setInterval> | undefined;
+let posTimer: ReturnType<typeof setInterval> | undefined;
 
 // ---- connection ----
 async function connect(): Promise<void> {
@@ -57,6 +58,7 @@ async function connect(): Promise<void> {
         const days = await api.getAvailableDays();
         runInAction(() => { state.view = "browse"; state.availableDays = days; });
         startStatsPoll();
+        if (!posTimer) posTimer = setInterval(() => { if (state.day && state.coverage) saveUrlPosition(state.playWall); }, 30000);
         const urlDay = getUrlDay();
         const initial = (urlDay && days.includes(urlDay)) ? urlDay : (days[days.length - 1] || "");
         if (initial) await selectDay(initial, false);
@@ -74,12 +76,20 @@ function thisMonth(): string { const d = new Date(); return `${d.getFullYear()}-
 // ---- day selection ----
 function getUrlDay(): string { try { return new URLSearchParams(location.search).get("day") || ""; } catch { return ""; } }
 function setUrlDay(day: string): void { try { history.pushState({}, "", day ? `?day=${day}` : location.pathname); } catch { /* ignore */ } }
+function getUrlT(): number | null { try { const v = new URLSearchParams(location.search).get("t"); return v == null || v === "" ? null : Number(v); } catch { return null; } }
+// Persist the current position as seconds-of-day in ?t (replaceState, no history spam).
+function saveUrlPosition(wall: number): void {
+    if (!state.day || !state.coverage) return;
+    const t = Math.max(0, Math.round((wall - state.coverage.dayStartMs) / 1000));
+    try { history.replaceState({}, "", `?day=${state.day}&t=${t}`); } catch { /* ignore */ }
+}
 
 async function selectDay(dayStr: string, push = true): Promise<void> {
     if (!api) return;
     if (push) setUrlDay(dayStr);
     const cov = await api.getDayCoverage(dayStr.split("/"));
-    const startWall = cov.ranges.length ? cov.ranges[0].start : cov.dayStartMs;
+    let startWall = cov.ranges.length ? cov.ranges[0].start : cov.dayStartMs;
+    if (!push) { const t = getUrlT(); if (t != null) startWall = cov.dayStartMs + t * 1000; } // resume saved position
     runInAction(() => {
         state.day = dayStr;
         state.coverage = cov;
@@ -97,9 +107,7 @@ function maybeStartDayPlayer(): void {
     player = new DayPlayer(videoEl, api, state.day.split("/"), state.coverage.dayStartMs, state.coverage.ranges);
     player.onTime = (wall) => runInAction(() => { state.playWall = wall; });
     player.onStatus = (s) => runInAction(() => { state.playStatus = s; });
-    const startWall = state.coverage.ranges.length ? state.coverage.ranges[0].start : state.coverage.dayStartMs;
-    runInAction(() => { state.desiredWall = startWall; });
-    player.seekTo(startWall); // show an initial frame (paused)
+    player.seekTo(state.desiredWall); // show the initial / resumed frame (paused), set by selectDay
 }
 
 function teardownPlayer(): void { if (player) { player.teardown(); player = undefined; } playerKey = ""; }
@@ -134,7 +142,7 @@ function onTrackDown(e: any): void {
     if (!state.coverage) return;
     e.preventDefault();
     dragging = true;
-    const w = clientToWall(e.clientX); if (w != null) seekToWall(w);
+    const w = clientToWall(e.clientX); if (w != null) { seekToWall(w); saveUrlPosition(w); }
     window.addEventListener("mousemove", onTrackDrag);
     window.addEventListener("mouseup", onTrackUp);
 }
@@ -147,6 +155,7 @@ function onTrackUp(): void {
     dragging = false;
     window.removeEventListener("mousemove", onTrackDrag);
     window.removeEventListener("mouseup", onTrackUp);
+    saveUrlPosition(state.desiredWall); // drag finished
 }
 
 // ---- stats ----
@@ -214,6 +223,9 @@ const Trackbar = observer(class extends preact.Component { render() {
                 onMouseLeave={() => { if (!dragging) runInAction(() => { state.hoverWall = null; }); }}>
                 {c.ranges.map((r, i) => (
                     <div key={i} style={{ position: "absolute", top: 0, bottom: 0, left: pct(r.start), width: wpct(r.start, r.end), background: "hsl(150,45%,30%)" }} />
+                ))}
+                {c.badRanges.map((r, i) => (
+                    <div key={"b" + i} title="conflicting / bad data" style={{ position: "absolute", top: 0, bottom: 0, left: pct(r.start), width: wpct(r.start, r.end), background: "repeating-linear-gradient(45deg, hsl(0,70%,42%), hsl(0,70%,42%) 6px, hsl(0,70%,26%) 6px, hsl(0,70%,26%) 12px)" }} />
                 ))}
                 <div style={{ position: "absolute", top: 0, bottom: 0, left: pct(state.desiredWall), width: "2px", background: "hsl(45,100%,58%)" }} title="seek target" />
                 <div style={{ position: "absolute", top: 0, bottom: 0, left: pct(state.playWall), width: "2px", background: "hsl(210,100%,66%)" }} title="playing" />
@@ -307,7 +319,7 @@ const DayView = observer(class extends preact.Component { render() {
             <video ref={(el: any) => { videoEl = el; if (el) maybeStartDayPlayer(); }}
                 className={css.width("100%").background("#000").maxHeight("68vh")} playsInline muted
                 style={{ cursor: "pointer" }}
-                onMouseDown={(e: any) => { e.preventDefault(); player?.togglePlay(); }} />
+                onMouseDown={(e: any) => { e.preventDefault(); player?.togglePlay(); saveUrlPosition(state.playWall); }} />
             {state.coverage
                 ? <div className={css.vbox(8).width("100%")}><Trackbar /><Controls /></div>
                 : <div className={css.opacity(0.6).fontSize(13)}>Select a day below…</div>}
