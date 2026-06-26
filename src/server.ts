@@ -20,7 +20,7 @@ function firstLanIp(): string {
     return "127.0.0.1";
 }
 import { createRpc, Channel, Rpc } from "./rpc";
-import { listChildren, combineHour, readGopBytes, getAvailableDays, getDayCoverage, latestIdxFile, readIdxIncremental, dataReady, daySignature, getLevelsInfo, getLevelCoverage, readLevelGops, readLevelGopData, getRawIndex } from "./storage";
+import { listChildren, combineHour, readGopBytes, getAvailableDays, getDayCoverage, latestIdxFile, readIdxIncremental, dataReady, daySignature, getLevelsInfo, getLevelCoverage, readLevelGops, readLevelGopData, getGopBytesAt, getRawIndex } from "./storage";
 import { getPassword, checkPassword, isBlacklisted, recordFailedAttempt } from "./auth";
 import { getSystemStats, readEncoderStats } from "./stats";
 import { getTimezone } from "./timezone";
@@ -150,6 +150,7 @@ async function start(): Promise<void> {
             async getLevelCoverage(level: number, fromMs: number, toMs: number, buckets?: number) { requireAuth(); return getLevelCoverage(level, fromMs, toMs, buckets || 1440); },
             async getLevelIndex(level: number, fromMs: number, toMs: number) { requireAuth(); return { gops: await readLevelGops(level, fromMs, toMs), badRanges: [] }; },
             async getLevelGopData(level: number, t: number, file: string, off: number, len: number) { requireAuth(); return readLevelGopData(level, t, file, off, len); },
+            async getGopBytesAt(level: number, t: number) { requireAuth(); return getGopBytesAt(level, t); }, // GOP bytes by (level,t) — for client thumbnail decoding
             async getRawIndex(level: number, fromMs: number, toMs: number) { requireAuth(); return getRawIndex(level, fromMs, toMs); },
 
             async serverInfo() { requireAuth(); return { ip, port: SERVER_PORT }; },

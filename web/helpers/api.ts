@@ -159,6 +159,10 @@ export class CameraApi {
             .then(b => { this.gopsLoaded++; return b; })
             .finally(() => { this.gopsInFlight--; });
     }
+    // GOP bytes by (level, t) — used for client-side thumbnail keyframe decoding.
+    getGopBytesAt(level: number, t: number): Promise<Uint8Array> {
+        return this.call<Uint8Array>("getGopBytesAt", level, t);
+    }
     // Raw on-disk index bytes for a period — parsed client-side (see indexBuffer.ts).
     getRawIndex(level: number, fromMs: number, toMs: number): Promise<Uint8Array> {
         return this.call("getRawIndex", level, fromMs, toMs);

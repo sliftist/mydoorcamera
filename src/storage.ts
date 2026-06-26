@@ -305,6 +305,17 @@ export function readLevelGopAt(level: number, g: GopEntry): Promise<Buffer> {
     return readLevelGopData(level, g.t, g.f, g.o, g.l);
 }
 
+// Bytes of the GOP active at wall time `t` for a level (the GOP with g.t <= t).
+// Bucket/hour-scoped (cheap) so it can back per-thumbnail fetches from the client.
+export async function getGopBytesAt(level: number, t: number): Promise<Buffer> {
+    const { dir, stem } = bucketOf(level, t);
+    const { gops } = await combineBucket(level, dir, stem);
+    let g: GopEntry | undefined;
+    for (const x of gops) { if (x.t <= t) g = x; else break; }
+    if (!g && gops.length) g = gops[0];
+    return g ? readLevelGopAt(level, g) : Buffer.alloc(0);
+}
+
 export async function getDayCoverage(parts: string[]): Promise<DayCoverage> {
     const [y, mo, d] = parts;
     const dayStartMs = new Date(Number(y), Number(mo) - 1, Number(d), 0, 0, 0, 0).getTime();
