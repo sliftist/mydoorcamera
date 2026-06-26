@@ -6,7 +6,8 @@ import { formatDateTime } from "socket-function/src/formatting/format";
 import { state } from "../helpers/appState";
 import { clockHMS } from "../helpers/format";
 import { navBtnCss } from "../helpers/styles";
-import { setTrackRef, onTrackDown, onTrackHover, onTrackLeave, resetZoom, clearLoopRegion, addLoopAtView, startLoopDrag } from "../helpers/trackbarHelpers";
+import { setTrackRef, onTrackDown, onTrackHover, onTrackLeave, resetZoom, clearLoopRegion, addLoopAtView, startLoopDrag, setLoopRegion } from "../helpers/trackbarHelpers";
+import { computeRegions } from "../helpers/activityRegions";
 import { saveUrlPosition, nudgeBucket } from "../helpers/navigation";
 import { frameCount } from "../helpers/indexBuffer";
 import { levelGopSpanSec, levelPeriod } from "../../src/config";
@@ -31,6 +32,34 @@ export class Trackbar extends preact.Component {
         const flank: any = { flexBasis: "32px", flexShrink: 0, flexGrow: 0, boxSizing: "border-box" };
         return (
             <div className={css.vbox(4).width("100%")}>
+                {/* Activity-sections row (only when the activity panel is expanded): one amber
+                    segment per detected region; when segments get within a few px they MERGE
+                    (rather than hide). Click a segment to loop that span. */}
+                {state.activityPanelOpen && (() => {
+                    const idx = state.index, widthPx = state.trackWidthPx;
+                    if (!idx || !idx.length || !widthPx) return null;
+                    const regions = computeRegions(idx, state.activityThreshold, vs, ve);
+                    if (!regions.length) return null;
+                    const segs = regions.map(r => ({ r, x0: clamp01((r.start - vs) / span) * widthPx, x1: clamp01((r.end - vs) / span) * widthPx }));
+                    const merged: { x0: number; x1: number; s: number; e: number }[] = [];
+                    for (const sg of segs) {
+                        const last = merged[merged.length - 1];
+                        if (last && sg.x0 - last.x1 < 3) { last.x1 = Math.max(last.x1, sg.x1); last.e = sg.r.end; }
+                        else merged.push({ x0: sg.x0, x1: sg.x1, s: sg.r.start, e: sg.r.end });
+                    }
+                    return (
+                        <div className={css.hbox(6).width("100%")}>
+                            <div style={flank} />
+                            <div className={css.relative.flexGrow(1).minWidth(0)} style={{ height: "6px" }}>
+                                {merged.map((m, i) => (
+                                    <div key={i} title="Loop this activity" onMouseDown={(e: any) => { e.stopPropagation(); setLoopRegion(m.s, m.e); }}
+                                        style={{ position: "absolute", top: 0, bottom: 0, left: m.x0.toFixed(1) + "px", width: Math.max(2, m.x1 - m.x0 - 3).toFixed(1) + "px", background: "hsl(40,100%,55%)", cursor: "pointer" }} />
+                                ))}
+                            </div>
+                            <div style={flank} />
+                        </div>
+                    );
+                })()}
                 {/* When zoomed enough that each GOP is wider than ~5px, mark them above
                     the bar: a line over each GOP's range with a 3px gap at the end. */}
                 {(() => {

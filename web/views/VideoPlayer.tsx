@@ -11,6 +11,7 @@ import { Trackbar } from "./Trackbar";
 import { Controls } from "./Controls";
 import { DatePicker } from "./DatePicker";
 import { LevelSelector } from "./LevelSelector";
+import { ActivityPanel } from "./ActivityPanel";
 
 @observer
 export class VideoPlayer extends preact.Component {
@@ -50,6 +51,7 @@ export class VideoPlayer extends preact.Component {
                 {!state.live && <div className={css.fontSize(13).opacity(0.75)}>
                     {state.day ? state.day.replace(/\//g, "-") : "No period selected"}{noFootage ? " · no footage in this period" : ""}
                 </div>}
+                {!state.live && <ActivityPanel />}
                 {!state.live && <DatePicker />}
                 <div style={{ height: "48px" }} />
             </div>
