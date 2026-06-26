@@ -198,6 +198,7 @@ export class DayPlayer {
                 if (c.live) return; // live owns the playhead
                 c.intendedWall = Math.max(this.dayStartMs, Math.min(this.spanEndMs - 1, ev.wall));
                 c.fetchToken++;     // a new target drops any in-flight stale fetch
+                this.bufferGen++;   // abandon any in-flight background prebuffer (old location)
                 break;
             case "PLAY": if (!c.live) c.intent = "play"; break;
             case "PAUSE": if (!c.live) c.intent = "pause"; break;
@@ -644,16 +645,22 @@ export class DayPlayer {
 
     // Prefetch GOPs ahead concurrently and keep a target number buffered into the
     // future — both scaled by playback speed (faster playback consumes faster).
+    // Background prebuffer is SUBORDINATE to seeking: it never runs while a seek is in
+    // flight, and the moment a new seek starts (bufferGen bumped) any in-flight prebuffer
+    // abandons its remaining requests — so the seek's own fetch isn't starved behind a
+    // wall of stale look-ahead downloads.
     private bufferingAhead = false;
+    private bufferGen = 0; // bumped on every SEEK to abandon stale prebuffer
     private async bufferAhead(fromWall: number): Promise<void> {
-        if (this.bufferingAhead || this.ctx.live) return;
+        if (this.bufferingAhead || this.ctx.live || this.ctx.pumping || this.ctx.state === "seeking") return;
         this.bufferingAhead = true;
+        const gen = this.bufferGen;
         try {
             const rate = Math.max(1, this.ctx.speed);
             const target = Math.min(200, Math.round(BUFFER_TARGET_GOPS * rate));
             const batch = Math.min(16, Math.round(BUFFER_BATCH_GOPS * rate));
             const list = await this.gopsAhead(fromWall, target);
-            await this.runBounded(list, batch, x => this.appendGop(x.hh, x.g).catch(() => { /* */ }));
+            await this.runBounded(list, batch, x => (gen === this.bufferGen ? this.appendGop(x.hh, x.g).catch(() => { /* */ }) : Promise.resolve()));
         } finally { this.bufferingAhead = false; }
     }
 
