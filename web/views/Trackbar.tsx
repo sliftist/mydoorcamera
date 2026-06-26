@@ -26,6 +26,9 @@ export class Trackbar extends preact.Component {
         const pct = (w: number) => (clamp01((w - vs) / span) * 100).toFixed(3) + "%";
         const wpct = (a: number, b: number) => ((clamp01((b - vs) / span) - clamp01((a - vs) / span)) * 100).toFixed(3) + "%";
         const inView = (a: number, b: number) => b > vs && a < ve;
+        // Fixed-width flank (the prev/next buttons + matching spacers) so the marker
+        // row and footer line up with the bar without hardcoded margin math.
+        const flank: any = { flexBasis: "32px", flexShrink: 0, flexGrow: 0, boxSizing: "border-box" };
         return (
             <div className={css.vbox(4).width("100%")}>
                 {/* When zoomed enough that each GOP is wider than ~5px, mark them above
@@ -40,15 +43,21 @@ export class Trackbar extends preact.Component {
                         if (((g.e - g.t) / span) * widthPx <= 5) continue;
                         marks.push(<div key={g.t} style={{ position: "absolute", top: 0, bottom: 0, left: pct(g.t), width: `calc(${wpct(g.t, g.e)} - 3px)`, background: "hsl(210,45%,52%)" }} />);
                     }
-                    return <div style={{ position: "relative", height: "3px", marginLeft: "36px", marginRight: "36px" }}>{marks}</div>;
+                    return (
+                        <div className={css.hbox(6).width("100%")}>
+                            <div style={flank} />
+                            <div className={css.relative.flexGrow(1).minWidth(0)} style={{ height: "3px" }}>{marks}</div>
+                            <div style={flank} />
+                        </div>
+                    );
                 })()}
                 {/* Bar flanked by prev/next buttons that match the bar's height. */}
                 <div className={css.hbox(6).width("100%").alignItems("stretch")}>
-                <button className={navBtnCss} style={{ width: "30px", padding: 0, fontSize: "16px", display: "flex", alignItems: "center", justifyContent: "center" }}
+                <button className={navBtnCss} style={{ ...flank, padding: 0, fontSize: "16px", display: "flex", alignItems: "center", justifyContent: "center" }}
                     title={`Previous ${levelPeriod(state.level)} (or shift back)`} onClick={() => void nudgeBucket(-1)}>«</button>
                 <div ref={setTrackRef as any}
                     className={css.relative.flexGrow(1).minWidth(0).height(56).hsl(220, 15, 12).border("1px solid hsl(220,15%,28%)")}
-                    style={{ cursor: "pointer", userSelect: "none", overflow: "hidden" }}
+                    style={{ cursor: "pointer", userSelect: "none", overflow: "hidden", boxSizing: "border-box" }}
                     onMouseDown={onTrackDown}
                     onMouseMove={(e: any) => onTrackHover(e.clientX)}
                     onMouseLeave={onTrackLeave}>
@@ -106,21 +115,26 @@ export class Trackbar extends preact.Component {
                         </div>
                     )}
                 </div>
-                <button className={navBtnCss} style={{ width: "30px", padding: 0, fontSize: "16px", display: "flex", alignItems: "center", justifyContent: "center" }}
+                <button className={navBtnCss} style={{ ...flank, padding: 0, fontSize: "16px", display: "flex", alignItems: "center", justifyContent: "center" }}
                     title={`Next ${levelPeriod(state.level)} (or shift forward)`} onClick={() => void nudgeBucket(1)}>»</button>
                 </div>
-                <div className={css.hbox(8).fontSize(11).opacity(0.8).alignItems("center")} style={{ justifyContent: "space-between", marginLeft: "36px", marginRight: "36px" }}>
-                    <span style={{ whiteSpace: "nowrap", color: "hsl(265,90%,76%)" }}>{formatDateTime(state.hoverWall != null ? state.hoverWall : state.desiredWall)}</span>
-                    {state.index && <span className={css.opacity(0.55)}>{frameCount(state.index, vs, ve).toLocaleString()} frames in view</span>}
-                    <span className={css.hbox(4).alignItems("center").opacity(0.6)} title="Activity chart curve (gamma) — lower emphasizes small activity">
-                        activity curve
-                        <input type="number" step="0.05" min="0.05" max="3" value={state.activityExp}
-                            onInput={(e: any) => { const v = Number(e.target.value) || 0.4; runInAction(() => { state.activityExp = v; }); saveUrlPosition(state.playWall); }}
-                            style={{ width: "52px", fontSize: "11px", padding: "1px 4px", background: "hsl(220,15%,16%)", color: "inherit", border: "1px solid hsl(220,15%,30%)" }} />
-                    </span>
-                    {zoomed
-                        ? <button className={navBtnCss} style={{ fontSize: "11px", padding: "2px 8px" }} onClick={resetZoom} title="Reset zoom (show the whole period)">⤢ reset zoom</button>
-                        : <span className={css.opacity(0.5)}>scroll to zoom</span>}
+                {/* Footer, aligned with the bar via matching flank spacers. */}
+                <div className={css.hbox(6).width("100%")}>
+                    <div style={flank} />
+                    <div className={css.hbox(8).flexGrow(1).minWidth(0).fontSize(11).opacity(0.8).alignItems("center")} style={{ justifyContent: "space-between" }}>
+                        <span style={{ whiteSpace: "nowrap", color: "hsl(265,90%,76%)" }}>{formatDateTime(state.hoverWall != null ? state.hoverWall : state.desiredWall)}</span>
+                        {state.index && <span className={css.opacity(0.55)}>{frameCount(state.index, vs, ve).toLocaleString()} frames in view</span>}
+                        <span className={css.hbox(4).alignItems("center").opacity(0.6)} title="Activity chart curve (gamma) — lower emphasizes small activity">
+                            activity curve
+                            <input type="number" step="0.05" min="0.05" max="3" value={state.activityExp}
+                                onInput={(e: any) => { const v = Number(e.target.value) || 0.4; runInAction(() => { state.activityExp = v; }); saveUrlPosition(state.playWall); }}
+                                style={{ width: "52px", fontSize: "11px", padding: "1px 4px", background: "hsl(220,15%,16%)", color: "inherit", border: "1px solid hsl(220,15%,30%)" }} />
+                        </span>
+                        {zoomed
+                            ? <button className={navBtnCss} style={{ fontSize: "11px", padding: "2px 8px" }} onClick={resetZoom} title="Reset zoom (show the whole period)">⤢ reset zoom</button>
+                            : <span className={css.opacity(0.5)}>scroll to zoom</span>}
+                    </div>
+                    <div style={flank} />
                 </div>
             </div>
         );
