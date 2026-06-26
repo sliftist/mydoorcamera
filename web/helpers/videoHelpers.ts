@@ -252,7 +252,7 @@ export class DayPlayer {
             case "TEARDOWN": this.doTeardown(); return;
             case "START_LIVE": this.liveOp = this.doStartLive(); return;
             case "STOP_LIVE": this.liveOp = this.doStopLive(); break; // then fall into "paused" entry
-            case "STALL_DETECTED": this.jumpOverGap(); return;
+            case "STALL_DETECTED": void this.onStall(); return;
             case "RATE_TICK": this.tickRate(); return;
             case "INVALIDATE_INDEX": this.clearIndexCaches(); this.action("clearIndex"); break;
         }
@@ -306,7 +306,9 @@ export class DayPlayer {
     private action(s: string): void { this.pendingActions.push(s); }
     private logDispatch(ev: FsmEvent, from: FsmState, to: FsmState): void {
         const actions = this.pendingActions; this.pendingActions = [];
-        const noisy = ev.type === "TIME_TICK" || ev.type === "RATE_TICK";
+        // High-frequency, usually-no-op events are heartbeat-throttled so they don't
+        // flood the ring buffer and drown the useful history.
+        const noisy = (ev.type === "TIME_TICK" || ev.type === "RATE_TICK" || ev.type === "STALL_DETECTED") && !actions.length;
         const changed = from !== to;
         const now = Date.now();
         let shouldLog = !noisy || changed;
@@ -337,8 +339,9 @@ export class DayPlayer {
             speed: c.speed, level: this.level, comp: this.comp,
             live: c.live, liveFactor: +c.liveFactor.toFixed(3), catchup: c.catchupMode,
             pumping: c.pumping, pumpGen: c.pumpGen, fetchToken: c.fetchToken,
-            bufAhead: +this.bufferedSec().toFixed(2), appended: this.appended.size,
+            bufAhead: +this.bufferedSec().toFixed(2), appended: this.appended.size, buffering: this.bufferingAhead,
             inFlight: this.api.outstandingGops, readyState: this.video.readyState, paused: this.video.paused,
+            footageAhead: this.hasFootageAhead(this.currentWall()), loop: c.loop ? `${Math.round(c.loop.start)}-${Math.round(c.loop.end)}` : null,
             buffered,
         };
     }
@@ -747,18 +750,39 @@ export class DayPlayer {
         this.evictBefore(this.video.currentTime - 15);
     }
 
-    private jumpOverGap(): void {
-        if (!this.sb || !this.sb.buffered.length) return;
+    private jumpOverGap(): boolean {
+        if (!this.sb || !this.sb.buffered.length) return false;
         const ct = this.video.currentTime, b = this.sb.buffered;
         let target = -1;
         for (let i = 0; i < b.length; i++) {
             if (b.start(i) > ct + 0.02) { target = b.start(i); break; }
             if (ct <= b.end(i) + 0.02 && i + 1 < b.length) { target = b.start(i + 1); break; }
         }
-        if (target >= 0) {
-            this.action(`jumpGap(${ct.toFixed(2)}->${(target + 0.05).toFixed(2)})`);
-            console.warn(`[player] stall watchdog jumped a buffer gap: ${ct.toFixed(2)}s -> ${(target + 0.05).toFixed(2)}s${this.ctx.live ? " (LIVE — falling behind)" : ""}`);
-            try { this.video.currentTime = target + 0.05; void this.video.play(); } catch { /* */ }
+        if (target < 0) return false;
+        this.action(`jumpGap(${ct.toFixed(2)}->${(target + 0.05).toFixed(2)})`);
+        console.warn(`[player] stall watchdog jumped a buffer gap: ${ct.toFixed(2)}s -> ${(target + 0.05).toFixed(2)}s${this.ctx.live ? " (LIVE — falling behind)" : ""}`);
+        try { this.video.currentTime = target + 0.05; void this.video.play(); } catch { /* */ }
+        return true;
+    }
+
+    // Is there covered footage meaningfully beyond `wall`? (false ⇒ we're at the end
+    // of available footage at this level — e.g. the thinned edge that isn't generated yet.)
+    private hasFootageAhead(wall: number): boolean {
+        return this.ranges.some(r => r.end > wall + 1000);
+    }
+
+    // Stall recovery: cross an internal MSE gap; else pull forward data if more
+    // footage exists; else (genuine footage edge) pause instead of spinning forever.
+    private async onStall(): Promise<void> {
+        if (this.ctx.destroyed || this.ctx.live) { this.jumpOverGap(); return; }
+        if (this.ctx.intent !== "play") return;
+        if (this.jumpOverGap()) return;
+        const wall = this.currentWall();
+        if (this.hasFootageAhead(wall)) { void this.bufferAhead(wall); return; } // underrun -> fetch ahead
+        this.action("footageEdge");
+        await Promise.resolve(); // let the STALL_DETECTED dispatch finish, then pause (no nested dispatch)
+        if (this.ctx.intent === "play" && !this.ctx.live && !this.hasFootageAhead(this.currentWall())) {
+            this.dispatch({ type: "PAUSE" }); // end of footage at this level — stop spinning
         }
     }
 
