@@ -21,6 +21,7 @@ export const state = observable({
     coverage: null as DayCoverage | null,  // coverage over the period (dayStartMs/dayEndMs = period bounds)
     index: null as IndexGop[] | null,      // per-GOP index for the period (raw download, parsed)
     bufferedRanges: [] as { start: number; end: number }[], // what's actually loaded into the player (wall-clock)
+    pendingGops: [] as number[],     // GOP start-times with a data request in flight (yellow markers)
     pickerAnchorMs: 0,               // timestamp the date picker is centered on
     playWall: 0,                     // actual playhead (wall-clock ms)
     desiredWall: 0,                  // where the user asked to play

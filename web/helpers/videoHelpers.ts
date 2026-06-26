@@ -84,6 +84,7 @@ export class DayPlayer {
     private ms: MediaSource | undefined;
     private sb: SourceBuffer | undefined;
     private appended = new Set<number>();
+    private pendingGops = new Set<number>();   // GOP.t values whose data fetch is in flight (drives the yellow markers)
     private queue: { buf: Buffer; resolve: () => void }[] = [];
     private flushing = false;
     private hourCache = new Map<string, GopEntry[]>();
@@ -123,6 +124,11 @@ export class DayPlayer {
     onRate: ((rate: number) => void) | undefined;
     onBuffer: ((sec: number) => void) | undefined;
     onSeeking: ((seeking: boolean) => void) | undefined; // true while chasing a seek target we haven't shown yet
+    onPending: (() => void) | undefined;                 // fired when the in-flight GOP set / buffered ranges change
+
+    // GOP start-times (g.t) whose data fetch is currently in flight — drives the yellow markers.
+    get pendingGopTimes(): number[] { return Array.from(this.pendingGops); }
+    private firePending(): void { this.onPending?.(); }
 
     constructor(
         public video: HTMLVideoElement,
@@ -584,12 +590,16 @@ export class DayPlayer {
     private async appendGop(hh: string, g: GopEntry, nals?: Buffer[]): Promise<void> {
         if (this.appended.has(g.t) && this.isBuffered(this.internalSec(g.t))) return;
         this.appended.add(g.t);
+        const fetching = !nals;
+        if (fetching) { this.pendingGops.add(g.t); this.firePending(); } // mark request in flight (yellow)
         try {
             const buf = nals || await this.fetchNals(hh, g);
+            if (fetching) { this.pendingGops.delete(g.t); }
             const frameDur = await this.muxFrameDur(g);
             const mp4 = await H264toMP4({ buffer: buf, frameDurationInSeconds: frameDur, mediaStartTimeSeconds: this.internalSec(g.t) });
             await this.enqueue(Buffer.from(mp4.buffer));
-        } catch (e) { this.appended.delete(g.t); throw e; }
+            this.firePending(); // fetched + buffered -> refresh markers (yellow off, green on)
+        } catch (e) { this.appended.delete(g.t); if (fetching) { this.pendingGops.delete(g.t); this.firePending(); } throw e; }
     }
 
     private enqueue(buf: Buffer): Promise<void> {
@@ -794,7 +804,7 @@ export class DayPlayer {
     private teardownMse(): void {
         try { this.video.pause(); this.video.removeAttribute("src"); this.video.load(); } catch { /* */ }
         this.ms = undefined; this.sb = undefined;
-        this.appended.clear(); this.drainQueue();
+        this.appended.clear(); this.pendingGops.clear(); this.drainQueue(); this.firePending();
     }
     private doTeardown(): void {
         if (this.prebufferTimer) clearTimeout(this.prebufferTimer);
@@ -808,6 +818,6 @@ export class DayPlayer {
         this.video.removeEventListener("stalled", this.onVideoWaiting);
         try { this.video.pause(); this.video.removeAttribute("src"); this.video.load(); } catch { /* */ }
         this.ms = undefined; this.sb = undefined;
-        this.appended.clear(); this.drainQueue(); this.hourCache.clear();
+        this.appended.clear(); this.pendingGops.clear(); this.drainQueue(); this.hourCache.clear();
     }
 }

@@ -55,22 +55,22 @@ export class CameraApi {
         await this.open();
     }
 
-    // Total bytes received from the server (monotonic) and the rolling 60s rate.
+    // Total bytes received from the server (monotonic) and the rolling 15s rate.
     get loadedBytes(): number { return this.bytesTotal; }
     get loadedGops(): number { return this.gopsLoaded; }
     get outstandingGops(): number { return this.gopsInFlight; }
     loadRateBps(): number {
-        const cut = Date.now() - 60_000;
+        const cut = Date.now() - 15_000;
         let sum = 0;
         for (const e of this.byteLog) if (e.t >= cut) sum += e.n;
-        return sum / 60;
+        return sum / 15;
     }
     private recordBytes(n: number): void {
         if (!n) return;
         this.bytesTotal += n;
         const now = Date.now();
         this.byteLog.push({ t: now, n });
-        const cut = now - 60_000;
+        const cut = now - 15_000;
         while (this.byteLog.length && this.byteLog[0].t < cut) this.byteLog.shift();
     }
 

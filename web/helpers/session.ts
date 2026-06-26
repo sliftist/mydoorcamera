@@ -105,6 +105,7 @@ export function maybeStartDayPlayer(): void {
     player.onSeeking = (s) => runInAction(() => { state.seeking = s; });
     player.onRate = (r) => runInAction(() => { state.playbackRate = r; });
     player.onBuffer = (s) => runInAction(() => { state.bufferSec = s; });
+    player.onPending = () => runInAction(() => { if (player) { state.pendingGops = player.pendingGopTimes; state.bufferedRanges = player.bufferedWallRanges(); } }); // promptly reflect in-flight + loaded GOPs on the markers
     player.seekTo(state.desiredWall); // show the initial / resumed frame (paused), set by selectDay
 }
 
