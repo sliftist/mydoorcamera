@@ -38,9 +38,9 @@ export class Trackbar extends preact.Component {
                     for (const g of idx) {
                         if (g.e <= vs || g.t >= ve) continue;
                         if (((g.e - g.t) / span) * widthPx <= 5) continue;
-                        marks.push(<div key={g.t} style={{ position: "absolute", top: 0, bottom: 0, left: pct(g.t), width: `calc(${wpct(g.t, g.e)} - 3px)`, background: "hsl(210,70%,60%)" }} />);
+                        marks.push(<div key={g.t} style={{ position: "absolute", top: 0, bottom: 0, left: pct(g.t), width: `calc(${wpct(g.t, g.e)} - 3px)`, background: "hsl(210,45%,52%)" }} />);
                     }
-                    return <div style={{ position: "relative", height: "5px", marginLeft: "36px", marginRight: "36px" }}>{marks}</div>;
+                    return <div style={{ position: "relative", height: "3px", marginLeft: "36px", marginRight: "36px" }}>{marks}</div>;
                 })()}
                 {/* Bar flanked by prev/next buttons that match the bar's height. */}
                 <div className={css.hbox(6).width("100%").alignItems("stretch")}>
