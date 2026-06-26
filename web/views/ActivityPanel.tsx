@@ -28,28 +28,37 @@ export class ActivityPanel extends preact.Component<{}, { scrollTop: number; vie
 
     render() {
         if (!state.coverage || !state.index) return <div />;
+        const headerCss = css.hbox(10).width("100%").alignItems("center").pad2(6, 8).hsl(220, 15, 14).border("1px solid hsl(220,15%,28%)");
+
+        // Collapsed: NO region computation, no counts — just the label.
+        if (!state.activityPanelOpen) {
+            return (
+                <div className={css.width("100%").maxWidth(1200)}>
+                    <div className={headerCss} style={{ cursor: "pointer", boxSizing: "border-box" }} onClick={() => this.toggle()}>
+                        <span style={{ fontSize: "13px" }}>▸ Activity</span>
+                        <span className={css.flexGrow(1)} />
+                        <span className={css.fontSize(11).opacity(0.45)}>click to expand</span>
+                    </div>
+                </div>
+            );
+        }
+
+        // Expanded: compute regions for the current zoom window.
         const vs = state.viewStart || state.coverage.dayStartMs, ve = state.viewEnd || state.coverage.dayEndMs;
         const regions = computeRegions(state.index, state.activityThreshold, vs, ve);
-        const open = state.activityPanelOpen;
-
         const header = (
-            <div className={css.hbox(10).width("100%").alignItems("center").pad2(6, 8).hsl(220, 15, 14).border("1px solid hsl(220,15%,28%)")}
-                style={{ cursor: "pointer", boxSizing: "border-box" }} onClick={() => this.toggle()}>
-                <span style={{ fontSize: "13px" }}>{open ? "▾" : "▸"} Activity</span>
+            <div className={headerCss} style={{ cursor: "pointer", boxSizing: "border-box" }} onClick={() => this.toggle()}>
+                <span style={{ fontSize: "13px" }}>▾ Activity</span>
                 <span className={css.fontSize(12).opacity(0.7)}>{regions.length} section{regions.length === 1 ? "" : "s"} · {regionsGopCount(regions).toLocaleString()} GOPs</span>
                 <span className={css.flexGrow(1)} />
-                {open && (
-                    <span className={css.hbox(4).alignItems("center").opacity(0.7).fontSize(11)} onClick={(e: any) => e.stopPropagation()} title="Activity threshold — a GOP counts as activity when its value is at least this">
-                        threshold
-                        <input type="number" step="0.001" min="0" max="1" value={state.activityThreshold}
-                            onInput={(e: any) => { const v = Number(e.target.value); runInAction(() => { state.activityThreshold = v >= 0 ? v : 0; }); saveUrlPosition(state.playWall); }}
-                            style={{ width: "64px", fontSize: "11px", padding: "1px 4px", background: "hsl(220,15%,16%)", color: "inherit", border: "1px solid hsl(220,15%,30%)" }} />
-                    </span>
-                )}
+                <span className={css.hbox(4).alignItems("center").opacity(0.7).fontSize(11)} onClick={(e: any) => e.stopPropagation()} title="Activity threshold — a GOP counts as activity when its value is at least this">
+                    threshold
+                    <input type="number" step="0.001" min="0" max="1" value={state.activityThreshold}
+                        onInput={(e: any) => { const v = Number(e.target.value); runInAction(() => { state.activityThreshold = v >= 0 ? v : 0; }); saveUrlPosition(state.playWall); }}
+                        style={{ width: "64px", fontSize: "11px", padding: "1px 4px", background: "hsl(220,15%,16%)", color: "inherit", border: "1px solid hsl(220,15%,30%)" }} />
+                </span>
             </div>
         );
-
-        if (!open) return <div className={css.width("100%").maxWidth(1200)}>{header}</div>;
 
         const total = regions.length * ROW_H;
         const vh = this.state.viewportH || Math.round(window.innerHeight * 0.7);
