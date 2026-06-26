@@ -12,6 +12,9 @@ import { splitFramedNals } from "./annexb";
 
 const W = 64, H = 36, FRAME = W * H;   // tiny grayscale frame
 const NOISE = 16;                       // per-pixel change below this is treated as sensor noise
+const LOCAL_R = 4;                      // high-pass radius: subtract the local-mean diff so smooth
+                                        // (global/rolling-band) brightness changes don't count, only
+                                        // localized/textured changes do
 // Ignore the burned-in timestamp (top-left) so its ticking digits aren't read as
 // activity. The clock text spans ~cols 0-40 of the 64-wide frame; box covers it
 // generously (the changing time digits measured out to col ~39).
@@ -60,14 +63,39 @@ function decode(stream: Buffer): Promise<Buffer[]> {
     });
 }
 
+// Separable box blur of a WxH float field (local mean over a (2R+1)^2 window).
+function boxBlur(src: Float32Array, r: number): Float32Array {
+    const tmp = new Float32Array(FRAME), out = new Float32Array(FRAME);
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+        let s = 0, c = 0;
+        for (let dx = -r; dx <= r; dx++) { const xx = x + dx; if (xx >= 0 && xx < W) { s += src[y * W + xx]; c++; } }
+        tmp[y * W + x] = s / c;
+    }
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+        let s = 0, c = 0;
+        for (let dy = -r; dy <= r; dy++) { const yy = y + dy; if (yy >= 0 && yy < H) { s += tmp[yy * W + x]; c++; } }
+        out[y * W + x] = s / c;
+    }
+    return out;
+}
+
 function activityOf(cur: Buffer, prev?: Buffer): number {
     if (!prev) return 0;
+    // Frame difference, with the timestamp area zeroed.
+    const diff = new Float32Array(FRAME);
+    for (let i = 0; i < FRAME; i++) {
+        const row = (i / W) | 0, col = i % W;
+        diff[i] = (row < MASK_ROWS && col < MASK_COLS) ? 0 : cur[i] - prev[i];
+    }
+    // High-pass: subtract the local mean so smooth brightness changes (global
+    // auto-exposure, rolling bands) cancel; localized/textured motion remains.
+    const local = boxBlur(diff, LOCAL_R);
     let changed = 0, counted = 0;
     for (let i = 0; i < FRAME; i++) {
         const row = (i / W) | 0, col = i % W;
         if (row < MASK_ROWS && col < MASK_COLS) continue; // skip the timestamp area
         counted++;
-        if (Math.abs(cur[i] - prev[i]) > NOISE) changed++;
+        if (Math.abs(diff[i] - local[i]) > NOISE) changed++;
     }
     return counted ? changed / counted : 0;
 }
