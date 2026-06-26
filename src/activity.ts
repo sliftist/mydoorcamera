@@ -1,18 +1,21 @@
 // Activity worker (separate daemon — keeps the critical capture path untouched).
 // Backfills each GOP's `activity` float. For each sampled keyframe it measures how
-// much the frame differs from a learned STEADY-STATE BACKGROUND (not just the prior
-// frame), so something that enters the scene and moves only subtly still counts as a
-// big change from the base state. Detection is:
+// much the frame differs from a ROBUST steady-state background, then keeps only
+// changes that are both strong AND spatially clustered:
 //   1. decode the keyframe to a small grayscale image;
-//   2. subtract a per-pixel running-median background (transient objects barely move
-//      it; slow lighting drift is absorbed within minutes);
-//   3. remove the global brightness shift (median of the diff) so whole-frame
-//      auto-exposure / rolling bands don't register;
-//   4. box-blur the deviation to require SPATIAL COHERENCE — a localized blob (a real
-//      object) survives, scattered single-pixel sensor noise averages away;
-//   5. activity = fraction of clustered pixels above threshold (so a small distinct
-//      object = moderate, a big one = large).
-// Throttled so it never starves the live encoder. Run via typenode.
+//   2. background = per-pixel MEDIAN over a ring of recent good frames. A median is
+//      robust: a moving object, a rolling brightness band, or a brief video dropout
+//      are outliers that don't move it, so they don't get "learned" or cause spikes;
+//   3. deviation from background, minus the global brightness shift (so whole-frame
+//      auto-exposure doesn't register);
+//   4. MAGNITUDE GATE: a pixel must change by more than `STRONG` levels to be a
+//      candidate (a subtle rolling bar changes too little to qualify);
+//   5. DENSITY / REGION: candidates only count where they are locally dense (a real
+//      object forms a compact region; scattered sensor noise does not);
+//   6. activity = fraction of the frame covered by such regions (small object =
+//      small, big object = large).
+// Corrupt/blank frames (video dropout) are skipped entirely — not measured, not
+// added to the background. Throttled so it never starves the live encoder.
 
 import { spawn } from "child_process";
 import { getTimezone } from "./timezone";
@@ -20,23 +23,26 @@ process.env.TZ = getTimezone();
 import { findPendingActivity, writeActivity, readGopBytes, GopEntry } from "./storage";
 import { splitFramedNals } from "./annexb";
 
-const W = 256, H = 144, FRAME = W * H;   // grayscale analysis frame (small but enough to see distant objects)
-const CLUSTER_R = 2;                      // box-blur radius: a change must be spatially coherent to count
-const CLUSTER_THR = 4;                    // blurred deviation above this (per pixel) counts as changed
-const BG_STEP = 1;                        // running-median background adapts +/- this per sample (~1/s)
+const W = 256, H = 144, FRAME = W * H;   // grayscale analysis frame
+const STRONG = 12;                        // a pixel must differ from background by > this to be a candidate
+const DENSITY_R = 2;                      // clustering radius (local strong-pixel density window)
+const DENSITY_THR = 0.18;                 // a candidate counts only where >18% of its neighborhood is also strong
+const RING = 60;                          // background = per-pixel median over this many recent good frames
+const MIN_RING = 20;                      // need at least this many before measuring (warm-up)
+const LOWVAR = 50;                        // frame variance below this = blank/corrupt (dropout) -> skip
 // Ignore the burned-in timestamp (top-left). At 256x144 the clock text spans roughly
-// the top ~11% of rows and ~75% of the width; box covers the changing digits generously.
+// the top ~11% of rows and ~75% of the width.
 const MASK_ROWS = Math.round(0.11 * H), MASK_COLS = Math.round(0.75 * W);
 const PENDING_LIMIT = 12;                 // records examined per pass
 const PERIOD_MS = 1000;
-const SAMPLE_INTERVAL_MS = 500;           // sample ~every keyframe (GOPs are ~1s); finer than the old 3s
+const SAMPLE_INTERVAL_MS = 500;           // sample ~every keyframe (GOPs are ~1s)
 const START_CODE = Buffer.from([0, 0, 0, 1]);
 
-const bg = new Float32Array(FRAME);       // per-pixel running-median background (persists across passes)
-let bgInit = false;
+const ring: Buffer[] = [];                // recent good frames (background source); persists across passes
 let lastSampledT = -Infinity;
 
 const masked = (i: number): boolean => { const row = (i / W) | 0, col = i % W; return row < MASK_ROWS && col < MASK_COLS; };
+const counted = FRAME - MASK_ROWS * MASK_COLS;
 
 // Extract SPS+PPS+IDR of a GOP as an Annex-B access unit.
 async function keyframeAU(parts: string[], g: GopEntry): Promise<Buffer> {
@@ -49,9 +55,6 @@ async function keyframeAU(parts: string[], g: GopEntry): Promise<Buffer> {
 }
 
 // Software-decode (avdec_h264) a concatenated keyframe stream to GRAY8 WxH frames.
-// Software (CPU) is used deliberately: the hardware decoder shares the bcm2835 codec
-// block with the live encoder and dropped it 30->24fps, whereas CPU decode runs on
-// spare cores and leaves the encoder at 30.
 function decode(stream: Buffer): Promise<Buffer[]> {
     return new Promise(resolve => {
         const gst = spawn("gst-launch-1.0", [
@@ -91,25 +94,31 @@ function boxBlur(src: Float32Array, r: number): Float32Array {
 }
 
 function medianOf(a: number[]): number { if (!a.length) return 0; const s = a.slice().sort((x, y) => x - y); return s[s.length >> 1]; }
+function frameMean(f: Buffer): number { let s = 0; for (let i = 0; i < FRAME; i++) s += f[i]; return s / FRAME; }
+function frameVar(f: Buffer, m: number): number { let s = 0; for (let i = 0; i < FRAME; i++) s += (f[i] - m) * (f[i] - m); return s / FRAME; }
 
-// Background-subtraction activity, then adapt the background toward the current frame.
+// Per-pixel median background over the ring (robust to outliers: objects, bands, dropouts).
+function backgroundMedian(): Float32Array {
+    const n = ring.length, bg = new Float32Array(FRAME), col = new Array<number>(n);
+    for (let i = 0; i < FRAME; i++) { for (let k = 0; k < n; k++) col[k] = ring[k][i]; col.sort((a, b) => a - b); bg[i] = col[n >> 1]; }
+    return bg;
+}
+
 function activityOf(cur: Buffer): number {
-    if (!bgInit) { for (let i = 0; i < FRAME; i++) bg[i] = cur[i]; bgInit = true; return 0; }
-    // Signed deviation from the steady-state background (timestamp area zeroed).
+    const bg = backgroundMedian();
     const s = new Float32Array(FRAME);
     const vals: number[] = [];
     for (let i = 0; i < FRAME; i++) { if (masked(i)) { s[i] = 0; continue; } s[i] = cur[i] - bg[i]; vals.push(s[i]); }
-    // Remove the global brightness shift (uniform auto-exposure / rolling band).
-    const shift = medianOf(vals);
-    const d = new Float32Array(FRAME);
-    for (let i = 0; i < FRAME; i++) d[i] = masked(i) ? 0 : Math.abs(s[i] - shift);
-    // Require spatial coherence: a localized blob survives, isolated noise averages away.
-    const blur = boxBlur(d, CLUSTER_R);
-    let changed = 0, counted = 0;
-    for (let i = 0; i < FRAME; i++) { if (masked(i)) continue; counted++; if (blur[i] > CLUSTER_THR) changed++; }
-    // Running-median (sigma-delta) background update: nudge each pixel toward `cur`.
-    for (let i = 0; i < FRAME; i++) { if (cur[i] > bg[i]) bg[i] += BG_STEP; else if (cur[i] < bg[i]) bg[i] -= BG_STEP; }
-    return counted ? changed / counted : 0;
+    const shift = medianOf(vals); // global brightness shift (uniform auto-exposure)
+    // Magnitude gate: only pixels that changed strongly are candidates.
+    const mask = new Float32Array(FRAME);
+    for (let i = 0; i < FRAME; i++) mask[i] = (!masked(i) && Math.abs(s[i] - shift) > STRONG) ? 1 : 0;
+    // Density: candidates count only where they form a locally-dense region (a real
+    // object), not scattered specks. activity = area of those regions.
+    const density = boxBlur(mask, DENSITY_R);
+    let area = 0;
+    for (let i = 0; i < FRAME; i++) { if (masked(i)) continue; if (density[i] > DENSITY_THR) area++; }
+    return area / counted;
 }
 
 async function loop(): Promise<void> {
@@ -135,7 +144,14 @@ async function loop(): Promise<void> {
     }
     const k = Math.min(frames.length, toSample.length);
     for (let i = 0; i < k; i++) {
-        const a = activityOf(frames[i]);
+        const f = frames[i];
+        let a = 0;
+        const v = frameVar(f, frameMean(f));
+        if (v >= LOWVAR) {                                  // skip blank/corrupt (dropout) frames
+            if (ring.length >= MIN_RING) a = activityOf(f); // else still warming up -> 0
+            ring.push(Buffer.from(f));                      // copy (decoded frame is a slice of a shared buffer)
+            if (ring.length > RING) ring.shift();
+        }
         try { await writeActivity(toSample[i].parts, toSample[i].idxFile, toSample[i].start, a); } catch { /* */ }
     }
     setTimeout(loop, PERIOD_MS);
