@@ -252,6 +252,7 @@ export class DayPlayer {
     // 3. EFFECTS — idempotent; start async work that re-enters as new events.
     private runEffects(from: FsmState, to: FsmState, ev: FsmEvent): void {
         if (ev.type === "TIME_TICK") this.onTime?.(ev.wall);
+        if (ev.type === "SEEK") { try { this.api.cancelStaleGops(); } catch { /* */ } this.action("cancelStale"); } // free bandwidth for the seek
 
         switch (ev.type) {
             case "SET_SPEED": if (!this.ctx.live) { try { this.video.playbackRate = this.ctx.speed; } catch { /* */ } } return;
@@ -423,7 +424,7 @@ export class DayPlayer {
         try {
             this.action(`fetchGop(${Math.round(wall)})`);
             await this.ensureSourceBuffer(target);
-            await this.appendGop(target.hh, target.g);
+            await this.appendGop(target.hh, target.g, undefined, true); // priority: the seek's own frame
             await this.seekVideo(this.internalSec(Math.max(wall, target.g.t)));
             this.onTime?.(this.currentWall());
             return "shown";
@@ -456,7 +457,7 @@ export class DayPlayer {
         // in the background (TIME_TICK keeps buffering ahead), so play feels instant.
         this.action(`fetchGop(${Math.round(wall)})`);
         await this.ensureSourceBuffer(target);
-        await this.appendGop(target.hh, target.g);
+        await this.appendGop(target.hh, target.g, undefined, true); // priority: the GOP we start playback from
         if (this.ctx.intent !== "play" || this.ctx.live) return;
         if (Math.abs(this.currentWall() - wall) > 1500) { try { this.video.currentTime = this.internalSec(wall); } catch { /* */ } }
         try { this.video.playbackRate = this.ctx.speed; } catch { /* */ }
@@ -552,10 +553,11 @@ export class DayPlayer {
         return undefined;
     }
 
-    private async fetchNals(_hh: string, g: GopEntry): Promise<Buffer[]> {
+    private async fetchNals(_hh: string, g: GopEntry, priority = false): Promise<Buffer[]> {
+        const opt = { cancellable: !priority }; // background prefetches are cancellable; seek/play fetches aren't
         const data = this.level > 0
-            ? await this.api.getLevelGopData(this.level, g.t, g.f, g.o, g.l)
-            : await this.api.getGopData(this.dayParts, g.f, g.o, g.l);
+            ? await this.api.getLevelGopData(this.level, g.t, g.f, g.o, g.l, opt)
+            : await this.api.getGopData(this.dayParts, g.f, g.o, g.l, opt);
         return splitFramedNals(Buffer.from(data));
     }
 
@@ -588,13 +590,13 @@ export class DayPlayer {
         return spanSec > 0 && spanSec <= nominalSec * 2 ? spanSec / g.n : 1 / FPS;
     }
 
-    private async appendGop(hh: string, g: GopEntry, nals?: Buffer[]): Promise<void> {
+    private async appendGop(hh: string, g: GopEntry, nals?: Buffer[], priority = false): Promise<void> {
         if (this.appended.has(g.t) && this.isBuffered(this.internalSec(g.t))) return;
         this.appended.add(g.t);
         const fetching = !nals;
         if (fetching) { this.pendingGops.add(g.t); this.firePending(); } // mark request in flight (yellow)
         try {
-            const buf = nals || await this.fetchNals(hh, g);
+            const buf = nals || await this.fetchNals(hh, g, priority);
             if (fetching) { this.pendingGops.delete(g.t); }
             const frameDur = await this.muxFrameDur(g);
             const mp4 = await H264toMP4({ buffer: buf, frameDurationInSeconds: frameDur, mediaStartTimeSeconds: this.internalSec(g.t) });

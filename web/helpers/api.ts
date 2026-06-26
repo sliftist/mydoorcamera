@@ -42,6 +42,8 @@ export class CameraApi {
     private byteLog: { t: number; n: number }[] = [];
     private gopsLoaded = 0; // GOPs fetched/streamed this session
     private gopsInFlight = 0; // GOP-data requests sent but not yet returned
+    private gopSeq = 0;     // monotonic per GOP-data request (issue order)
+    private gopReqs = new Map<number, { id: number; seq: number; cancellable: boolean; deadline?: ReturnType<typeof setTimeout> }>();
 
     constructor(public ip: string, public port = 8443) {}
 
@@ -137,13 +139,38 @@ export class CameraApi {
     getAvailableDays(): Promise<string[]> { return this.call("getAvailableDays"); }
     getDayCoverage(parts: string[]): Promise<DayCoverage> { return this.call("getDayCoverage", parts); }
     getHourIndex(parts: string[]): Promise<HourIndex> { return this.call("getHourIndex", parts); }
-    getGopData(parts: string[], file: string, off: number, len: number): Promise<Uint8Array> {
-        this.gopsInFlight++;
-        return this.call<Uint8Array>("getGopData", parts, file, off, len)
-            .then(b => { this.gopsLoaded++; return b; })
-            .finally(() => { this.gopsInFlight--; });
+    getGopData(parts: string[], file: string, off: number, len: number, opt?: { cancellable?: boolean }): Promise<Uint8Array> {
+        return this.fetchGop("getGopData", [parts, file, off, len], !!opt?.cancellable);
     }
     getStats(): Promise<Stats> { return this.call("getStats"); }
+
+    // A GOP-data fetch, cancellable + tracked. Background (cancellable) prefetches can be
+    // dropped on a seek (cancelStaleGops); and if a LATER request returns while an earlier
+    // one is still outstanding, the earlier one gets a 5s grace then is presumed lost (the
+    // server sends GOPs roughly in order, so big out-of-order means it isn't coming).
+    private fetchGop(method: string, args: any[], cancellable: boolean): Promise<Uint8Array> {
+        if (!this.rpc) return Promise.reject(new Error("not connected"));
+        this.gopsInFlight++;
+        const seq = ++this.gopSeq;
+        const { id, promise } = this.rpc.callCancellable<Uint8Array>(method, ...args);
+        const rec = { id, seq, cancellable } as { id: number; seq: number; cancellable: boolean; deadline?: ReturnType<typeof setTimeout> };
+        this.gopReqs.set(id, rec);
+        const cleanup = () => { this.gopsInFlight--; if (rec.deadline) clearTimeout(rec.deadline); this.gopReqs.delete(id); };
+        return promise.then(b => { this.gopsLoaded++; this.onGopArrived(seq); cleanup(); return b; },
+            e => { cleanup(); throw e; });
+    }
+    private onGopArrived(arrivedSeq: number): void {
+        for (const rec of this.gopReqs.values()) {
+            if (rec.seq < arrivedSeq && !rec.deadline) {
+                rec.deadline = setTimeout(() => { try { this.rpc?.cancel(rec.id); } catch { /* */ } }, 5000);
+            }
+        }
+    }
+    // Drop all in-flight cancellable (background prefetch) GOP requests — called on a seek
+    // so the seek's own fetch isn't starved behind stale look-ahead downloads.
+    cancelStaleGops(): void {
+        for (const rec of Array.from(this.gopReqs.values())) if (rec.cancellable) { try { this.rpc?.cancel(rec.id); } catch { /* */ } }
+    }
 
     // ---- thinning levels ----
     getLevels(): Promise<LevelInfo[]> { return this.call("getLevels"); }
@@ -153,11 +180,8 @@ export class CameraApi {
     getLevelIndex(level: number, fromMs: number, toMs: number): Promise<HourIndex> {
         return this.call("getLevelIndex", level, fromMs, toMs);
     }
-    getLevelGopData(level: number, t: number, file: string, off: number, len: number): Promise<Uint8Array> {
-        this.gopsInFlight++;
-        return this.call<Uint8Array>("getLevelGopData", level, t, file, off, len)
-            .then(b => { this.gopsLoaded++; return b; })
-            .finally(() => { this.gopsInFlight--; });
+    getLevelGopData(level: number, t: number, file: string, off: number, len: number, opt?: { cancellable?: boolean }): Promise<Uint8Array> {
+        return this.fetchGop("getLevelGopData", [level, t, file, off, len], !!opt?.cancellable);
     }
     // GOP bytes by (level, t) — used for client-side thumbnail keyframe decoding.
     getGopBytesAt(level: number, t: number): Promise<Uint8Array> {

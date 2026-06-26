@@ -36,9 +36,9 @@ export const THIN_GOP_FRAMES = 30;        // frames per re-encoded thinned GOP
 // the effective frame rate (and thus data volume) is tiny anyway. A low QP floor +
 // max bitrate also stops the VBR rate-controller from crushing the cold IDR (the
 // first frame of each fresh 30-frame encode), which was the start-of-group blockiness.
-export const THIN_BITRATE = 25_000_000;   // 25 Mbps (encoder max) VBR target
-export const THIN_MIN_QP = 10;            // low QP floor -> near-lossless sharp frames
-export const THIN_MAX_QP = 20;            // cap so the cold IDR can't be crushed
+export const THIN_BITRATE = 12_000_000;   // 12 Mbps VBR target — still sharp for sparse keyframes, ~half the GOP size (faster seeks)
+export const THIN_MIN_QP = 12;            // low QP floor -> sharp frames
+export const THIN_MAX_QP = 24;            // cap so the cold IDR can't be crushed
 export const LEVEL_COUNT = THIN_LEVELS + 1; // 5 levels total (L0..L4)
 // Thinned levels live in their own tree (kept out of DATA_DIR's year scan).
 export const THIN_DIR = env.MYDOORCAMERA_THIN || "/var/lib/mydoorcamera/thin";

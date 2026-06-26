@@ -23,10 +23,15 @@ export interface Channel {
 
 type Packet =
     | { type: "call"; id: number; method: string; args: any[] }
-    | { type: "result"; id: number; value?: any; error?: { message: string; stack?: string } };
+    | { type: "result"; id: number; value?: any; error?: { message: string; stack?: string } }
+    | { type: "cancel"; id: number };   // "I no longer want the result for call `id`" — server skips the reply if not sent yet
 
 export interface Rpc {
     call<T = any>(method: string, ...args: any[]): Promise<T>;
+    // Like call, but returns the call id too so it can be cancelled. cancel(id) sends a
+    // cancel packet (server skips the reply if it hasn't sent it) AND rejects locally.
+    callCancellable<T = any>(method: string, ...args: any[]): { id: number; promise: Promise<T> };
+    cancel(id: number): void;
     close(): void;
 }
 
@@ -37,16 +42,24 @@ function rpcLog(dir: "→" | "←", type: string, verb: string): void {
 export function createRpc(channel: Channel, handlers: Handlers = {}): Rpc {
     let nextId = 1;
     const pending = new Map<number, { resolve: (v: any) => void; reject: (e: any) => void; method: string }>();
+    const inProgress = new Set<number>();   // incoming calls currently being handled (server side)
+    const cancelled = new Set<number>();    // incoming calls the caller asked to cancel before we replied
 
     channel.onMessage(async (data) => {
         let pkt: Packet;
         try { pkt = decode(data as any) as Packet; }
         catch { return; }
 
+        if (pkt.type === "cancel") {          // mark for skip only if still handling it (else it already replied)
+            if (inProgress.has(pkt.id)) cancelled.add(pkt.id);
+            return;
+        }
+
         if (pkt.type === "call") {
             rpcLog("←", "call", pkt.method);              // a call arrived for us to handle
             let reply: Packet;
             const handler = handlers[pkt.method];
+            inProgress.add(pkt.id);
             if (!handler) {
                 reply = { type: "result", id: pkt.id, error: { message: `No such method: ${pkt.method}` } };
             } else {
@@ -57,6 +70,8 @@ export function createRpc(channel: Channel, handlers: Handlers = {}): Rpc {
                     reply = { type: "result", id: pkt.id, error: { message: String(e?.message ?? e), stack: e?.stack } };
                 }
             }
+            inProgress.delete(pkt.id);
+            if (cancelled.delete(pkt.id)) { rpcLog("→", "return", pkt.method + " (cancelled, skipped)"); return; } // caller bailed — don't send
             rpcLog("→", "return", pkt.method);            // sending the result back
             try { channel.send(encode(reply)); } catch { /* socket gone */ }
             return;
@@ -82,15 +97,26 @@ export function createRpc(channel: Channel, handlers: Handlers = {}): Rpc {
         pending.clear();
     });
 
+    const send = (method: string, args: any[], id: number, resolve: (v: any) => void, reject: (e: any) => void) => {
+        pending.set(id, { resolve, reject, method });
+        rpcLog("→", "call", method);
+        try { channel.send(encode({ type: "call", id, method, args })); }
+        catch (e) { pending.delete(id); reject(e); }
+    };
     return {
         call(method, ...args) {
-            return new Promise((resolve, reject) => {
-                const id = nextId++;
-                pending.set(id, { resolve, reject, method });
-                rpcLog("→", "call", method);              // making a call
-                try { channel.send(encode({ type: "call", id, method, args })); }
-                catch (e) { pending.delete(id); reject(e); }
-            });
+            return new Promise((resolve, reject) => send(method, args, nextId++, resolve, reject));
+        },
+        callCancellable<T = any>(method: string, ...args: any[]) {
+            const id = nextId++;
+            const promise = new Promise<T>((resolve, reject) => send(method, args, id, resolve, reject));
+            return { id, promise };
+        },
+        cancel(id) {
+            // Tell the peer to skip the reply (if not sent), and give up locally now.
+            try { channel.send(encode({ type: "cancel", id })); } catch { /* */ }
+            const p = pending.get(id);
+            if (p) { pending.delete(id); p.reject(new Error("cancelled")); }
         },
         close() { channel.close(); },
     };
