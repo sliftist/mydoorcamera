@@ -15,6 +15,7 @@ export type SystemStats = {
     diskTotalBytes: number;
     netRxBps: number;        // gross download rate, bytes/sec (all real interfaces)
     netTxBps: number;        // gross upload rate, bytes/sec
+    tempC: number | null;    // SoC temperature in °C (null if unreadable)
 };
 
 export type EncoderStats = { fps: number; cpuPct: number; updatedMs: number };
@@ -87,8 +88,15 @@ async function sampleNetRate(): Promise<void> {
 setInterval(() => void sampleNetRate(), 2000);
 void sampleNetRate();
 
+// SoC temperature from the thermal zone (millidegrees C). Pi throttles ~80-85°C.
+async function readTempC(): Promise<number | null> {
+    try { const v = Number((await fsp.readFile("/sys/class/thermal/thermal_zone0/temp", "utf8")).trim()); return isFinite(v) ? Math.round(v / 100) / 10 : null; }
+    catch { return null; }
+}
+
 export async function getSystemStats(dataDir: string): Promise<SystemStats> {
     const cpuPct = await sampleCpuPct(200);
+    const tempC = await readTempC();
     const total = os.totalmem(), free = os.freemem();
     let diskUsedBytes = 0, diskTotalBytes = 0;
     try {
@@ -106,6 +114,7 @@ export async function getSystemStats(dataDir: string): Promise<SystemStats> {
         diskTotalBytes,
         netRxBps: Math.round(netRate.rxBps),
         netTxBps: Math.round(netRate.txBps),
+        tempC,
     };
 }
 

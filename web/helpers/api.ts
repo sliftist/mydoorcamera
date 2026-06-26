@@ -20,6 +20,7 @@ export type Stats = {
         ramUsedBytes: number; ramTotalBytes: number;
         diskUsedBytes: number; diskTotalBytes: number;
         netRxBps: number; netTxBps: number;
+        tempC: number | null;
     };
     encoder: { fps: number; cpuPct: number; updatedMs: number } | null;
 };

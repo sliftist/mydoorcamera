@@ -41,8 +41,10 @@ export function fmtBytes(n: number): string {
 }
 export function formatStats(s: Stats): string {
     const sy = s.system;
-    const enc = s.encoder ? `enc ${s.encoder.fps}fps (${s.encoder.cpuPct}%)` : "enc —";
-    return `CPU ${sy.cpuPct}% · RAM ${gb(sy.ramUsedBytes)}/${gb(sy.ramTotalBytes)} GB · Disk ${gb(sy.diskUsedBytes)}/${gb(sy.diskTotalBytes)} GB · net ↓${bps(sy.netRxBps)} ↑${bps(sy.netTxBps)} · ${enc}`;
+    // Recording FPS (15s avg) first — drops below ~30 if capture falls behind.
+    const fps = s.encoder ? `rec ${s.encoder.fps}fps${s.encoder.fps < 29 ? " ⚠️" : ""}` : "rec —";
+    const temp = sy.tempC != null ? ` · ${sy.tempC.toFixed(1)}°C${sy.tempC >= 75 ? " 🔥" : ""}` : "";
+    return `${fps} · CPU ${sy.cpuPct}%${temp} · RAM ${gb(sy.ramUsedBytes)}/${gb(sy.ramTotalBytes)} GB · Disk ${gb(sy.diskUsedBytes)}/${gb(sy.diskTotalBytes)} GB · net ↓${bps(sy.netRxBps)} ↑${bps(sy.netTxBps)}`;
 }
 
 export function statusLabel(s: PlayStatus): string {

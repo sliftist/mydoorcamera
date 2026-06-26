@@ -98,13 +98,18 @@ function start(): void {
 }
 
 // Sample encoder throughput + CPU every 5s and publish for the server to read.
-let lastFrames = 0, lastStatsMs = Date.now();
+// FPS is averaged over a ~15s sliding window so a brief dip is visible without the
+// number being jumpy — lets you see if recording is falling behind real-time.
+const FPS_WINDOW_MS = 15_000;
+const fpsHist: { ms: number; frames: number }[] = [];
 setInterval(async () => {
     try {
         const now = Date.now();
-        const dt = (now - lastStatsMs) / 1000;
-        const fps = dt > 0 ? (framesWritten - lastFrames) / dt : 0;
-        lastFrames = framesWritten; lastStatsMs = now;
+        fpsHist.push({ ms: now, frames: framesWritten });
+        while (fpsHist.length > 2 && now - fpsHist[0].ms > FPS_WINDOW_MS) fpsHist.shift();
+        const base = fpsHist[0];
+        const dt = (now - base.ms) / 1000;
+        const fps = dt > 0 ? (framesWritten - base.frames) / dt : 0;
         const cpuPct = gstSampler ? Math.round(await gstSampler.sample()) : 0;
         await writeEncoderStats({ fps: Math.round(fps * 10) / 10, cpuPct, updatedMs: now });
     } catch (e) { console.error("[capture] stats failed:", (e as Error).message); }
