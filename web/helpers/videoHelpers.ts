@@ -381,14 +381,41 @@ export class DayPlayer {
         return false;
     }
 
+    // Wall time of the GOP immediately following `g` (the next keyframe), if known.
+    // Used to make muxed GOPs contiguous: stretch the last frame up to the next
+    // keyframe so playback doesn't stall on the few-ms capture jitter at each seam.
+    private async nextStartWall(g: GopEntry): Promise<number | undefined> {
+        if (this.level > 0) {
+            await this.ensureLevelLoaded();
+            for (const x of this.levelGops) if (x.t > g.t) return x.t; // sorted ascending
+            return undefined;
+        }
+        for (let hn = this.hourNumOf(g.t); hn <= 23; hn++) {
+            for (const x of await this.ensureHour(hn)) if (x.t > g.t) return x.t;
+        }
+        return undefined;
+    }
+
+    // Per-GOP playback frame duration. Normally 1/FPS, but if the next keyframe is
+    // near where this GOP nominally ends, fill exactly up to it (eliminates the seam
+    // gap). A far-away next keyframe means genuinely missing footage — leave the gap.
+    private async muxFrameDur(g: GopEntry): Promise<number> {
+        const nominalSec = g.n / FPS;
+        const next = await this.nextStartWall(g);
+        if (next == null) return 1 / FPS;
+        const spanSec = (next - g.t) / 1000 / this.comp; // playback seconds between this GOP and the next
+        return spanSec > 0 && spanSec <= nominalSec * 2 ? spanSec / g.n : 1 / FPS; // bridge jitter; leave real (missing-footage) gaps
+    }
+
     private async appendGop(hh: string, g: GopEntry, nals?: Buffer[]): Promise<void> {
         // Re-append if we marked it appended but it was since evicted from the
         // SourceBuffer — otherwise a seek back to it freezes (no data, no re-fetch).
         if (this.appended.has(g.t) && this.isBuffered(this.internalSec(g.t))) return;
         this.appended.add(g.t);
         try {
-            const ns = nals || await this.fetchNals(hh, g);
-            const mp4 = await H264toMP4({ buffer: ns, frameDurationInSeconds: 1 / FPS, mediaStartTimeSeconds: this.internalSec(g.t) });
+            const buf = nals || await this.fetchNals(hh, g);
+            const frameDur = await this.muxFrameDur(g);
+            const mp4 = await H264toMP4({ buffer: buf, frameDurationInSeconds: frameDur, mediaStartTimeSeconds: this.internalSec(g.t) });
             await this.enqueue(Buffer.from(mp4.buffer));
         } catch (e) { this.appended.delete(g.t); throw e; }
     }
