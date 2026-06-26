@@ -35,7 +35,7 @@ const LOWVAR = 50;                        // frame variance below this = blank/c
 const MASK_ROWS = Math.round(0.11 * H), MASK_COLS = Math.round(0.75 * W);
 const PENDING_LIMIT = 12;                 // records examined per pass
 const PERIOD_MS = 1000;
-const SAMPLE_INTERVAL_MS = 500;           // sample ~every keyframe (GOPs are ~1s)
+const SAMPLE_INTERVAL_MS = 1500;          // sample one in every ~2 GOPs (GOPs are ~1s) — keeps CPU off the MJPEG-decode capture pipeline
 const START_CODE = Buffer.from([0, 0, 0, 1]);
 
 const ring: Buffer[] = [];                // recent good frames (background source); persists across passes
