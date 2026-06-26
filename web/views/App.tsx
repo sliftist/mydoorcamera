@@ -4,6 +4,7 @@ import { css } from "typesafecss";
 import { formatDateTime } from "socket-function/src/formatting/format";
 import { state } from "../helpers/appState";
 import { fmtBytes, bps, formatStats } from "../helpers/format";
+import { downloadDebugInfo } from "../helpers/playerLog";
 import { BUILD_TIMESTAMP } from "../../buildVersion";
 import { ConnectView } from "./ConnectView";
 import { VideoPlayer } from "./VideoPlayer";
@@ -21,6 +22,13 @@ export class App extends preact.Component {
                     {state.view === "browse" && !state.online && <div style={{ color: "hsl(40,95%,62%)" }}>● reconnecting…</div>}
                     {state.view === "browse" && <div>GOP {state.outstandingGops > 0 ? <span style={{ color: "hsl(45,95%,62%)" }}>{state.outstandingGops}→</span> : null}{state.loadedGops} · {fmtBytes(state.loadedBytes)} · {bps(state.loadRateBps)}</div>}
                     {state.stats && <div>{formatStats(state.stats)}</div>}
+                    {/* The overlay is pointerEvents:none; this button re-enables clicks on itself. */}
+                    <div>
+                        <button onClick={() => downloadDebugInfo()} title="Download playback state-machine log"
+                            style={{ pointerEvents: "auto", cursor: "pointer", font: "inherit", fontSize: "11px", color: "inherit", background: "rgba(255,255,255,0.12)", border: "1px solid rgba(255,255,255,0.25)", padding: "1px 6px" }}>
+                            ⤓ debug
+                        </button>
+                    </div>
                     <div>Build {formatDateTime(BUILD_TIMESTAMP)}</div>
                 </div>
             </preact.Fragment>
