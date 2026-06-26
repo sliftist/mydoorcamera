@@ -121,6 +121,51 @@ function onTrackUp(): void {
     saveUrlPosition(state.desiredWall); // drag finished
 }
 
+// ---- loop region (set/clear/drag) ----
+// Set the loop to [start,end], jump to its start, and play it (so clicking a region loops it).
+export function setLoopRegion(start: number, end: number): void {
+    runInAction(() => { state.loopStart = start; state.loopEnd = end; state.desiredWall = start; });
+    player?.setLoop(start, end);
+    player?.seekTo(start);
+    player?.play();
+    saveUrlPosition(start);
+}
+export function clearLoopRegion(): void {
+    runInAction(() => { state.loopStart = 0; state.loopEnd = 0; });
+    player?.clearLoop();
+    saveUrlPosition(state.playWall);
+}
+// Manually add a loop spanning the middle half of the current zoom window.
+export function addLoopAtView(): void {
+    const { vs, ve } = viewBounds();
+    const span = ve - vs;
+    setLoopRegion(vs + span * 0.25, vs + span * 0.75);
+}
+// Drag a loop handle ("start" | "end"); the marker's onMouseDown calls this and must stopPropagation.
+let loopDrag: "start" | "end" | null = null;
+export function startLoopDrag(which: "start" | "end", e: any): void {
+    e.preventDefault(); e.stopPropagation();
+    loopDrag = which;
+    window.addEventListener("mousemove", onLoopDrag);
+    window.addEventListener("mouseup", onLoopUp);
+}
+function onLoopDrag(e: MouseEvent): void {
+    if (!loopDrag) return;
+    const w = clientToWall(e.clientX);
+    if (w == null) return;
+    runInAction(() => {
+        if (loopDrag === "start") state.loopStart = Math.min(w, state.loopEnd - 1);
+        else state.loopEnd = Math.max(w, state.loopStart + 1);
+    });
+    if (state.loopStart && state.loopEnd > state.loopStart) player?.setLoop(state.loopStart, state.loopEnd);
+}
+function onLoopUp(): void {
+    loopDrag = null;
+    window.removeEventListener("mousemove", onLoopDrag);
+    window.removeEventListener("mouseup", onLoopUp);
+    saveUrlPosition(state.playWall);
+}
+
 // Attach a NON-passive wheel listener so we can preventDefault the page scroll,
 // and keep state.trackWidthPx in sync (reactive) via a ResizeObserver.
 let resizeObs: ResizeObserver | undefined;

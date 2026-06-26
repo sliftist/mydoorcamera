@@ -160,7 +160,25 @@ function zoomSuffix(): string {
 }
 function acSuffix(): string { return state.activityExp !== 0.4 ? `&ac=${state.activityExp}` : ""; }
 function cuSuffix(): string { return state.catchupMode !== "rate" ? `&cu=${state.catchupMode}` : ""; }
-function extraSuffix(): string { return lvlSuffix() + speedSuffix() + zoomSuffix() + acSuffix() + cuSuffix(); }
+function arSuffix(): string { return state.activityPanelOpen ? `&ar=1` : ""; }
+function atSuffix(): string { return state.activityThreshold !== 0.004 ? `&at=${state.activityThreshold}` : ""; }
+// Loop region as absolute wall-clock ms: &loop=start-end (omitted when no loop).
+function loopSuffix(): string { return (state.loopStart && state.loopEnd && state.loopEnd > state.loopStart) ? `&loop=${state.loopStart}-${state.loopEnd}` : ""; }
+function extraSuffix(): string { return lvlSuffix() + speedSuffix() + zoomSuffix() + acSuffix() + cuSuffix() + arSuffix() + atSuffix() + loopSuffix(); }
+export function getUrlPanelOpen(): boolean { try { return new URLSearchParams(location.search).get("ar") === "1"; } catch { return false; } }
+export function getUrlThreshold(): number { try { const n = Number(new URLSearchParams(location.search).get("at")); return n > 0 && n <= 1 ? n : 0.004; } catch { return 0.004; } }
+export function getUrlLoop(): { start: number; end: number } | null {
+    try { const v = new URLSearchParams(location.search).get("loop"); if (!v) return null; const [a, b] = v.split("-").map(Number); return isFinite(a) && isFinite(b) && b > a ? { start: a, end: b } : null; } catch { return null; }
+}
+// Restore the loop region from ?loop onto the current period (used on initial load / period change).
+export function applyUrlLoop(): void {
+    const lp = getUrlLoop();
+    if (!lp || !state.coverage) { return; }
+    const s = Math.max(state.coverage.dayStartMs, lp.start), e = Math.min(state.coverage.dayEndMs, lp.end);
+    if (e - s < 1) return;
+    runInAction(() => { state.loopStart = s; state.loopEnd = e; });
+    if (player) player.setLoop(s, e);
+}
 export function getUrlCatchup(): "rate" | "compress" { try { return new URLSearchParams(location.search).get("cu") === "compress" ? "compress" : "rate"; } catch { return "rate"; } }
 export function getUrlActivityExp(): number { try { const n = Number(new URLSearchParams(location.search).get("ac")); return n > 0 && n <= 5 ? n : 0.4; } catch { return 0.4; } }
 export function getUrlZoom(): { vs: number; ve: number } | null {

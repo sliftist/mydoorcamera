@@ -43,7 +43,8 @@ type FsmEvent =
     | { type: "PLAYBACK_BLOCKED" }
     | { type: "TIME_TICK"; wall: number }
     | { type: "STALL_DETECTED" }
-    | { type: "RATE_TICK" };
+    | { type: "RATE_TICK" }
+    | { type: "SET_LOOP"; loop: { start: number; end: number } | null };
 
 interface Ctx {
     state: FsmState;
@@ -59,6 +60,7 @@ interface Ctx {
     catchupMode: "rate" | "compress";
     status: PlayStatus;          // last emitted PlayStatus
     seekingFlag: boolean;        // last emitted onSeeking value
+    loop: { start: number; end: number } | null; // loop-region playback (wall ms); null = no loop
     destroyed: boolean;
 }
 
@@ -136,7 +138,7 @@ export class DayPlayer {
         this.ctx = {
             state: "idle", intent: "pause", intendedWall: dayStartMs, shownWall: -1,
             pumpGen: 0, fetchToken: 0, pumping: false, speed: 1, live: false,
-            liveFactor: 1, catchupMode: "rate", status: "paused", seekingFlag: false, destroyed: false,
+            liveFactor: 1, catchupMode: "rate", status: "paused", seekingFlag: false, loop: null, destroyed: false,
         };
         this.video.addEventListener("timeupdate", this.onVideoTimeUpdate);
         this.video.addEventListener("playing", this.onVideoPlaying);
@@ -154,6 +156,9 @@ export class DayPlayer {
     togglePlay(): void { if (this.ctx.intent === "play") this.pause(); else this.play(); }
     setSpeed(s: number): void { this.dispatch({ type: "SET_SPEED", s }); }
     setCatchupMode(m: "rate" | "compress"): void { this.dispatch({ type: "SET_CATCHUP", m }); }
+    setLoop(start: number, end: number): void { this.dispatch({ type: "SET_LOOP", loop: { start, end } }); }
+    clearLoop(): void { this.dispatch({ type: "SET_LOOP", loop: null }); }
+    get loop(): { start: number; end: number } | null { return this.ctx.loop; }
     invalidateIndex(): void { this.dispatch({ type: "INVALIDATE_INDEX" }); }
     async startLive(): Promise<void> { this.dispatch({ type: "START_LIVE" }); await this.liveOp; }
     async stopLive(): Promise<void> { this.dispatch({ type: "STOP_LIVE" }); await this.liveOp; }
@@ -192,6 +197,7 @@ export class DayPlayer {
             case "PAUSE": if (!c.live) c.intent = "pause"; break;
             case "SET_SPEED": c.speed = ev.s; break;
             case "SET_CATCHUP": c.catchupMode = ev.m; break;
+            case "SET_LOOP": c.loop = ev.loop; break;
             case "START_LIVE": c.live = true; c.intent = "play"; c.pumpGen++; break;
             case "STOP_LIVE": c.live = false; c.intent = "pause"; c.pumpGen++; c.shownWall = -1; c.liveFactor = 1; break;
             case "INVALIDATE_INDEX": if (c.state === "unavailable") { c.shownWall = -1; c.fetchToken++; } break;
@@ -210,7 +216,7 @@ export class DayPlayer {
             case "TEARDOWN": return "destroyed";
             case "START_LIVE": return "live";
             case "STOP_LIVE": return "paused";
-            case "SET_SPEED": case "SET_CATCHUP": return from;
+            case "SET_SPEED": case "SET_CATCHUP": case "SET_LOOP": return from;
             case "INVALIDATE_INDEX": return from === "unavailable" ? "seeking" : from;
         }
         if (c.live || from === "live") return "live"; // live ignores SEEK/PLAY/PAUSE/etc.
@@ -349,7 +355,11 @@ export class DayPlayer {
         if (typeof v.requestVideoFrameCallback !== "function") return;
         const cb = () => {
             if (this.ctx.destroyed) return;
-            this.onTime?.(this.currentWall());
+            const wall = this.currentWall();
+            this.onTime?.(wall);
+            // Loop-region playback: when playing reaches the loop end, jump back to its start.
+            const lp = this.ctx.loop;
+            if (lp && this.ctx.state === "playing" && !this.ctx.live && wall >= lp.end) this.seekTo(lp.start);
             v.requestVideoFrameCallback(cb);
         };
         v.requestVideoFrameCallback(cb);

@@ -6,7 +6,7 @@ import { formatDateTime } from "socket-function/src/formatting/format";
 import { state } from "../helpers/appState";
 import { clockHMS } from "../helpers/format";
 import { navBtnCss } from "../helpers/styles";
-import { setTrackRef, onTrackDown, onTrackHover, onTrackLeave, resetZoom } from "../helpers/trackbarHelpers";
+import { setTrackRef, onTrackDown, onTrackHover, onTrackLeave, resetZoom, clearLoopRegion, addLoopAtView, startLoopDrag } from "../helpers/trackbarHelpers";
 import { saveUrlPosition, nudgeBucket } from "../helpers/navigation";
 import { frameCount } from "../helpers/indexBuffer";
 import { levelGopSpanSec, levelPeriod } from "../../src/config";
@@ -105,6 +105,14 @@ export class Trackbar extends preact.Component {
                             <div style={{ position: "absolute", bottom: "2px", transform: "translateX(-50%)", background: "#000", padding: "2px 6px", fontSize: "11px", whiteSpace: "nowrap", border: "1px solid hsl(220,15%,35%)" }}>{clockHMS(state.hoverWall)}</div>
                         </div>
                     )}
+                    {/* Loop region: shaded band + two draggable handles (amber). */}
+                    {!!(state.loopStart && state.loopEnd > state.loopStart && inView(state.loopStart, state.loopEnd)) && (
+                        <preact.Fragment>
+                            <div style={{ position: "absolute", top: 0, bottom: 0, left: pct(state.loopStart), width: wpct(state.loopStart, state.loopEnd), background: "rgba(255,180,0,0.12)", borderLeft: "1px solid rgba(255,180,0,0.5)", borderRight: "1px solid rgba(255,180,0,0.5)", pointerEvents: "none", boxSizing: "border-box" }} />
+                            <div onMouseDown={(e: any) => startLoopDrag("start", e)} title="loop start" style={{ position: "absolute", top: 0, bottom: 0, left: pct(state.loopStart), width: "7px", marginLeft: "-3px", cursor: "ew-resize", background: "rgba(255,180,0,0.85)" }} />
+                            <div onMouseDown={(e: any) => startLoopDrag("end", e)} title="loop end" style={{ position: "absolute", top: 0, bottom: 0, left: pct(state.loopEnd), width: "7px", marginLeft: "-4px", cursor: "ew-resize", background: "rgba(255,180,0,0.85)" }} />
+                        </preact.Fragment>
+                    )}
                 </div>
                 <button className={navBtnCss} style={{ ...flank, padding: 0, fontSize: "16px", display: "flex", alignItems: "center", justifyContent: "center" }}
                     title={`Next ${levelPeriod(state.level)} (or shift forward)`} onClick={() => void nudgeBucket(1)}>»</button>
@@ -137,6 +145,9 @@ export class Trackbar extends preact.Component {
                                 onInput={(e: any) => { const v = Number(e.target.value) || 0.4; runInAction(() => { state.activityExp = v; }); saveUrlPosition(state.playWall); }}
                                 style={{ width: "52px", fontSize: "11px", padding: "1px 4px", background: "hsl(220,15%,16%)", color: "inherit", border: "1px solid hsl(220,15%,30%)" }} />
                         </span>
+                        {!!(state.loopStart && state.loopEnd > state.loopStart)
+                            ? <button className={navBtnCss} style={{ fontSize: "11px", padding: "2px 8px", color: "hsl(40,100%,70%)" }} onClick={clearLoopRegion} title="Clear the loop">✕ loop</button>
+                            : <button className={navBtnCss} style={{ fontSize: "11px", padding: "2px 8px" }} onClick={addLoopAtView} title="Loop the middle of the current view">↻ loop</button>}
                         {zoomed
                             ? <button className={navBtnCss} style={{ fontSize: "11px", padding: "2px 8px" }} onClick={resetZoom} title="Reset zoom (show the whole period)">⤢ reset zoom</button>
                             : <span className={css.opacity(0.5)}>scroll to zoom</span>}
