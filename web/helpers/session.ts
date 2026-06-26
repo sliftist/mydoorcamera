@@ -97,9 +97,11 @@ export function maybeStartDayPlayer(): void {
     if (state.loopStart && state.loopEnd > state.loopStart) player.setLoop(state.loopStart, state.loopEnd); // loop survives the day/level rebuild
     player.onTime = (wall) => runInAction(() => {
         state.playWall = wall;
-        // While actually playing, keep the seek base (desiredWall) on the live
-        // playhead so arrow-seek moves from where we are, not the last click.
-        if (player && player.wantsPlay && !state.live) state.desiredWall = wall;
+        // Sync the intended position (desiredWall) to the playhead ONLY while genuinely
+        // playing — never while seeking. Otherwise a seek-in-progress would clobber the
+        // intended target back to the old playhead (purple marker snaps off the click /
+        // arrow target and "disappears" until the actual playhead catches up).
+        if (player && player.playStatus === "playing" && !state.live) state.desiredWall = wall;
     });
     player.onStatus = (s) => runInAction(() => { state.playStatus = s; });
     player.onSeeking = (s) => runInAction(() => { state.seeking = s; });
