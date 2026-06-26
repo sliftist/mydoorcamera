@@ -23,7 +23,11 @@ function codecFromSps(nals: Buffer[]): string {
 }
 function pad2(n: number): string { return String(n).padStart(2, "0"); }
 const DAY_MS = 24 * 3600 * 1000;
-const PREBUFFER_MS = 4000; // buffer this much ahead after a seek so play is instant (LAN server)
+// Background buffering targets (scaled up by playback speed): keep this many GOPs
+// buffered into the future, fetching this many concurrently at a time.
+const BUFFER_TARGET_GOPS = 10;
+const BUFFER_BATCH_GOPS = 4;
+const PREBUFFER_DELAY_MS = 200; // after a paused seek settles, wait this long, then buffer ahead
 
 export class DayPlayer {
     private ms: MediaSource | undefined;
@@ -185,10 +189,6 @@ export class DayPlayer {
         if (this.live && m === "compress") { try { this.video.playbackRate = 1; } catch { /* */ } }
     }
     get catchup(): "rate" | "compress" { return this.catchupMode; }
-    // Real-time buffer window. At a thinned level, one playback second consumes
-    // `comp` real seconds, so the real-time window scales by comp to keep the same
-    // amount of *playback* buffered.
-    private bufferWindowMs(): number { return Math.min(60_000, Math.max(8_000, 15_000 * this.speed)) * this.comp; }
 
     // ---- seeking (click / drag / arrows) ----
     seekTo(wall: number): void {
@@ -235,7 +235,7 @@ export class DayPlayer {
         // so a drag (which re-seeks) cancels it — we never download GOPs we're leaving.
         if (this.prebufferTimer) clearTimeout(this.prebufferTimer);
         const w = this.targetWall;
-        this.prebufferTimer = setTimeout(() => { void this.loadRange(w, w + PREBUFFER_MS * Math.max(1, this.speed)).catch(() => { /* */ }); }, 150);
+        this.prebufferTimer = setTimeout(() => { void this.bufferAhead(w); }, PREBUFFER_DELAY_MS);
     }
 
     private async showFrameAt(wall: number): Promise<void> {
@@ -283,7 +283,7 @@ export class DayPlayer {
         try { this.video.playbackRate = this.speed; } catch { /* */ }
         try { await this.video.play(); } catch { /* gesture needed */ }
         this.refreshStatus();
-        void this.loadRange(wall, wall + this.bufferWindowMs()).catch(() => { /* */ }); // buffer ahead in the background
+        void this.bufferAhead(wall); // buffer multiple GOPs ahead, concurrently, in the background
     }
 
     private onTimeUpdate = (): void => {
@@ -297,7 +297,7 @@ export class DayPlayer {
         const wall = this.currentWall();
         this.onTime?.(wall);
         if (this.intent === "play" && !this.video.paused && !this.pumping) {
-            void this.loadRange(wall, wall + this.bufferWindowMs()).catch(() => { /* */ });
+            void this.bufferAhead(wall);
             this.evictBefore(this.video.currentTime - 90);
         }
         this.refreshStatus();
@@ -432,24 +432,54 @@ export class DayPlayer {
         try { this.sb.appendBuffer(item.buf as any); } catch { this.flushing = false; item.resolve(); }
     }
 
-    async loadRange(startWall: number, endWall: number): Promise<void> {
+    // The next `count` GOPs at/after `fromWall` (the GOP containing it and the ones
+    // following), across hours (L0) or the level index (thinned).
+    private async gopsAhead(fromWall: number, count: number): Promise<{ hh: string; g: GopEntry }[]> {
+        const out: { hh: string; g: GopEntry }[] = [];
         if (this.level > 0) {
             await this.ensureLevelLoaded();
             for (const g of this.levelGops) {
-                if (g.t + this.gopDurMs(g) < startWall) continue;
-                if (g.t > endWall) return;
-                if (!this.appended.has(g.t)) { try { await this.appendGop("", g); } catch { return; } }
+                if (g.t + this.gopDurMs(g) < fromWall) continue;
+                out.push({ hh: "", g });
+                if (out.length >= count) break;
             }
-            return;
+            return out;
         }
-        for (let hn = this.hourNumOf(startWall); hn <= 23 && (this.dayStartMs + hn * 3600_000) <= endWall; hn++) {
+        for (let hn = this.hourNumOf(fromWall); hn <= 23 && out.length < count; hn++) {
             const hh = pad2(hn);
             for (const g of await this.ensureHour(hn)) {
-                if (g.t + this.gopDurMs(g) < startWall) continue;
-                if (g.t > endWall) return;
-                if (!this.appended.has(g.t)) { try { await this.appendGop(hh, g); } catch { return; } }
+                if (g.t + this.gopDurMs(g) < fromWall) continue;
+                out.push({ hh, g });
+                if (out.length >= count) break;
             }
         }
+        return out;
+    }
+
+    // Run `fn` over items with at most `limit` running concurrently.
+    private async runBounded<T>(items: T[], limit: number, fn: (x: T) => Promise<void>): Promise<void> {
+        let i = 0;
+        const worker = async () => { while (i < items.length) await fn(items[i++]); };
+        await Promise.all(Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, worker));
+    }
+
+    // Prefetch GOPs ahead of `fromWall` so playback keeps up. Unlike a single seek
+    // fetch, this requests several GOPs concurrently and aims to keep a number of
+    // them buffered into the future — both scaled by the playback speed (faster
+    // playback consumes GOPs faster, so fetch more at once and keep more ahead).
+    private bufferingAhead = false;
+    private async bufferAhead(fromWall: number): Promise<void> {
+        if (this.bufferingAhead || this.live) return;
+        this.bufferingAhead = true;
+        try {
+            const rate = Math.max(1, this.speed);
+            const target = Math.min(200, Math.round(BUFFER_TARGET_GOPS * rate)); // GOPs to keep ahead
+            const batch = Math.min(16, Math.round(BUFFER_BATCH_GOPS * rate));    // concurrent fetches
+            const list = await this.gopsAhead(fromWall, target);
+            // appendGop is a cheap no-op for GOPs already buffered, so only the
+            // not-yet-fetched frontier actually hits the network.
+            await this.runBounded(list, batch, x => this.appendGop(x.hh, x.g).catch(() => { /* */ }));
+        } finally { this.bufferingAhead = false; }
     }
 
     private evictBefore(sec: number): void {
