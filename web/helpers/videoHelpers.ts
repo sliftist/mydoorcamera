@@ -43,6 +43,7 @@ export class DayPlayer {
     private targetWall: number;
     private shownWall = -1;
     private pumping = false;
+    private pumpGen = 0;                // bumped to supersede an in-flight seek pump (e.g. when live starts/stops)
     private prebufferTimer: ReturnType<typeof setTimeout> | undefined; // deferred trailing-GOP prebuffer (paused seeks)
     private status: PlayStatus = "paused";
     private speed = 1;                  // playback speed for non-live review (1/16 .. 16)
@@ -155,6 +156,7 @@ export class DayPlayer {
 
     // ---- seeking (click / drag / arrows) ----
     seekTo(wall: number): void {
+        if (this.live) return; // live owns the playhead; ignore review seeks until we exit live
         if (this.prebufferTimer) { clearTimeout(this.prebufferTimer); this.prebufferTimer = undefined; } // a new seek cancels pending prebuffer
         this.targetWall = Math.max(this.dayStartMs, Math.min(this.spanEndMs - 1, wall));
         try { this.video.pause(); } catch { /* */ }   // static frames while seeking
@@ -164,12 +166,22 @@ export class DayPlayer {
     nudge(deltaMs: number): void { this.seekTo((this.targetWall >= 0 ? this.targetWall : this.currentWall()) + deltaMs); }
     seekTarget(): number { return this.targetWall; }
 
+    // Abort any in-flight seek pump (newest generation wins). Called when live
+    // mode takes over the playhead, or on teardown.
+    private cancelPump(): void {
+        this.pumpGen++;
+        this.pumping = false;
+        if (this.prebufferTimer) { clearTimeout(this.prebufferTimer); this.prebufferTimer = undefined; }
+        this.setSeeking(false);
+    }
+
     private async runSeekPump(): Promise<void> {
-        if (this.pumping) return;
+        const gen = ++this.pumpGen;   // newest target wins; a live transition bumps pumpGen to abort us
+        if (this.pumping) return;     // an active loop will pick up the new targetWall
         this.pumping = true;
         this.setSeeking(true); // haven't shown the target frame yet
         try {
-            while (this.shownWall !== this.targetWall) {
+            while (gen === this.pumpGen && !this.live && this.shownWall !== this.targetWall) {
                 const t = this.targetWall;        // always chase the latest
                 await this.showFrameAt(t);
                 this.shownWall = t;
@@ -177,6 +189,7 @@ export class DayPlayer {
         } finally {
             this.pumping = false;
         }
+        if (gen !== this.pumpGen || this.live) return; // superseded (e.g. live started) — don't start playback/prebuffer
         this.setSeeking(false); // target frame is now shown
         // Settled on a target. If playing, kick off normal windowed buffering +
         // playback; if paused, still prebuffer a few seconds so hitting play (or a
@@ -190,6 +203,7 @@ export class DayPlayer {
     }
 
     private async showFrameAt(wall: number): Promise<void> {
+        if (this.live) return; // live owns the timeline — don't rebuild the MSE underneath it
         if (!this.coveredAt(wall)) { this.setStatus("unavailable"); return; }
         let target = await this.gopAt(wall);
         // Coverage says there's footage here but our cached index ends well before
@@ -219,7 +233,7 @@ export class DayPlayer {
 
     // ---- playback ----
     private async startPlaybackFrom(wall: number): Promise<void> {
-        if (this.intent !== "play") return;
+        if (this.intent !== "play" || this.live) return;
         if (!this.coveredAt(wall)) { this.setStatus("unavailable"); return; }
         const target = await this.gopAt(wall);
         if (!target) { this.setStatus("unavailable"); return; }
@@ -262,13 +276,23 @@ export class DayPlayer {
     };
     private setStatus(s: PlayStatus): void { if (s !== this.status) { this.status = s; this.onStatus?.(s); } }
 
+    // Wait for a freshly-created MediaSource to open, but never hang: if it's torn
+    // down (replaced) before opening, 'sourceopen' never fires, so bail after 3s.
+    private waitSourceOpen(ms: MediaSource): Promise<void> {
+        return new Promise<void>((res, rej) => {
+            const ok = () => { clearTimeout(t); res(); };
+            const t = setTimeout(() => { ms.removeEventListener("sourceopen", ok); rej(new Error("sourceopen timeout")); }, 3000);
+            ms.addEventListener("sourceopen", ok, { once: true });
+        });
+    }
+
     // ---- buffering primitives ----
     private async ensureSourceBuffer(target: { hh: string; g: GopEntry }): Promise<void> {
         if (this.sb) return;
         const nals = await this.fetchNals(target.hh, target.g);
         this.ms = new MediaSource();
         this.video.src = URL.createObjectURL(this.ms);
-        await new Promise<void>(res => this.ms!.addEventListener("sourceopen", () => res(), { once: true }));
+        await this.waitSourceOpen(this.ms);
         this.sb = this.ms.addSourceBuffer(`video/mp4; codecs="${codecFromSps(nals)}"`);
         await this.appendGop(target.hh, target.g, nals);
     }
@@ -374,6 +398,7 @@ export class DayPlayer {
     get isLive(): boolean { return this.live; }
 
     async startLive(): Promise<void> {
+        this.cancelPump();  // a review seek pump must not rebuild the MSE / move the playhead under live
         this.live = true; this.intent = "play"; this.firstLive = true;
         this.lastReceivedEnd = 0; this.rate = 1; this.minBuffer = Infinity;
         this.teardownMse(); // fresh timeline starting at the live edge
@@ -386,9 +411,12 @@ export class DayPlayer {
 
     async stopLive(): Promise<void> {
         this.live = false;
+        this.cancelPump();           // clear any stale pump state so review seeks work again
+        this.shownWall = -1;         // force the next seek to actually render a frame
         if (this.rateTimer) { clearInterval(this.rateTimer); this.rateTimer = undefined; }
         this.rate = 1;
-        try { this.video.playbackRate = 1; } catch { /* */ }
+        try { this.video.pause(); } catch { /* */ } // stop the live buffer from running on
+        try { this.video.playbackRate = this.speed; } catch { /* */ }
         this.onRate?.(1);
         this.onBuffer?.(0);
         try { await this.api.stopStream(); } catch { /* */ }
@@ -399,7 +427,7 @@ export class DayPlayer {
         if (this.sb) return;
         this.ms = new MediaSource();
         this.video.src = URL.createObjectURL(this.ms);
-        await new Promise<void>(res => this.ms!.addEventListener("sourceopen", () => res(), { once: true }));
+        await this.waitSourceOpen(this.ms);
         this.sb = this.ms.addSourceBuffer(`video/mp4; codecs="${codecFromSps(nals)}"`);
     }
 
@@ -468,14 +496,22 @@ export class DayPlayer {
         }
     }
 
+    // Resolve every pending append promise before discarding the queue, so awaiters
+    // (the seek pump) never hang when the SourceBuffer is torn down out from under them.
+    private drainQueue(): void {
+        for (const item of this.queue) item.resolve();
+        this.queue = []; this.flushing = false;
+    }
+
     private teardownMse(): void {
         try { this.video.pause(); this.video.removeAttribute("src"); this.video.load(); } catch { /* */ }
         this.ms = undefined; this.sb = undefined;
-        this.appended.clear(); this.queue = []; this.flushing = false;
+        this.appended.clear(); this.drainQueue();
     }
 
     teardown(): void {
         this.destroyed = true; // stop the per-frame callback loop
+        this.cancelPump();
         if (this.prebufferTimer) clearTimeout(this.prebufferTimer);
         if (this.live) { this.live = false; try { void this.api.stopStream(); } catch { /* */ } }
         if (this.rateTimer) clearInterval(this.rateTimer);
@@ -486,6 +522,6 @@ export class DayPlayer {
         }
         try { this.video.pause(); this.video.removeAttribute("src"); this.video.load(); } catch { /* */ }
         this.ms = undefined; this.sb = undefined;
-        this.appended.clear(); this.queue = []; this.flushing = false; this.hourCache.clear();
+        this.appended.clear(); this.drainQueue(); this.hourCache.clear();
     }
 }
