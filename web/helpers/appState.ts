@@ -37,6 +37,7 @@ export const state = observable({
     levels: [] as LevelInfo[],       // discovery info for the levels panel
     loadedBytes: 0,                  // total bytes received from the server this session
     loadedGops: 0,                   // GOPs fetched/streamed this session
+    outstandingGops: 0,              // GOP-data requests in flight (not yet returned)
     loadRateBps: 0,                  // avg inbound bytes/sec over the last 60s
     viewStart: 0,                    // trackbar zoom window (ms); 0 => full day
     viewEnd: 0,
