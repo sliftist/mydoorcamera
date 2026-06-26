@@ -40,6 +40,7 @@ export const state = observable({
     loadRateBps: 0,                  // avg inbound bytes/sec over the last 60s
     viewStart: 0,                    // trackbar zoom window (ms); 0 => full day
     viewEnd: 0,
+    trackWidthPx: 0,                 // rendered trackbar width (for GOP-marker visibility)
     // Activity sampled at the current view window's resolution (re-fetched on
     // zoom) so zooming in reveals per-GOP detail instead of period-wide buckets.
     viewActivity: null as { fromMs: number; toMs: number; activity: number[] } | null,

@@ -6,7 +6,7 @@ import { formatDateTime } from "socket-function/src/formatting/format";
 import { state } from "../helpers/appState";
 import { clockHMS } from "../helpers/format";
 import { navBtnCss } from "../helpers/styles";
-import { setTrackRef, onTrackDown, onTrackHover, onTrackLeave, resetZoom, getTrackWidth } from "../helpers/trackbarHelpers";
+import { setTrackRef, onTrackDown, onTrackHover, onTrackLeave, resetZoom } from "../helpers/trackbarHelpers";
 import { saveUrlPosition, nudgeBucket } from "../helpers/navigation";
 import { frameCount } from "../helpers/indexBuffer";
 import { levelGopSpanSec, levelPeriod } from "../../src/config";
@@ -31,16 +31,16 @@ export class Trackbar extends preact.Component {
                 {/* When zoomed enough that each GOP is wider than ~5px, mark them above
                     the bar: a line over each GOP's range with a 3px gap at the end. */}
                 {(() => {
-                    const idx = state.index, widthPx = getTrackWidth();
+                    const idx = state.index, widthPx = state.trackWidthPx;
                     if (!idx || !idx.length || !widthPx) return null;
                     if ((levelGopSpanSec(state.level) * 1000 / span) * widthPx <= 5) return null;
                     const marks: any[] = [];
                     for (const g of idx) {
                         if (g.e <= vs || g.t >= ve) continue;
                         if (((g.e - g.t) / span) * widthPx <= 5) continue;
-                        marks.push(<div key={g.t} style={{ position: "absolute", top: 0, bottom: 0, left: pct(g.t), width: `calc(${wpct(g.t, g.e)} - 3px)`, background: "hsl(210,45%,52%)" }} />);
+                        marks.push(<div key={g.t} style={{ position: "absolute", top: 0, bottom: 0, left: pct(g.t), width: `calc(${wpct(g.t, g.e)} - 3px)`, background: "hsl(210,70%,60%)" }} />);
                     }
-                    return <div style={{ position: "relative", height: "3px", marginLeft: "36px", marginRight: "36px" }}>{marks}</div>;
+                    return <div style={{ position: "relative", height: "5px", marginLeft: "36px", marginRight: "36px" }}>{marks}</div>;
                 })()}
                 {/* Bar flanked by prev/next buttons that match the bar's height. */}
                 <div className={css.hbox(6).width("100%").alignItems("stretch")}>

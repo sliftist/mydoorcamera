@@ -121,15 +121,19 @@ function onTrackUp(): void {
     saveUrlPosition(state.desiredWall); // drag finished
 }
 
-// Attach a NON-passive wheel listener so we can preventDefault the page scroll.
+// Attach a NON-passive wheel listener so we can preventDefault the page scroll,
+// and keep state.trackWidthPx in sync (reactive) via a ResizeObserver.
+let resizeObs: ResizeObserver | undefined;
 export function setTrackRef(el: HTMLElement | null): void {
-    if (trackEl && trackEl !== el) trackEl.removeEventListener("wheel", onTrackWheel as any);
+    if (trackEl && trackEl !== el) { trackEl.removeEventListener("wheel", onTrackWheel as any); resizeObs?.disconnect(); }
     trackEl = el;
-    if (el) el.addEventListener("wheel", onTrackWheel as any, { passive: false });
+    if (el) {
+        el.addEventListener("wheel", onTrackWheel as any, { passive: false });
+        const update = () => runInAction(() => { state.trackWidthPx = el.getBoundingClientRect().width; });
+        update();
+        try { resizeObs = new ResizeObserver(update); resizeObs.observe(el); } catch { /* */ }
+    }
 }
-
-// Current rendered width of the trackbar in px (for deciding GOP-marker visibility).
-export function getTrackWidth(): number { return trackEl ? trackEl.getBoundingClientRect().width : 0; }
 
 // Hover handlers used by the Trackbar component.
 export function onTrackHover(clientX: number): void { const w = clientToWall(clientX); if (w != null) runInAction(() => { state.hoverWall = w; }); }
