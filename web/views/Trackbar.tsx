@@ -93,19 +93,10 @@ export class Trackbar extends preact.Component {
                             </svg>
                         );
                     })()}
-                    {/* Unified time labels: start, intermediate, and end — all formatDateTime, each on its tick line. */}
-                    {TICKS.map((k, i) => {
-                        const frac = k / 4;
-                        const wall = vs + frac * span;
-                        const lbl = i === 0 ? { left: "3px", transform: "translateX(0)" }
-                            : i === TICKS.length - 1 ? { left: "-3px", transform: "translateX(-100%)" }
-                                : { left: "0", transform: "translateX(-50%)" };
-                        return (
-                            <div key={"tk" + k} style={{ position: "absolute", top: 0, bottom: 0, left: (frac * 100).toFixed(2) + "%", width: "1px", background: "rgba(255,255,255,0.20)", pointerEvents: "none" }}>
-                                <div style={{ position: "absolute", bottom: "1px", ...lbl, fontSize: "9px", color: "rgba(255,255,255,0.8)", whiteSpace: "nowrap", textShadow: "0 0 3px #000, 0 0 3px #000" }}>{formatDateTime(wall)}</div>
-                            </div>
-                        );
-                    })}
+                    {/* Thin gridlines only; the time labels live in a row beneath the bar. */}
+                    {TICKS.map((k) => (
+                        <div key={"tk" + k} style={{ position: "absolute", top: 0, bottom: 0, left: (k / 4 * 100).toFixed(2) + "%", width: "1px", background: "rgba(255,255,255,0.20)", pointerEvents: "none" }} />
+                    ))}
                     {/* Playhead lines live in the TOP quarter only, so they don't fight the activity chart. */}
                     <div style={{ position: "absolute", top: 0, height: "28%", left: pct(state.desiredWall), width: "2px", background: "hsl(265,90%,66%)" }} title="intended playback position" />
                     <div style={{ position: "absolute", top: 0, height: "28%", left: pct(state.playWall), width: "2px", background: "hsl(210,100%,66%)" }} title="actual playback position" />
@@ -117,6 +108,22 @@ export class Trackbar extends preact.Component {
                 </div>
                 <button className={navBtnCss} style={{ ...flank, padding: 0, fontSize: "16px", display: "flex", alignItems: "center", justifyContent: "center" }}
                     title={`Next ${levelPeriod(state.level)} (or shift forward)`} onClick={() => void nudgeBucket(1)}>»</button>
+                </div>
+                {/* Time labels beneath the bar (no longer overlapping the activity chart / playhead). */}
+                <div className={css.hbox(6).width("100%")}>
+                    <div style={flank} />
+                    <div className={css.relative.flexGrow(1).minWidth(0)} style={{ height: "11px" }}>
+                        {TICKS.map((k, i) => {
+                            const wall = vs + (k / 4) * span;
+                            const lbl = i === 0 ? { left: "0", transform: "translateX(0)" }
+                                : i === TICKS.length - 1 ? { left: "100%", transform: "translateX(-100%)" }
+                                    : { left: (k / 4 * 100).toFixed(2) + "%", transform: "translateX(-50%)" };
+                            return (
+                                <div key={"tl" + k} style={{ position: "absolute", top: 0, ...lbl, fontSize: "9px", color: "rgba(255,255,255,0.7)", whiteSpace: "nowrap", pointerEvents: "none" }}>{formatDateTime(wall)}</div>
+                            );
+                        })}
+                    </div>
+                    <div style={flank} />
                 </div>
                 {/* Footer, aligned with the bar via matching flank spacers. */}
                 <div className={css.hbox(6).width("100%")}>
