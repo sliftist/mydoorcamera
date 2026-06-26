@@ -172,7 +172,16 @@ export class DayPlayer {
 
     // ---- intent ----
     togglePlay(): void { if (this.intent === "play") this.pause(); else this.play(); }
-    play(): void { this.intent = "play"; this.refreshStatus(); void this.startPlaybackFrom(this.currentWall()); }
+    play(): void {
+        this.intent = "play";
+        this.refreshStatus();
+        // If a seek is still in flight, don't start playback from the video's current
+        // (not-yet-updated) frame — let runSeekPump start playback from the seek target
+        // once it settles. Otherwise play from the intended position (seek target / last
+        // playhead), NOT the video element's current time.
+        if (this.pumping) return;
+        void this.startPlaybackFrom(this.targetWall);
+    }
     pause(): void { this.intent = "pause"; try { this.video.pause(); } catch { /* */ } this.refreshStatus(); }
 
     // Playback speed for review. Higher speed -> buffer proportionally more ahead.
@@ -297,6 +306,7 @@ export class DayPlayer {
         const wall = this.currentWall();
         this.onTime?.(wall);
         if (this.intent === "play" && !this.video.paused && !this.pumping) {
+            this.targetWall = wall; // keep the intended position synced so pause→play resumes where it stopped
             void this.bufferAhead(wall);
             this.evictBefore(this.video.currentTime - 90);
         }
