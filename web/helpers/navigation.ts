@@ -150,13 +150,13 @@ export async function nudgeBucket(dir: 1 | -1): Promise<void> {
 export function getUrlDay(): string { try { return new URLSearchParams(location.search).get("day") || ""; } catch { return ""; } }
 function speedSuffix(): string { return state.speed !== 1 ? `&speed=${state.speed}` : ""; }
 function lvlSuffix(): string { return state.level !== 0 ? `&lvl=${state.level}` : ""; }
-// Trackbar zoom window as ms-into-period: &z=start-end (omitted when not zoomed).
+// Trackbar zoom window as absolute wall-clock ms: &z=start-end (omitted when not zoomed).
 function zoomSuffix(): string {
     if (!state.coverage) return "";
     const start = state.coverage.dayStartMs, end = state.coverage.dayEndMs;
     const vs = state.viewStart || start, ve = state.viewEnd || end;
     if (vs <= start + 500 && ve >= end - 500) return "";
-    return `&z=${Math.round(vs - start)}-${Math.round(ve - start)}`;
+    return `&z=${vs}-${ve}`;
 }
 function acSuffix(): string { return state.activityExp !== 0.4 ? `&ac=${state.activityExp}` : ""; }
 function extraSuffix(): string { return lvlSuffix() + speedSuffix() + zoomSuffix() + acSuffix(); }
@@ -169,7 +169,7 @@ export function applyUrlZoom(): void {
     const z = getUrlZoom();
     if (!z || !state.coverage || !state.index) return;
     const start = state.coverage.dayStartMs, end = state.coverage.dayEndMs;
-    const vs = Math.max(start, start + z.vs), ve = Math.min(end, start + z.ve);
+    const vs = Math.max(start, z.vs), ve = Math.min(end, z.ve); // absolute ms, clamped to the period
     if (ve - vs < 1000) return;
     runInAction(() => { state.viewStart = vs; state.viewEnd = ve; state.viewActivity = { fromMs: vs, toMs: ve, activity: bucketActivity(state.index!, vs, ve, 1440) }; });
 }
@@ -184,8 +184,7 @@ export function setUrlLive(on: boolean): void {
 }
 export function saveUrlPosition(wall: number): void {
     if (state.live || !state.day || !state.coverage) return;
-    const t = Math.max(0, Math.round(wall - state.coverage.dayStartMs)); // ms into period (full precision)
-    try { history.replaceState({}, "", `?day=${state.day}&t=${t}${extraSuffix()}`); } catch { /* ignore */ }
+    try { history.replaceState({}, "", `?day=${state.day}&t=${wall}${extraSuffix()}`); } catch { /* ignore */ } // absolute wall-clock ms
 }
 
 // ---- period selection / index loading ----
@@ -210,7 +209,7 @@ export async function selectPeriod(startMs: number, push = true, positionWall?: 
     try { gops = decodeIndex(await api.getRawIndex(state.level, start, end)); } catch { gops = []; }
     const ranges = deriveRanges(gops, joinMsFor(state.level));
     let pos = positionWall != null ? positionWall : (ranges.length ? ranges[0].start : start);
-    if (positionWall == null && !push) { const t = getUrlT(); if (t != null) pos = start + t; } // ms into period
+    if (positionWall == null && !push) { const t = getUrlT(); if (t != null) pos = t; } // absolute wall-clock ms
     pos = Math.max(start, Math.min(end - 1, pos));
     runInAction(() => {
         state.day = key;
