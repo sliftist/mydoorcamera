@@ -159,7 +159,9 @@ function zoomSuffix(): string {
     return `&z=${vs}-${ve}`;
 }
 function acSuffix(): string { return state.activityExp !== 0.4 ? `&ac=${state.activityExp}` : ""; }
-function extraSuffix(): string { return lvlSuffix() + speedSuffix() + zoomSuffix() + acSuffix(); }
+function cuSuffix(): string { return state.catchupMode !== "rate" ? `&cu=${state.catchupMode}` : ""; }
+function extraSuffix(): string { return lvlSuffix() + speedSuffix() + zoomSuffix() + acSuffix() + cuSuffix(); }
+export function getUrlCatchup(): "rate" | "compress" { try { return new URLSearchParams(location.search).get("cu") === "compress" ? "compress" : "rate"; } catch { return "rate"; } }
 export function getUrlActivityExp(): number { try { const n = Number(new URLSearchParams(location.search).get("ac")); return n > 0 && n <= 5 ? n : 0.4; } catch { return 0.4; } }
 export function getUrlZoom(): { vs: number; ve: number } | null {
     try { const v = new URLSearchParams(location.search).get("z"); if (!v) return null; const [a, b] = v.split("-").map(Number); return isFinite(a) && isFinite(b) && b > a ? { vs: a, ve: b } : null; } catch { return null; }

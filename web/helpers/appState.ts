@@ -45,4 +45,5 @@ export const state = observable({
     // zoom) so zooming in reveals per-GOP detail instead of period-wide buckets.
     viewActivity: null as { fromMs: number; toMs: number; activity: number[] } | null,
     activityExp: 0.4,                // gamma for the activity chart (<1 emphasizes small activity); restored from ?ac
+    catchupMode: "rate" as "rate" | "compress", // live catch-up: speed up the player, or mux frames shorter; restored from ?cu
 }, undefined, { deep: false });

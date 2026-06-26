@@ -1,11 +1,12 @@
 import * as preact from "preact";
+import { runInAction } from "mobx";
 import { observer } from "sliftutils/render-utils/observer";
 import { css } from "typesafecss";
 import { state } from "../helpers/appState";
 import { player, setVideoEl, exitLive } from "../helpers/session";
-import { saveUrlPosition } from "../helpers/navigation";
+import { saveUrlPosition, setUrlLive } from "../helpers/navigation";
 import { rateColor, rateLabel } from "../helpers/format";
-import { playBtnCss } from "../helpers/styles";
+import { playBtnCss, selectCss } from "../helpers/styles";
 import { Trackbar } from "./Trackbar";
 import { Controls } from "./Controls";
 import { DatePicker } from "./DatePicker";
@@ -34,6 +35,13 @@ export class VideoPlayer extends preact.Component {
                             <button className={playBtnCss} onMouseDown={(e: any) => { e.preventDefault(); void exitLive(); }}>Exit Live</button>
                             <span className={css.fontSize(13)} style={{ color: rateColor(state.playbackRate) }}>{rateLabel(state.playbackRate)}</span>
                             <span className={css.fontSize(13).opacity(0.8)}>buffered {state.bufferSec.toFixed(1)}s</span>
+                            <span className={css.flexGrow(1)} />
+                            <span className={css.fontSize(12).opacity(0.6)} title="How to catch up when behind">catch&nbsp;up</span>
+                            <select className={selectCss} value={state.catchupMode}
+                                onChange={(e: any) => { const m = e.target.value === "compress" ? "compress" : "rate"; runInAction(() => { state.catchupMode = m; }); player?.setCatchupMode(m); setUrlLive(true); }}>
+                                <option value="rate">speed up player</option>
+                                <option value="compress">compress frames</option>
+                            </select>
                         </div>
                         : state.coverage
                             ? <div className={css.vbox(8).width("100%")}><LevelSelector /><Trackbar /><Controls /></div>

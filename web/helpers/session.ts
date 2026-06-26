@@ -9,7 +9,7 @@ import { state, lsSet } from "./appState";
 import {
     selectPeriod, refreshLevels, saveUrlPosition, rewatchDay, reloadIndex, applyUrlZoom,
     periodStartFromKey, todayStart,
-    getUrlSpeed, getUrlLevel, getUrlActivityExp, getUrlDay, getUrlLive, setUrlLive,
+    getUrlSpeed, getUrlLevel, getUrlActivityExp, getUrlCatchup, getUrlDay, getUrlLive, setUrlLive,
 } from "./navigation";
 
 export let api: CameraApi | undefined;
@@ -42,7 +42,7 @@ export async function connect(): Promise<void> {
         }, 1000);
         if (!posTimer) posTimer = setInterval(() => { if (state.day && state.coverage) saveUrlPosition(state.playWall); void refreshLevels(); }, 30000);
         void refreshLevels();
-        runInAction(() => { state.speed = getUrlSpeed(); state.level = getUrlLevel(); state.activityExp = getUrlActivityExp(); }); // restore settings before the player is created
+        runInAction(() => { state.speed = getUrlSpeed(); state.level = getUrlLevel(); state.activityExp = getUrlActivityExp(); state.catchupMode = getUrlCatchup(); }); // restore settings before the player is created
         const urlDay = getUrlDay();
         const anchor = urlDay ? periodStartFromKey(urlDay) : (days.length ? periodStartFromKey(days[days.length - 1]) : 0);
         if (anchor) { await selectPeriod(anchor, false); applyUrlZoom(); }
@@ -93,6 +93,7 @@ export function maybeStartDayPlayer(): void {
     playerKey = key;
     player = new DayPlayer(videoEl, api, state.day.split("/"), state.coverage.dayStartMs, state.coverage.ranges, state.level, state.coverage.dayEndMs);
     player.setSpeed(state.speed); // adopt the current (possibly URL-restored) playback speed
+    player.setCatchupMode(state.catchupMode);
     player.onTime = (wall) => runInAction(() => {
         state.playWall = wall;
         // While actually playing, keep the seek base (desiredWall) on the live

@@ -49,10 +49,20 @@ export class DayPlayer {
     private speed = 1;                  // playback speed for non-live review (1/16 .. 16)
     private live = false;
     private firstLive = true;
-    private lastReceivedEnd = 0; // max end-time of any GOP received from the live stream
-    private rate = 1;
+    private lastReceivedEnd = 0; // max end-time of any GOP received from the live stream (real wall ms)
     private minBuffer = Infinity;      // buffer trough since the last rate tick
     private rateTimer: ReturnType<typeof setInterval> | undefined;
+    // Live timeline: GOPs are appended CONTIGUOUSLY on a synthetic MSE timeline
+    // (real-clock jitter would otherwise leave sub-frame gaps between GOPs that MSE
+    // stalls on). You can't seek during live, so exact timestamps don't matter.
+    private liveCursorSec = 0;          // MSE seconds where the next live GOP is appended
+    private liveFramesTotal = 0;        // frames appended into the live timeline
+    private liveCheckpoints: { mse: number; frames: number }[] = []; // (mseEnd, cumFrames) per GOP -> map currentTime to played frames
+    private liveBase = { mse: 0, frames: 0 };  // origin for the checkpoint map (advances as old checkpoints are pruned)
+    private liveStartWall = 0;          // real wall ms of the first live frame (playhead display only)
+    private liveFactor = 1;             // catch-up factor (>1 = catching up), applied via playbackRate or frame-compression
+    private liveChain: Promise<void> = Promise.resolve(); // serializes live appends so the contiguous cursor never races
+    private catchupMode: "rate" | "compress" = "rate"; // how to catch up: speed up the player, or mux frames shorter
     private wdLastTime = -1;           // stall watchdog
     private wdStall = 0;
     private watchdogTimer: ReturnType<typeof setInterval> | undefined;
@@ -115,7 +125,24 @@ export class DayPlayer {
 
     // ---- helpers ----
     internalSec(wall: number): number { return (wall - this.dayStartMs) / 1000 / this.comp; }
-    currentWall(): number { return this.dayStartMs + this.video.currentTime * 1000 * this.comp; }
+    currentWall(): number {
+        // Live runs on a synthetic contiguous timeline; map the playhead back to real
+        // wall time via the played-frame count so the displayed clock stays correct.
+        if (this.live) return this.liveStartWall + (this.liveFramesAt(this.video.currentTime) / FPS) * 1000;
+        return this.dayStartMs + this.video.currentTime * 1000 * this.comp;
+    }
+    // Interpolate how many live frames have been played by MSE time `mse`.
+    private liveFramesAt(mse: number): number {
+        let prevMse = this.liveBase.mse, prevFrames = this.liveBase.frames;
+        for (const cp of this.liveCheckpoints) {
+            if (mse <= cp.mse) {
+                const span = cp.mse - prevMse;
+                return prevFrames + (span > 0 ? (mse - prevMse) / span : 1) * (cp.frames - prevFrames);
+            }
+            prevMse = cp.mse; prevFrames = cp.frames;
+        }
+        return prevFrames;
+    }
     private hourNumOf(wall: number): number { return Math.floor((wall - this.dayStartMs) / 3600_000); }
     private gopDurMs(g: GopEntry): number { return this.level > 0 ? Math.max(1, g.e - g.t) : Math.round((g.n / FPS) * 1000); }
 
@@ -149,6 +176,15 @@ export class DayPlayer {
         this.speed = s;
         if (!this.live) { try { this.video.playbackRate = s; } catch { /* */ } }
     }
+    // How to catch up during live: "rate" speeds up the player (default); "compress"
+    // muxes incoming frames with a shorter duration so the player burns through them
+    // faster at 1×. Takes effect on the next live GOP.
+    setCatchupMode(m: "rate" | "compress"): void {
+        this.catchupMode = m;
+        if (this.live && m === "rate") { try { this.video.playbackRate = this.liveFactor; } catch { /* */ } }
+        if (this.live && m === "compress") { try { this.video.playbackRate = 1; } catch { /* */ } }
+    }
+    get catchup(): "rate" | "compress" { return this.catchupMode; }
     // Real-time buffer window. At a thinned level, one playback second consumes
     // `comp` real seconds, so the real-time window scales by comp to keep the same
     // amount of *playback* buffered.
@@ -400,7 +436,9 @@ export class DayPlayer {
     async startLive(): Promise<void> {
         this.cancelPump();  // a review seek pump must not rebuild the MSE / move the playhead under live
         this.live = true; this.intent = "play"; this.firstLive = true;
-        this.lastReceivedEnd = 0; this.rate = 1; this.minBuffer = Infinity;
+        this.lastReceivedEnd = 0; this.liveFactor = 1; this.minBuffer = Infinity;
+        this.liveCursorSec = 0; this.liveFramesTotal = 0; this.liveCheckpoints = []; this.liveBase = { mse: 0, frames: 0 };
+        this.liveStartWall = 0; this.liveChain = Promise.resolve();
         this.teardownMse(); // fresh timeline starting at the live edge
         if (this.rateTimer) clearInterval(this.rateTimer);
         this.rateTimer = setInterval(() => this.tickRate(), 1000);
@@ -414,9 +452,9 @@ export class DayPlayer {
         this.cancelPump();           // clear any stale pump state so review seeks work again
         this.shownWall = -1;         // force the next seek to actually render a frame
         if (this.rateTimer) { clearInterval(this.rateTimer); this.rateTimer = undefined; }
-        this.rate = 1;
         try { this.video.pause(); } catch { /* */ } // stop the live buffer from running on
         try { this.video.playbackRate = this.speed; } catch { /* */ }
+        this.liveFactor = 1;
         this.onRate?.(1);
         this.onBuffer?.(0);
         try { await this.api.stopStream(); } catch { /* */ }
@@ -431,45 +469,65 @@ export class DayPlayer {
         this.sb = this.ms.addSourceBuffer(`video/mp4; codecs="${codecFromSps(nals)}"`);
     }
 
-    private bufferedSec(): number { return Math.max(0, (this.lastReceivedEnd - this.currentWall()) / 1000); }
+    // Live backlog (real seconds): frames received but not yet played, / FPS.
+    private bufferedSec(): number {
+        if (!this.live) return Math.max(0, (this.lastReceivedEnd - this.currentWall()) / 1000);
+        return Math.max(0, (this.liveFramesTotal - this.liveFramesAt(this.video.currentTime)) / FPS);
+    }
 
-    private async onLiveData(meta: { t: number; e: number; n: number }, bytes: Uint8Array): Promise<void> {
+    private onLiveData(meta: { t: number; e: number; n: number }, bytes: Uint8Array): void {
         if (!this.live) return;
-        this.lastReceivedEnd = Math.max(this.lastReceivedEnd, meta.e); // count all received data, even pre-append
-        this.onBuffer?.(this.bufferedSec());
+        this.lastReceivedEnd = Math.max(this.lastReceivedEnd, meta.e);
         const nals = splitFramedNals(Buffer.from(bytes));
+        // Serialize appends so the contiguous cursor / frame counters never race.
+        this.liveChain = this.liveChain.then(() => this.appendLive(meta, nals)).catch(() => { /* */ });
+    }
+
+    private async appendLive(meta: { t: number; e: number; n: number }, nals: Buffer[]): Promise<void> {
+        if (!this.live) return;
         await this.ensureSourceBufferWithNals(nals);
-        if (this.appended.has(meta.t)) return;
+        if (!this.live || this.appended.has(meta.t)) return;
         this.appended.add(meta.t);
+        // Append back-to-back on the synthetic timeline (no real-time gaps to stall on).
+        // "compress" catch-up shortens each frame so the player runs ahead at 1×; "rate"
+        // keeps real duration and speeds up the player instead.
+        const frameDur = this.catchupMode === "compress" ? 1 / (FPS * this.liveFactor) : 1 / FPS;
+        const startSec = this.liveCursorSec;
         try {
-            const mp4 = await H264toMP4({ buffer: nals, frameDurationInSeconds: 1 / FPS, mediaStartTimeSeconds: this.internalSec(meta.t) });
+            const mp4 = await H264toMP4({ buffer: nals, frameDurationInSeconds: frameDur, mediaStartTimeSeconds: startSec });
             await this.enqueue(Buffer.from(mp4.buffer));
         } catch { this.appended.delete(meta.t); return; }
+        this.liveCursorSec = startSec + meta.n * frameDur;
+        this.liveFramesTotal += meta.n;
+        this.liveCheckpoints.push({ mse: this.liveCursorSec, frames: this.liveFramesTotal });
+        if (this.liveCheckpoints.length > 4000) this.liveBase = this.liveCheckpoints.shift()!; // bound the map
+        if (!this.liveStartWall) this.liveStartWall = meta.t;
+        this.onBuffer?.(this.bufferedSec());
         if (this.firstLive) {
             this.firstLive = false;
-            this.video.currentTime = this.internalSec(meta.t);
+            try { this.video.currentTime = startSec; } catch { /* */ }
+            try { this.video.playbackRate = this.catchupMode === "rate" ? this.liveFactor : 1; } catch { /* */ }
             this.video.play().catch(() => { /* */ });
         }
     }
 
-    // Rate control, once per second, measured at the buffer trough. Target a
-    // 1-2s buffer: under 1s slow down 1%, over 2s speed up 1%, otherwise ease
-    // back toward 1.0×. Clamped so we never get silly.
+    // Rate control, once per second, measured at the buffer trough. Target a 1-2s
+    // backlog: above it, ramp the catch-up factor up; below 1s ease back to real-time.
     private tickRate(): void {
         if (!this.live) return;
         const buf = isFinite(this.minBuffer) ? this.minBuffer : this.bufferedSec();
         this.minBuffer = Infinity;
-        // Reducing the rate steps down by max(1%, 20% of the current excess speed),
-        // so a big catch-up (e.g. 1.5×) unwinds fast (→1.4→1.32→…). Speeding up is a
-        // steady +1%/s. Range ±50%.
-        const reduceStep = () => Math.max(0.01, 0.2 * Math.max(0, this.rate - 1));
-        if (buf > 2) this.rate = Math.min(1.5, this.rate + 0.01);
-        else if (buf < 1) this.rate = Math.max(0.5, this.rate - reduceStep());
-        else if (this.rate > 1.0001) this.rate = Math.max(1, this.rate - reduceStep());
-        else if (this.rate < 0.9999) this.rate = Math.min(1, this.rate + 0.01);
-        try { this.video.playbackRate = this.rate; } catch { /* */ }
-        this.onRate?.(this.rate);
-        this.evictBefore(this.video.currentTime - 20);
+        const reduceStep = () => Math.max(0.02, 0.25 * Math.max(0, this.liveFactor - 1)); // unwind a big catch-up quickly
+        if (buf > 2) this.liveFactor = Math.min(4, this.liveFactor + 0.1);                // catch up faster than before (was 1.5× cap)
+        else if (buf < 1) this.liveFactor = Math.max(0.5, this.liveFactor - reduceStep());
+        else if (this.liveFactor > 1.0001) this.liveFactor = Math.max(1, this.liveFactor - reduceStep());
+        else if (this.liveFactor < 0.9999) this.liveFactor = Math.min(1, this.liveFactor + 0.02);
+        // "rate" mode applies the factor to the player; "compress" mode applies it to
+        // the duration of newly-muxed frames (so the player stays at 1×).
+        if (this.catchupMode === "rate") { try { this.video.playbackRate = this.liveFactor; } catch { /* */ } }
+        else { try { this.video.playbackRate = 1; } catch { /* */ } }
+        this.onRate?.(this.liveFactor);
+        this.evictBefore(this.video.currentTime - 15);
     }
 
     // Stall watchdog: if we want to play but currentTime isn't advancing while
@@ -492,6 +550,9 @@ export class DayPlayer {
             if (ct <= b.end(i) + 0.02 && i + 1 < b.length) { target = b.start(i + 1); break; } // sitting at this range's end
         }
         if (target >= 0) {
+            // Log when the stall watchdog has to skip a gap — during live this means
+            // the timeline wasn't contiguous and we're losing ground here.
+            console.warn(`[player] stall watchdog jumped a buffer gap: ${ct.toFixed(2)}s -> ${(target + 0.05).toFixed(2)}s${this.live ? " (LIVE — falling behind)" : ""}`);
             try { this.video.currentTime = target + 0.05; void this.video.play(); } catch { /* */ } // jump a touch past the next frame
         }
     }
