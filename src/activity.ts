@@ -1,8 +1,18 @@
 // Activity worker (separate daemon — keeps the critical capture path untouched).
-// Backfills each GOP's `activity` float: hardware-decodes the keyframe to a tiny
-// grayscale frame and measures the fraction of pixels that changed (beyond a
-// noise floor) vs the previous keyframe. Throttled so it never starves the live
-// encoder. Run via typenode.
+// Backfills each GOP's `activity` float. For each sampled keyframe it measures how
+// much the frame differs from a learned STEADY-STATE BACKGROUND (not just the prior
+// frame), so something that enters the scene and moves only subtly still counts as a
+// big change from the base state. Detection is:
+//   1. decode the keyframe to a small grayscale image;
+//   2. subtract a per-pixel running-median background (transient objects barely move
+//      it; slow lighting drift is absorbed within minutes);
+//   3. remove the global brightness shift (median of the diff) so whole-frame
+//      auto-exposure / rolling bands don't register;
+//   4. box-blur the deviation to require SPATIAL COHERENCE — a localized blob (a real
+//      object) survives, scattered single-pixel sensor noise averages away;
+//   5. activity = fraction of clustered pixels above threshold (so a small distinct
+//      object = moderate, a big one = large).
+// Throttled so it never starves the live encoder. Run via typenode.
 
 import { spawn } from "child_process";
 import { getTimezone } from "./timezone";
@@ -10,22 +20,23 @@ process.env.TZ = getTimezone();
 import { findPendingActivity, writeActivity, readGopBytes, GopEntry } from "./storage";
 import { splitFramedNals } from "./annexb";
 
-const W = 64, H = 36, FRAME = W * H;   // tiny grayscale frame
-const NOISE = 16;                       // per-pixel change below this is treated as sensor noise
-const LOCAL_R = 4;                      // high-pass radius: subtract the local-mean diff so smooth
-                                        // (global/rolling-band) brightness changes don't count, only
-                                        // localized/textured changes do
-// Ignore the burned-in timestamp (top-left) so its ticking digits aren't read as
-// activity. The clock text spans ~cols 0-40 of the 64-wide frame; box covers it
-// generously (the changing time digits measured out to col ~39).
-const MASK_ROWS = 4, MASK_COLS = 48;
-const PENDING_LIMIT = 12;               // records examined per pass
+const W = 256, H = 144, FRAME = W * H;   // grayscale analysis frame (small but enough to see distant objects)
+const CLUSTER_R = 2;                      // box-blur radius: a change must be spatially coherent to count
+const CLUSTER_THR = 4;                    // blurred deviation above this (per pixel) counts as changed
+const BG_STEP = 1;                        // running-median background adapts +/- this per sample (~1/s)
+// Ignore the burned-in timestamp (top-left). At 256x144 the clock text spans roughly
+// the top ~11% of rows and ~75% of the width; box covers the changing digits generously.
+const MASK_ROWS = Math.round(0.11 * H), MASK_COLS = Math.round(0.75 * W);
+const PENDING_LIMIT = 12;                 // records examined per pass
 const PERIOD_MS = 1000;
-const SAMPLE_INTERVAL_MS = 3000;        // only decode/diff one keyframe every ~3s (the rest get 0)
+const SAMPLE_INTERVAL_MS = 500;           // sample ~every keyframe (GOPs are ~1s); finer than the old 3s
 const START_CODE = Buffer.from([0, 0, 0, 1]);
 
-let prevFrame: Buffer | undefined;
+const bg = new Float32Array(FRAME);       // per-pixel running-median background (persists across passes)
+let bgInit = false;
 let lastSampledT = -Infinity;
+
+const masked = (i: number): boolean => { const row = (i / W) | 0, col = i % W; return row < MASK_ROWS && col < MASK_COLS; };
 
 // Extract SPS+PPS+IDR of a GOP as an Annex-B access unit.
 async function keyframeAU(parts: string[], g: GopEntry): Promise<Buffer> {
@@ -37,10 +48,10 @@ async function keyframeAU(parts: string[], g: GopEntry): Promise<Buffer> {
     return Buffer.concat(out);
 }
 
-// Software-decode (avdec_h264) a concatenated keyframe stream to GRAY8 WxH
-// frames. Software (CPU) is used deliberately: the hardware decoder shares the
-// bcm2835 codec block with the live encoder and dropped it 30->24fps, whereas
-// CPU decode (~35ms/keyframe) runs on spare cores and leaves the encoder at 30.
+// Software-decode (avdec_h264) a concatenated keyframe stream to GRAY8 WxH frames.
+// Software (CPU) is used deliberately: the hardware decoder shares the bcm2835 codec
+// block with the live encoder and dropped it 30->24fps, whereas CPU decode runs on
+// spare cores and leaves the encoder at 30.
 function decode(stream: Buffer): Promise<Buffer[]> {
     return new Promise(resolve => {
         const gst = spawn("gst-launch-1.0", [
@@ -79,24 +90,25 @@ function boxBlur(src: Float32Array, r: number): Float32Array {
     return out;
 }
 
-function activityOf(cur: Buffer, prev?: Buffer): number {
-    if (!prev) return 0;
-    // Frame difference, with the timestamp area zeroed.
-    const diff = new Float32Array(FRAME);
-    for (let i = 0; i < FRAME; i++) {
-        const row = (i / W) | 0, col = i % W;
-        diff[i] = (row < MASK_ROWS && col < MASK_COLS) ? 0 : cur[i] - prev[i];
-    }
-    // High-pass: subtract the local mean so smooth brightness changes (global
-    // auto-exposure, rolling bands) cancel; localized/textured motion remains.
-    const local = boxBlur(diff, LOCAL_R);
+function medianOf(a: number[]): number { if (!a.length) return 0; const s = a.slice().sort((x, y) => x - y); return s[s.length >> 1]; }
+
+// Background-subtraction activity, then adapt the background toward the current frame.
+function activityOf(cur: Buffer): number {
+    if (!bgInit) { for (let i = 0; i < FRAME; i++) bg[i] = cur[i]; bgInit = true; return 0; }
+    // Signed deviation from the steady-state background (timestamp area zeroed).
+    const s = new Float32Array(FRAME);
+    const vals: number[] = [];
+    for (let i = 0; i < FRAME; i++) { if (masked(i)) { s[i] = 0; continue; } s[i] = cur[i] - bg[i]; vals.push(s[i]); }
+    // Remove the global brightness shift (uniform auto-exposure / rolling band).
+    const shift = medianOf(vals);
+    const d = new Float32Array(FRAME);
+    for (let i = 0; i < FRAME; i++) d[i] = masked(i) ? 0 : Math.abs(s[i] - shift);
+    // Require spatial coherence: a localized blob survives, isolated noise averages away.
+    const blur = boxBlur(d, CLUSTER_R);
     let changed = 0, counted = 0;
-    for (let i = 0; i < FRAME; i++) {
-        const row = (i / W) | 0, col = i % W;
-        if (row < MASK_ROWS && col < MASK_COLS) continue; // skip the timestamp area
-        counted++;
-        if (Math.abs(diff[i] - local[i]) > NOISE) changed++;
-    }
+    for (let i = 0; i < FRAME; i++) { if (masked(i)) continue; counted++; if (blur[i] > CLUSTER_THR) changed++; }
+    // Running-median (sigma-delta) background update: nudge each pixel toward `cur`.
+    for (let i = 0; i < FRAME; i++) { if (cur[i] > bg[i]) bg[i] += BG_STEP; else if (cur[i] < bg[i]) bg[i] -= BG_STEP; }
     return counted ? changed / counted : 0;
 }
 
@@ -106,8 +118,7 @@ async function loop(): Promise<void> {
     try { pending = await findPendingActivity(PENDING_LIMIT); } catch { /* */ }
     if (!pending.length) { setTimeout(loop, PERIOD_MS); return; }
 
-    // Sample at most one keyframe per SAMPLE_INTERVAL_MS; the skipped GOPs in
-    // between are written 0 (the per-minute max chart only needs occasional samples).
+    // Sample ~every keyframe; any GOPs closer than SAMPLE_INTERVAL_MS get 0.
     const toSample: Pending = [];
     for (const p of pending) {
         if (p.gop.t - lastSampledT >= SAMPLE_INTERVAL_MS) { toSample.push(p); lastSampledT = p.gop.t; }
@@ -124,8 +135,7 @@ async function loop(): Promise<void> {
     }
     const k = Math.min(frames.length, toSample.length);
     for (let i = 0; i < k; i++) {
-        const a = activityOf(frames[i], prevFrame);
-        prevFrame = frames[i];
+        const a = activityOf(frames[i]);
         try { await writeActivity(toSample[i].parts, toSample[i].idxFile, toSample[i].start, a); } catch { /* */ }
     }
     setTimeout(loop, PERIOD_MS);
