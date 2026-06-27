@@ -24,7 +24,7 @@
 import { promises as fsp } from "fs";
 import type { Dirent } from "fs";
 import * as path from "path";
-import { DATA_DIR, THIN_DIR, LEVEL_BUDGET_BYTES, LEVEL_COUNT, levelGopSpanSec } from "./config";
+import { DATA_DIR, THIN_DIR, DISK_RESERVE_BYTES, MIN_TOTAL_BUDGET_BYTES, LEVEL_COUNT, levelGopSpanSec } from "./config";
 import { frameNal } from "./annexb";
 
 export type Range = { start: number; end: number };
@@ -492,33 +492,56 @@ export async function levelTimeBounds(level: number): Promise<{ earliest: number
     return { earliest, latest };
 }
 
+// Bytes currently free on the data disk (available to non-root; 0 if unknown).
+async function diskFreeBytes(): Promise<number | null> {
+    try { const st: any = await (fsp as any).statfs(DATA_DIR); return st.bavail * st.bsize; } catch { return null; }
+}
+
+// The TOTAL byte budget across all levels, sized to the disk RIGHT NOW:
+//   our current usage + (free now − reserve)
+// i.e. we may grow into free space but always leave DISK_RESERVE_BYTES free; if free
+// gets low (something else filling the disk) the budget drops and we reclaim space.
+// Floored at MIN_TOTAL_BUDGET_BYTES so we always keep some recent footage.
+async function totalBudgetBytes(ourSize: number): Promise<number> {
+    const free = await diskFreeBytes();
+    if (free == null) return Math.max(MIN_TOTAL_BUDGET_BYTES, ourSize); // can't read disk -> hold steady
+    return Math.max(MIN_TOTAL_BUDGET_BYTES, ourSize + free - DISK_RESERVE_BYTES);
+}
+
 export async function getLevelsInfo(): Promise<LevelInfo[]> {
+    const used = await Promise.all(Array.from({ length: LEVEL_COUNT }, (_, level) =>
+        walkData(levelRoot(level)).then(items => items.reduce((s, i) => s + i.bytes, 0))));
+    const ourSize = used.reduce((s, b) => s + b, 0);
+    const perLevel = Math.floor((await totalBudgetBytes(ourSize)) / LEVEL_COUNT);
     return Promise.all(Array.from({ length: LEVEL_COUNT }, async (_, level): Promise<LevelInfo> => {
-        const usedBytes = (await walkData(levelRoot(level))).reduce((s, i) => s + i.bytes, 0);
         const { earliest, latest } = await levelTimeBounds(level);
         return {
             level, timePerSec: Math.pow(30, level), gopSpanSec: Math.pow(30, level),
-            budgetBytes: LEVEL_BUDGET_BYTES, usedBytes, earliestMs: earliest, latestMs: latest,
+            budgetBytes: perLevel, usedBytes: used[level], earliestMs: earliest, latestMs: latest,
         };
     }));
 }
 
-// Enforce each level's byte budget independently, deleting that level's oldest
+// Enforce each level's share of the dynamic budget, deleting that level's oldest
 // file buckets first.
 export async function enforceRetention(): Promise<{ deleted: string[]; totalBytes: number }> {
     const deleted: string[] = [];
+    // Walk every level once: per-level oldest-first items + our total current size.
+    const perLevelItems = await Promise.all(Array.from({ length: LEVEL_COUNT }, (_, level) =>
+        walkData(levelRoot(level)).then(items => items.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0)))));
+    const ourSize = perLevelItems.reduce((s, items) => s + items.reduce((a, i) => a + i.bytes, 0), 0);
+    const perLevel = Math.floor((await totalBudgetBytes(ourSize)) / LEVEL_COUNT);
     let grand = 0;
     for (let level = 0; level < LEVEL_COUNT; level++) {
-        const root = levelRoot(level);
-        const items = (await walkData(root)).sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+        const items = perLevelItems[level];
         let total = items.reduce((s, i) => s + i.bytes, 0);
         for (const it of items) {
-            if (total <= LEVEL_BUDGET_BYTES) break;
+            if (total <= perLevel) break;
             try { await fsp.rm(it.abs, { force: true }); await fsp.rm(it.abs.slice(0, -5) + ".idx", { force: true }); } catch { /* */ }
             total -= it.bytes; deleted.push(`L${level}/${it.key}`);
         }
         grand += total;
-        await pruneEmptyDirs(root);
+        await pruneEmptyDirs(levelRoot(level));
     }
     return { deleted, totalBytes: grand };
 }

@@ -18,9 +18,12 @@ export const FPS = 30;
 export const BITRATE = 5_000_000;     // 5 Mbps H.264
 export const GOP = 30;                // keyframe every 30 frames (~1s)
 
-// Rolling retention: keep at most this many bytes of video, deleting oldest.
-// Start at 16 GB (SD card has ~21 GB free); raise once on a bigger drive.
-export const RETENTION_BYTES = Number(env.MYDOORCAMERA_RETENTION_BYTES) || 16 * 1024 * 1024 * 1024;
+// Rolling retention is DYNAMIC, sized to the actual disk: we may occupy our current
+// video size plus whatever is free now, minus a cushion we always leave free. So if
+// something else fills the disk, our budget shrinks and thinning/retention reclaims
+// space; on a bigger drive the budget grows automatically. (See storage.dynamicBudget.)
+export const DISK_RESERVE_BYTES = Number(env.MYDOORCAMERA_DISK_RESERVE) || 10 * 1024 * 1024 * 1024; // always keep this much disk FREE
+export const MIN_TOTAL_BUDGET_BYTES = 2 * 1024 * 1024 * 1024; // floor: keep ~2 GB of recent footage even when disk is tight
 
 // ---- Video thinning (see docs/thinning.md) ----
 // Cascading keyframe thinning keeps a sparser copy of old footage instead of
@@ -42,9 +45,6 @@ export const THIN_MAX_QP = 24;            // cap so the cold IDR can't be crushe
 export const LEVEL_COUNT = THIN_LEVELS + 1; // 5 levels total (L0..L4)
 // Thinned levels live in their own tree (kept out of DATA_DIR's year scan).
 export const THIN_DIR = env.MYDOORCAMERA_THIN || "/var/lib/mydoorcamera/thin";
-// Split the whole byte budget evenly across the 5 levels (~3.2 GB each at 16 GB).
-export const LEVEL_BUDGET_BYTES = Math.floor(RETENTION_BYTES / LEVEL_COUNT);
-
 // Real seconds one GOP at this level spans (== 30^level). L0 = 1s.
 export function levelGopSpanSec(level: number): number { return Math.pow(THIN_FACTOR, level); }
 // Real seconds represented by one second of playback at this level (a GOP plays
