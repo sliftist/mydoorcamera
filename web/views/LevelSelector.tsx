@@ -17,6 +17,9 @@ export class LevelSelector extends preact.Component {
                 {levels.map(l => {
                     const sel = state.level === l.level;
                     const heldSec = l.latestMs > l.earliestMs ? (l.latestMs - l.earliestMs) / 1000 : 0;
+                    // Project how long this level COULD hold at its byte budget, by scaling
+                    // the currently-held duration by budget/used.
+                    const capSec = l.usedBytes > 0 && l.budgetBytes > 0 ? heldSec * (l.budgetBytes / l.usedBytes) : 0;
                     return (
                         <button key={l.level} onClick={() => void setLevel(l.level)}
                             className={css.vbox(2).pad2(6, 12).pointer}
@@ -26,7 +29,7 @@ export class LevelSelector extends preact.Component {
                                 background: sel ? "hsl(210,55%,24%)" : "hsl(220,15%,14%)",
                             }}>
                             <span className={css.fontSize(13)} style={{ fontWeight: 600 }}>{tpfLabel(l)}</span>
-                            <span className={css.fontSize(10).opacity(0.7)}>{heldSec > 0 ? `holds ${fmtDur(heldSec)}` : "—"}</span>
+                            <span className={css.fontSize(10).opacity(0.7)}>{heldSec > 0 ? `${fmtDur(heldSec)} / ${capSec > 0 ? fmtDur(capSec) : "—"}` : "—"}</span>
                         </button>
                     );
                 })}
