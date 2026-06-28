@@ -1,52 +1,34 @@
-// PRE-RENDER (best-effort). Walks GOPs ahead of the playhead and (a) decodes the nearest
-// few into the shared FrameCache so the renderer finds them instantly, and (b) prefetches
-// raw bytes further ahead (cheap) so live decodes are fast. It is purely additive: every
-// call is deduped/idempotent (ensureGop + getBytes dedupe internally), it swallows all
-// errors, and a re-entry guard keeps one pass at a time. If it does nothing, playback
-// still works — the renderer decodes on demand and the clock skips if it can't keep up.
+// PRE-RENDER (best-effort). Walks GOPs ahead of the playhead and asks the cache to decode
+// the nearest few (so the renderer finds them instantly) and to prefetch raw bytes further
+// ahead (cheap). Purely additive: everything is deduped by the cache/source, errors are
+// swallowed, and a re-entry guard keeps one pass at a time. If it does nothing, playback
+// still works — the cache decodes on demand and the clock skips if it can't keep up.
 
 import { GopEntry } from "./types";
 import { GopSource } from "./gopSource";
-import { GopDecoder } from "./gopDecoder";
 import { FrameCache } from "./frameCache";
 
-const DECODE_AHEAD_SEC = 4;     // decode this much playback ahead (also bounded by cache room)
-const BYTES_AHEAD_SEC = 10;     // prefetch raw bytes this much playback ahead
-const GOP_LOOKAHEAD = 24;       // GOPs to consider per pass
-const DECODE_BATCH = 8;         // max GOPs to decode per pass
-const FRAME_CACHE_SOFT = 180;   // stop decoding ahead when the cache is this full
+const DECODE_AHEAD_GOPS = 2;   // decode this many GOPs ahead (whole-GOP -> keep this small)
+const BYTES_AHEAD_GOPS = 12;   // prefetch raw bytes this many GOPs ahead
 
 export class Prebuffer {
     private busy = false;
 
-    constructor(private source: GopSource, private decoder: GopDecoder, private cache: FrameCache) {}
+    constructor(private source: GopSource, private cache: FrameCache) {}
 
-    pump(playWall: number, speed: number): void {
+    pump(playWall: number): void {
         if (this.busy) return;
         this.busy = true;
-        void this.run(playWall, Math.max(1, speed)).finally(() => { this.busy = false; });
+        void this.run(playWall).finally(() => { this.busy = false; });
     }
 
-    private async run(playWall: number, speed: number): Promise<void> {
-        const decHorizon = playWall + DECODE_AHEAD_SEC * 1000 * this.source.comp * speed;
-        const byteHorizon = playWall + BYTES_AHEAD_SEC * 1000 * this.source.comp * speed;
+    private async run(playWall: number): Promise<void> {
         let gops: GopEntry[] = [];
-        try { gops = await this.source.gopsFrom(playWall, GOP_LOOKAHEAD); }
+        try { gops = await this.source.gopsFrom(playWall, BYTES_AHEAD_GOPS); }
         catch { return; }
-        // (a) decode the nearest GOPs (bounded by cache room + decode horizon)
-        let decoded = 0;
-        for (const g of gops) {
-            if (g.t > decHorizon) break;
-            if (this.cache.size >= FRAME_CACHE_SOFT) break;
-            if (decoded >= DECODE_BATCH) break;
-            try { await this.decoder.ensureGop(g, false); } catch { /* best-effort */ }
-            decoded++;
-        }
-        // (b) prefetch raw bytes further ahead (cheap; fills the byte cache)
-        for (const g of gops) {
-            if (g.t > byteHorizon) break;
-            if (this.source.hasBytes(g)) continue;
-            void this.source.getBytes(g, false).catch(() => { /* */ });
+        for (let i = 0; i < gops.length; i++) {
+            if (i < DECODE_AHEAD_GOPS) { try { await this.cache.ensure(gops[i]); } catch { /* */ } }
+            else if (!this.source.hasBytes(gops[i])) void this.source.getBytes(gops[i], false).catch(() => { /* */ });
         }
     }
 }
