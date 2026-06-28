@@ -14,7 +14,7 @@ import { GopSource } from "./gopSource";
 import { clockHMS } from "../format";
 import { accessUnitsFromGop, codecFromSps } from "../h264";
 
-const MAX_GOPS = 100;
+const MAX_GOPS = 16;
 
 type Entry = { frames: Promise<VideoFrame[]>; used: number };
 const entries = new Map<string, Entry>();
@@ -73,38 +73,62 @@ function evictOldest(): void {
     }
 }
 
-// Decode one GOP's bytes into VideoFrames (a fresh decoder per GOP — each GOP is
-// self-contained, so this stays simple and parallel-safe). Returned in presentation order.
-// Also used by the live player.
-export async function decodeGop(bytes: Buffer, walls: number[]): Promise<VideoFrame[]> {
+// ONE shared decoder, fed one GOP at a time (serialized). Reusing a single VideoDecoder
+// avoids the heavy per-GOP codec init and — critically — the hardware-decoder exhaustion
+// that came from spinning up a fresh decoder for every GOP (only a few decode instances
+// exist; the extras stalled, which is why decodes were taking ~8s and dropping frames).
+
+let decoder: VideoDecoder | undefined;
+let decoderCodec = "";
+let collecting: VideoFrame[] | null = null;  // output target for the in-flight decode (serialized -> unambiguous)
+let decodeChain: Promise<unknown> = Promise.resolve();
+
+function ensureDecoder(codec: string): void {
+    if (decoder && decoder.state !== "closed" && decoderCodec === codec) return;
+    if (decoder && decoder.state !== "closed") { try { decoder.close(); } catch { /* */ } }
+    decoderCodec = codec;
+    decoder = new VideoDecoder({
+        output: f => { if (collecting) collecting.push(f); else { try { f.close(); } catch { /* */ } } },
+        error: e => { console.warn("[decode] decoder error", (e as any)?.message || e); try { decoder?.close(); } catch { /* */ } decoder = undefined; },
+    });
+    decoder.configure({ codec, optimizeForLatency: true });
+}
+
+// Decode one GOP into VideoFrames (presentation order). Serialized through the shared
+// decoder. Also used by the live player.
+export function decodeGop(bytes: Buffer, walls: number[]): Promise<VideoFrame[]> {
+    const run = decodeChain.then(() => decodeOne(bytes, walls));
+    decodeChain = run.then(() => { /* */ }, () => { /* keep the chain alive past errors */ });
+    return run;
+}
+
+async function decodeOne(bytes: Buffer, walls: number[]): Promise<VideoFrame[]> {
     if (typeof VideoDecoder === "undefined") return [];
     const { nals, units } = accessUnitsFromGop(bytes);
     if (!units.length) return [];
-    const codec = codecFromSps(nals);
-    return new Promise<VideoFrame[]>(resolve => {
-        const out: VideoFrame[] = [];
-        let settled = false;
-        const finish = () => {
-            if (settled) return;
-            settled = true;
-            try { dec.close(); } catch { /* */ }
-            out.sort((a, b) => a.timestamp - b.timestamp);
-            resolve(out);
-        };
-        const dec = new VideoDecoder({ output: f => out.push(f), error: () => finish() });
-        try {
-            dec.configure({ codec, optimizeForLatency: true });
-            for (let i = 0; i < units.length; i++) {
-                dec.decode(new EncodedVideoChunk({
-                    type: units[i].key ? "key" : "delta",
-                    timestamp: Math.round((walls[i] ?? 0) * 1000),
-                    data: units[i].data,
-                }));
-            }
-            dec.flush().then(finish, finish);
-        } catch {
-            finish();
+    try { ensureDecoder(codecFromSps(nals)); } catch (e) { console.warn("[decode] configure failed", e); return []; }
+    if (!decoder) return [];
+    const out: VideoFrame[] = [];
+    collecting = out;
+    let flushed = false;
+    try {
+        for (let i = 0; i < units.length; i++) {
+            decoder.decode(new EncodedVideoChunk({
+                type: units[i].key ? "key" : "delta",
+                timestamp: Math.round((walls[i] ?? 0) * 1000),
+                data: units[i].data,
+            }));
         }
-        setTimeout(finish, 8000); // never hang if flush/output stalls
-    });
+        await Promise.race([
+            decoder.flush().then(() => { flushed = true; }, () => { /* */ }),
+            new Promise<void>(res => setTimeout(res, 8000)),
+        ]);
+    } catch (e) {
+        console.warn("[decode] failed", e);
+    } finally {
+        collecting = null;
+    }
+    if (!flushed && decoder && decoder.state !== "closed") { try { decoder.close(); } catch { /* */ } decoder = undefined; } // hung -> rebuild next time
+    out.sort((a, b) => a.timestamp - b.timestamp);
+    return out;
 }
