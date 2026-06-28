@@ -9,11 +9,10 @@
 
 import { asyncCache } from "sliftutils/render-utils/asyncObservable";
 import { BulkDatabase2, IBulkDatabase2 } from "sliftutils/storage/BulkDatabase2/BulkDatabase2";
-import { splitFramedNals } from "../../src/annexb";
+import { accessUnitsFromGop, codecFromSps } from "./h264";
 import { api } from "./session";
 
 const THUMB_W = 256, THUMB_H = 144;
-const START = new Uint8Array([0, 0, 0, 1]);
 // NOTE: typed via the IBulkDatabase2 interface. The concrete BulkDatabase2 class
 // extends BulkDatabaseBase through a circular re-export, which makes TS collapse
 // the derived instance type to {} (all methods vanish) — so we view it through
@@ -21,28 +20,14 @@ const START = new Uint8Array([0, 0, 0, 1]);
 type ThumbRow = { key: string; jpeg: Uint8Array };
 const thumbDb = new BulkDatabase2<ThumbRow>("activityThumbs") as unknown as IBulkDatabase2<ThumbRow>;
 
-function codecFromSps(nals: Buffer[]): string {
-    const sps = nals.find(n => (n[0] & 0x1f) === 7);
-    if (!sps || sps.length < 4) return "avc1.4D0028";
-    const hex = (b: number) => b.toString(16).padStart(2, "0");
-    return `avc1.${hex(sps[1])}${hex(sps[2])}${hex(sps[3])}`;
-}
-
-function concat(parts: Uint8Array[]): Uint8Array {
-    let len = 0; for (const p of parts) len += p.length;
-    const out = new Uint8Array(len); let o = 0;
-    for (const p of parts) { out.set(p, o); o += p.length; }
-    return out;
-}
-
 // Decode the SPS+PPS+IDR of a GOP to a small JPEG via WebCodecs (Annex-B).
 function decodeKeyframe(bytes: Uint8Array): Promise<Uint8Array> {
     const W: any = window as any;
     if (typeof W.VideoDecoder !== "function") return Promise.reject(new Error("no WebCodecs"));
-    const nals = splitFramedNals(Buffer.from(bytes));
-    const au: Uint8Array[] = [];
-    for (const n of nals) { const t = n[0] & 0x1f; if (t === 7 || t === 8 || t === 5) { au.push(START, n); } }
-    const data = concat(au);
+    const { nals, units } = accessUnitsFromGop(Buffer.from(bytes));
+    const key = units.find(u => u.key);
+    if (!key) return Promise.reject(new Error("no keyframe"));
+    const data = key.data;
     const codec = codecFromSps(nals);
     return new Promise<Uint8Array>((resolve, reject) => {
         let done = false;

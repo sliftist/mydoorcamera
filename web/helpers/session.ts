@@ -9,14 +9,14 @@ import { state, lsSet } from "./appState";
 import {
     selectPeriod, refreshLevels, saveUrlPosition, rewatchDay, reloadIndex, applyUrlZoom,
     periodStartFromKey, todayStart,
-    getUrlSpeed, getUrlLevel, getUrlActivityExp, getUrlCatchup, getUrlPanelOpen, getUrlThreshold, applyUrlLoop, getUrlDay, getUrlLive, setUrlLive,
+    getUrlSpeed, getUrlLevel, getUrlActivityExp, getUrlGapMode, getUrlPanelOpen, getUrlThreshold, applyUrlLoop, getUrlDay, getUrlLive, setUrlLive,
 } from "./navigation";
 
 export let api: CameraApi | undefined;
 export let player: DayPlayer | undefined;
 
 let playerKey = "";
-let videoEl: HTMLVideoElement | null = null;
+let canvasEl: HTMLCanvasElement | null = null;
 let retryTimer: ReturnType<typeof setTimeout> | undefined;
 let statsTimer: ReturnType<typeof setInterval> | undefined;
 let posTimer: ReturnType<typeof setInterval> | undefined;
@@ -42,7 +42,7 @@ export async function connect(): Promise<void> {
         }, 1000);
         if (!posTimer) posTimer = setInterval(() => { if (state.day && state.coverage) saveUrlPosition(state.playWall); void refreshLevels(); }, 30000);
         void refreshLevels();
-        runInAction(() => { state.speed = getUrlSpeed(); state.level = getUrlLevel(); state.activityExp = getUrlActivityExp(); state.catchupMode = getUrlCatchup(); state.activityPanelOpen = getUrlPanelOpen(); state.activityThreshold = getUrlThreshold(); }); // restore settings before the player is created
+        runInAction(() => { state.speed = getUrlSpeed(); state.level = getUrlLevel(); state.activityExp = getUrlActivityExp(); state.gapMode = getUrlGapMode(); state.activityPanelOpen = getUrlPanelOpen(); state.activityThreshold = getUrlThreshold(); }); // restore settings before the player is created
         const urlDay = getUrlDay();
         const anchor = urlDay ? periodStartFromKey(urlDay) : (days.length ? periodStartFromKey(days[days.length - 1]) : 0);
         if (anchor) { await selectPeriod(anchor, false); applyUrlZoom(); applyUrlLoop(); }
@@ -80,20 +80,20 @@ function startStatsPoll(): void {
 }
 
 // ---- player lifecycle ----
-export function setVideoEl(el: HTMLVideoElement | null): void {
-    videoEl = el;
+export function setCanvasEl(el: HTMLCanvasElement | null): void {
+    canvasEl = el;
     if (el) maybeStartDayPlayer();
 }
 
 export function maybeStartDayPlayer(): void {
-    if (!api || !videoEl || !state.coverage || !state.day) return;
+    if (!api || !canvasEl || !state.coverage || !state.day) return;
     const key = `${state.day}#${state.level}`;
     if (player && playerKey === key) return;
     teardownPlayer();
     playerKey = key;
-    player = new DayPlayer(videoEl, api, state.day.split("/"), state.coverage.dayStartMs, state.coverage.ranges, state.level, state.coverage.dayEndMs);
+    player = new DayPlayer(canvasEl, api, state.day.split("/"), state.coverage.dayStartMs, state.coverage.ranges, state.level, state.coverage.dayEndMs);
     player.setSpeed(state.speed); // adopt the current (possibly URL-restored) playback speed
-    player.setCatchupMode(state.catchupMode);
+    player.setGapMode(state.gapMode);
     if (state.loopStart && state.loopEnd > state.loopStart) player.setLoop(state.loopStart, state.loopEnd); // loop survives the day/level rebuild
     player.onTime = (wall) => runInAction(() => {
         state.playWall = wall;
@@ -105,8 +105,6 @@ export function maybeStartDayPlayer(): void {
     });
     player.onStatus = (s) => runInAction(() => { state.playStatus = s; });
     player.onSeeking = (s) => runInAction(() => { state.seeking = s; });
-    player.onRate = (r) => runInAction(() => { state.playbackRate = r; });
-    player.onBuffer = (s) => runInAction(() => { state.bufferSec = s; });
     player.onPending = () => runInAction(() => { if (player) { state.pendingGops = player.pendingGopTimes; state.bufferedRanges = player.bufferedWallRanges(); } }); // promptly reflect in-flight + loaded GOPs on the markers
     player.seekTo(state.desiredWall); // show the initial / resumed frame (paused), set by selectDay
 }
