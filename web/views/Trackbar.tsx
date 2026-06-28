@@ -5,6 +5,7 @@ import { css } from "typesafecss";
 import { formatDateTime } from "socket-function/src/formatting/format";
 import { state } from "../helpers/appState";
 import { clockHMS } from "../helpers/format";
+import { isGopDecoded } from "../helpers/videoHelpers";
 import { navBtnCss } from "../helpers/styles";
 import { setTrackRef, onTrackDown, onTrackHover, onTrackLeave, resetZoom, clearLoopRegion, addLoopAtView, startLoopDrag, setLoopRegion } from "../helpers/trackbarHelpers";
 import { computeRegions } from "../helpers/activityRegions";
@@ -66,8 +67,9 @@ export class Trackbar extends preact.Component {
                     const idx = state.index, widthPx = state.trackWidthPx;
                     if (!idx || !idx.length || !widthPx) return null;
                     if ((levelGopSpanSec(state.level) * 1000 / span) * widthPx <= 5) return null;
-                    // Per-GOP state colouring: green = loaded into the player, yellow = request
-                    // in flight, blue = present on disk but not requested/loaded.
+                    // Per-GOP state colouring: bright green = decoded in the frame cache,
+                    // green = bytes loaded into the player, yellow = request in flight,
+                    // blue = present on disk but not requested/loaded.
                     const pending = new Set(state.pendingGops);
                     const loaded = state.bufferedRanges;
                     const isLoaded = (a: number, b: number) => loaded.some(r => a < r.end && b > r.start);
@@ -75,7 +77,10 @@ export class Trackbar extends preact.Component {
                     for (const g of idx) {
                         if (g.e <= vs || g.t >= ve) continue;
                         if (((g.e - g.t) / span) * widthPx <= 5) continue;
-                        const bg = isLoaded(g.t, g.e) ? "hsl(150,55%,38%)" : pending.has(g.t) ? "hsl(50,100%,55%)" : "hsl(210,45%,52%)";
+                        const bg = isGopDecoded(state.level, g.t) ? "hsl(140,90%,58%)"
+                            : isLoaded(g.t, g.e) ? "hsl(150,55%,38%)"
+                                : pending.has(g.t) ? "hsl(50,100%,55%)"
+                                    : "hsl(210,45%,52%)";
                         marks.push(<div key={g.t} style={{ position: "absolute", top: 0, bottom: 0, left: pct(g.t), width: `calc(${wpct(g.t, g.e)} - 3px)`, background: bg }} />);
                     }
                     return (

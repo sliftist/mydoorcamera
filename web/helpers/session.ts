@@ -4,7 +4,7 @@
 
 import { runInAction } from "mobx";
 import { CameraApi } from "./api";
-import { DayPlayer } from "./videoHelpers";
+import { DayPlayer, LivePlayer, Renderer } from "./videoHelpers";
 import { state, lsSet } from "./appState";
 import {
     selectPeriod, refreshLevels, saveUrlPosition, rewatchDay, reloadIndex, applyUrlZoom,
@@ -13,7 +13,9 @@ import {
 } from "./navigation";
 
 export let api: CameraApi | undefined;
-export let player: DayPlayer | undefined;
+export let player: DayPlayer | undefined;     // review playback (undefined while live)
+let livePlayer: LivePlayer | undefined;       // live playback (separate)
+let renderer: Renderer | undefined;           // shared canvas renderer (survives player swaps)
 
 let playerKey = "";
 let canvasEl: HTMLCanvasElement | null = null;
@@ -67,7 +69,7 @@ async function onReconnected(): Promise<void> {
         if (state.day) await reloadIndex();
     } catch { /* ignore */ }
     if (state.day && state.level === 0) rewatchDay(state.day);
-    if (state.live && player) { try { await player.startLive(); } catch { /* */ } }
+    if (state.live && livePlayer) { try { await livePlayer.start(); } catch { /* */ } } // re-attach the dropped stream
     else if (player) player.seekTo(state.playWall);
 }
 
@@ -81,17 +83,19 @@ function startStatsPoll(): void {
 
 // ---- player lifecycle ----
 export function setCanvasEl(el: HTMLCanvasElement | null): void {
+    if (el === canvasEl) return;
     canvasEl = el;
+    renderer = el ? new Renderer(el) : undefined; // one renderer per canvas, shared by review + live
     if (el) maybeStartDayPlayer();
 }
 
 export function maybeStartDayPlayer(): void {
-    if (!api || !canvasEl || !state.coverage || !state.day) return;
+    if (!api || !renderer || !state.coverage || !state.day || state.live) return;
     const key = `${state.day}#${state.level}`;
     if (player && playerKey === key) return;
     teardownPlayer();
     playerKey = key;
-    player = new DayPlayer(canvasEl, api, state.day.split("/"), state.coverage.dayStartMs, state.coverage.ranges, state.level, state.coverage.dayEndMs);
+    player = new DayPlayer(renderer, api, state.day.split("/"), state.coverage.dayStartMs, state.coverage.ranges, state.level, state.coverage.dayEndMs);
     player.setSpeed(state.speed); // adopt the current (possibly URL-restored) playback speed
     player.setGapMode(state.gapMode);
     if (state.loopStart && state.loopEnd > state.loopStart) player.setLoop(state.loopStart, state.loopEnd); // loop survives the day/level rebuild
@@ -112,24 +116,27 @@ export function maybeStartDayPlayer(): void {
 
 export function teardownPlayer(): void { if (player) { player.teardown(); player = undefined; } playerKey = ""; }
 
-// ---- live mode (full-res real-time only) ----
+// ---- live mode (full-res real-time only) — a separate LivePlayer on the shared canvas ----
 export async function enterLive(): Promise<void> {
-    if (!api) return;
+    if (!api || !renderer) return;
     const tStart = todayStart();
     const needReselect = state.level !== 0 || !state.coverage || state.coverage.dayStartMs !== tStart;
     if (state.level !== 0) runInAction(() => { state.level = 0; });
     if (needReselect) await selectPeriod(tStart, true);
-    if (!player) return;
     runInAction(() => { state.live = true; });
     setUrlLive(true);
-    try { await player.startLive(); }
-    catch (e) { runInAction(() => { state.live = false; }); setUrlLive(false); console.error("[live] start failed:", e); }
+    teardownPlayer(); // stop the review player drawing to the shared canvas
+    const dayParts = state.day ? state.day.split("/") : [];
+    livePlayer = new LivePlayer(renderer, api, dayParts);
+    try { await livePlayer.start(); }
+    catch (e) { runInAction(() => { state.live = false; }); setUrlLive(false); livePlayer = undefined; console.error("[live] start failed:", e); }
 }
 
 export async function exitLive(): Promise<void> {
     runInAction(() => { state.live = false; });
     setUrlLive(false);
-    if (player) await player.stopLive();
+    if (livePlayer) { await livePlayer.stop(); livePlayer = undefined; }
+    maybeStartDayPlayer(); // rebuild the review player on the shared canvas
     if (player && state.coverage && state.coverage.ranges.length) {
         const wall = state.coverage.ranges[state.coverage.ranges.length - 1].end;
         runInAction(() => { state.desiredWall = wall; });

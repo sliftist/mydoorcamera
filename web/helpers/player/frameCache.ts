@@ -1,66 +1,81 @@
-// Generative decoded-frame cache. You ask it for a frame — `get(gop, index)` — and it
-// either returns the already-decoded VideoFrame, or (on a miss) kicks off decoding the
-// whole GOP and returns undefined for now (a later call gets it). Concurrent requests for
-// the same GOP share one decode (deduped by gop.t). This is the only place decoding
-// happens; callers just ask for frames.
+// Generative decoded-frame cache — a single async function.
 //
-// Whole-GOP decode is required because frames are delta-coded — you can't get frame N
-// without decoding 0..N — so the cache holds all of a GOP's frames together and evicts by
-// GOP (LRU). VideoFrames are GPU-backed; eviction/clear closes them.
+//   getFrame(source, gop, index) -> Promise<VideoFrame | undefined>
+//
+// You ask for a frame; if its GOP is cached you get it, otherwise the whole GOP is decoded
+// (concurrent requests for the same GOP share one decode) and cached. The cache manages its
+// own state: a module-level map of GOP -> decoded frames, bounded to MAX_GOPS by a
+// least-recently-used sweep (only ~100 entries, so a brute-force scan is fine). Evicted
+// GOPs close their VideoFrames. There is no clear() — the LRU bound is the whole policy.
 
+import { observable, runInAction } from "mobx";
 import { GopEntry } from "./types";
 import { GopSource } from "./gopSource";
+import { clockHMS } from "../format";
 import { accessUnitsFromGop, codecFromSps } from "../h264";
 
-type Entry = { frames: VideoFrame[]; ready: boolean; promise: Promise<void> };
+const MAX_GOPS = 100;
 
-export class FrameCache {
-    private gops = new Map<number, Entry>();
-    private lru: number[] = []; // gop.t, most-recently-used last
+type Entry = { frames: Promise<VideoFrame[]>; used: number };
+const entries = new Map<string, Entry>();
+let useClock = 0;
 
-    constructor(private source: GopSource, private maxGops: number) {}
+// Observable set of GOP keys currently decoded in the cache — read it in an @observer
+// (via isGopDecoded) to colour the trackbar markers for decoded GOPs.
+const decodedKeys = observable.set<string>();
+const keyOf = (level: number, gopT: number): string => level + ":" + gopT;
+export function isGopDecoded(level: number, gopT: number): boolean { return decodedKeys.has(keyOf(level, gopT)); }
 
-    // The decoded frame for (gop, frameIndex), or undefined while it decodes.
-    get(gop: GopEntry, index: number): VideoFrame | undefined {
-        const e = this.entry(gop);
-        const i = this.lru.indexOf(gop.t); if (i >= 0) { this.lru.splice(i, 1); this.lru.push(gop.t); }
-        if (!e.ready) return undefined;
-        return e.frames[Math.max(0, Math.min(index, e.frames.length - 1))];
+export async function getFrame(source: GopSource, gop: GopEntry, index: number): Promise<VideoFrame | undefined> {
+    const key = keyOf(source.level, gop.t);
+    let entry = entries.get(key);
+    if (!entry) {
+        entry = { used: 0, frames: loadGop(source, gop, key) };
+        entries.set(key, entry);
+        entry.frames.catch(() => { entries.delete(key); }); // a failed decode shouldn't stick
     }
+    entry.used = ++useClock;
+    evictOldest();
+    const frames = await entry.frames;
+    if (!frames.length) return undefined;
+    return frames[Math.max(0, Math.min(index, frames.length - 1))];
+}
 
-    // Await a GOP's frames being decoded (best-effort prefetch).
-    ensure(gop: GopEntry): Promise<void> { return this.entry(gop).promise; }
+// Fetch bytes + decode one GOP, logging start and decode duration, and marking it decoded.
+async function loadGop(source: GopSource, gop: GopEntry, key: string): Promise<VideoFrame[]> {
+    console.log(`[decode] start ${key} @ ${clockHMS(gop.t)}`);
+    const t0 = Date.now();
+    const bytes = await source.getBytes(gop, true);
+    const frames = await decodeGop(bytes, source.frameWalls(gop, gop.n));
+    console.log(`[decode] done  ${key} ${frames.length}f in ${Date.now() - t0}ms`);
+    runInAction(() => { decodedKeys.add(key); });
+    return frames;
+}
 
-    private entry(gop: GopEntry): Entry {
-        let e = this.gops.get(gop.t);
-        if (e) return e;
-        e = { frames: [], ready: false, promise: Promise.resolve() };
-        this.gops.set(gop.t, e);
-        this.lru.push(gop.t);
-        e.promise = (async () => {
-            try {
-                const bytes = await this.source.getBytes(gop, true);
-                e!.frames = await decodeGop(bytes, this.source.frameWalls(gop, gop.n));
-                e!.ready = true;
-            } catch { this.drop(gop.t); }
-        })();
-        while (this.lru.length > this.maxGops) this.drop(this.lru[0]);
-        return e;
+function evictOldest(): void {
+    while (entries.size > MAX_GOPS) {
+        let oldestKey: string | undefined;
+        let oldestUsed = Infinity;
+        for (const [k, v] of entries) {
+            if (v.used < oldestUsed) {
+                oldestUsed = v.used;
+                oldestKey = k;
+            }
+        }
+        if (oldestKey === undefined) break;
+        const evicted = entries.get(oldestKey)!;
+        entries.delete(oldestKey);
+        const key = oldestKey;
+        runInAction(() => { decodedKeys.delete(key); });
+        void evicted.frames
+            .then(frames => { for (const f of frames) { try { f.close(); } catch { /* */ } } })
+            .catch(() => { /* */ });
     }
-
-    private drop(t: number): void {
-        const e = this.gops.get(t);
-        if (e) for (const f of e.frames) { try { f.close(); } catch { /* */ } }
-        this.gops.delete(t);
-        const i = this.lru.indexOf(t); if (i >= 0) this.lru.splice(i, 1);
-    }
-
-    clear(): void { for (const t of Array.from(this.gops.keys())) this.drop(t); }
 }
 
 // Decode one GOP's bytes into VideoFrames (a fresh decoder per GOP — each GOP is
-// self-contained, so this stays simple and parallel-safe). Frames are returned in
-// presentation order. Used by the cache and by live playback.
+// self-contained, so this stays simple and parallel-safe). Returned in presentation order.
+// Also used by the live player.
 export async function decodeGop(bytes: Buffer, walls: number[]): Promise<VideoFrame[]> {
     if (typeof VideoDecoder === "undefined") return [];
     const { nals, units } = accessUnitsFromGop(bytes);
@@ -69,18 +84,27 @@ export async function decodeGop(bytes: Buffer, walls: number[]): Promise<VideoFr
     return new Promise<VideoFrame[]>(resolve => {
         const out: VideoFrame[] = [];
         let settled = false;
-        const dec = new VideoDecoder({ output: f => out.push(f), error: () => finish() });
         const finish = () => {
-            if (settled) return; settled = true;
+            if (settled) return;
+            settled = true;
             try { dec.close(); } catch { /* */ }
             out.sort((a, b) => a.timestamp - b.timestamp);
             resolve(out);
         };
+        const dec = new VideoDecoder({ output: f => out.push(f), error: () => finish() });
         try {
             dec.configure({ codec, optimizeForLatency: true });
-            for (let i = 0; i < units.length; i++) dec.decode(new EncodedVideoChunk({ type: units[i].key ? "key" : "delta", timestamp: Math.round((walls[i] ?? 0) * 1000), data: units[i].data }));
+            for (let i = 0; i < units.length; i++) {
+                dec.decode(new EncodedVideoChunk({
+                    type: units[i].key ? "key" : "delta",
+                    timestamp: Math.round((walls[i] ?? 0) * 1000),
+                    data: units[i].data,
+                }));
+            }
             dec.flush().then(finish, finish);
-        } catch { finish(); }
+        } catch {
+            finish();
+        }
         setTimeout(finish, 8000); // never hang if flush/output stalls
     });
 }
