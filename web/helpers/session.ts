@@ -85,6 +85,7 @@ function startStatsPoll(): void {
 export function setCanvasEl(el: HTMLCanvasElement | null): void {
     if (el === canvasEl) return;
     canvasEl = el;
+    if (renderer) renderer.destroy();
     renderer = el ? new Renderer(el) : undefined; // one renderer per canvas, shared by review + live
     if (el) maybeStartDayPlayer();
 }

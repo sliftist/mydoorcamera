@@ -1,12 +1,12 @@
 // RENDER — paints an ImageBitmap (a decoded frame, or the "No video" card) onto the canvas.
-// Prefers WebGPU, falling back to canvas 2D. We upload the bitmap into a texture with
-// copyExternalImageToTexture and sample it onto a fullscreen triangle. (We deliberately do
-// NOT use importExternalTexture: it couples a VideoFrame to one GPU device, which caused
-// "texture associated with [Device] cannot be used with [Device]" errors. copyExternalImage
-// works regardless of where the bitmap came from.)
+// Prefers WebGPU, falling back to canvas 2D.
 //
-// The WebGPU device is a single shared instance for the whole page, so there's never a
-// two-device mismatch.
+// WebGPU only shows what you draw on a given frame, so if we only drew when a NEW frame was
+// ready the canvas would flash black whenever we paused or waited between frames. So the
+// renderer runs its OWN requestAnimationFrame loop that continuously re-presents the current
+// texture; drawImage just uploads new pixels into that texture (via copyExternalImageToTexture
+// — not importExternalTexture, which couples a VideoFrame to one GPU device). One shared
+// WebGPU device for the whole page avoids two-device mismatches.
 
 import { clockHMS } from "../format";
 
@@ -46,6 +46,7 @@ function getDevice(): Promise<any> {
 export class Renderer {
     private mode: "init" | "webgpu" | "2d" = "init";
     private sized = false;
+    private destroyed = false;
     private c2d: CanvasRenderingContext2D | null = null;
 
     private device: any = null;
@@ -53,8 +54,11 @@ export class Renderer {
     private pipe: any = null;
     private sampler: any = null;
     private tex: any = null;
+    private bind: any = null;
     private texW = 0;
     private texH = 0;
+    private hasContent = false;
+    private rafId: number | undefined;
     private card: OffscreenCanvas | undefined;
 
     constructor(public canvas: HTMLCanvasElement) {
@@ -64,6 +68,7 @@ export class Renderer {
     private async init(): Promise<void> {
         const gpu = (navigator as any).gpu;
         const device = gpu ? await getDevice() : null;
+        if (this.destroyed) return;
         if (!device) { this.c2d = this.canvas.getContext("2d"); this.mode = "2d"; return; }
         try {
             const ctx: any = (this.canvas as any).getContext("webgpu");
@@ -80,6 +85,7 @@ export class Renderer {
             this.device = device;
             this.ctx = ctx;
             this.mode = "webgpu";
+            this.rafId = requestAnimationFrame(this.present); // continuously re-present the current texture
         } catch (e) {
             console.warn("[render] WebGPU init failed, using canvas 2D", e);
             this.c2d = this.canvas.getContext("2d");
@@ -87,8 +93,10 @@ export class Renderer {
         }
     }
 
+    // Upload a new frame into the texture (WebGPU) or draw it directly (2D). The WebGPU
+    // present loop shows it (and keeps showing it until the next drawImage).
     drawImage(source: Drawable): void {
-        if (this.mode === "init") return; // brief WebGPU init window
+        if (this.mode === "init" || this.destroyed) return;
         const w = source.width, h = source.height;
         if (!this.sized) { this.canvas.width = w; this.canvas.height = h; this.sized = true; }
         if (this.mode === "2d") {
@@ -102,21 +110,37 @@ export class Renderer {
                 this.tex = this.device.createTexture({ size: [w, h], format: "rgba8unorm", usage: 0x2 | 0x4 | 0x10 });
                 this.texW = w;
                 this.texH = h;
+                this.bind = this.device.createBindGroup({ layout: this.pipe.getBindGroupLayout(0), entries: [{ binding: 0, resource: this.sampler }, { binding: 1, resource: this.tex.createView() }] });
             }
             this.device.queue.copyExternalImageToTexture({ source }, { texture: this.tex }, [w, h]);
-            const bind = this.device.createBindGroup({ layout: this.pipe.getBindGroupLayout(0), entries: [{ binding: 0, resource: this.sampler }, { binding: 1, resource: this.tex.createView() }] });
+            this.hasContent = true;
+        } catch { /* device lost / closed bitmap */ }
+    }
+
+    // Re-present the current texture every animation frame so the canvas never goes black.
+    private present = (): void => {
+        if (this.destroyed) return;
+        this.rafId = requestAnimationFrame(this.present);
+        if (this.mode !== "webgpu" || !this.hasContent || !this.tex) return;
+        try {
             const enc = this.device.createCommandEncoder();
             const pass = enc.beginRenderPass({ colorAttachments: [{ view: this.ctx.getCurrentTexture().createView(), clearValue: { r: 0, g: 0, b: 0, a: 1 }, loadOp: "clear", storeOp: "store" }] });
             pass.setPipeline(this.pipe);
-            pass.setBindGroup(0, bind);
+            pass.setBindGroup(0, this.bind);
             pass.draw(3);
             pass.end();
             this.device.queue.submit([enc.finish()]);
-        } catch { /* device lost / size race */ }
-    }
+        } catch { /* */ }
+    };
 
     drawMissing(wall: number): void {
         this.drawImage(this.renderCard(wall));
+    }
+
+    destroy(): void {
+        this.destroyed = true;
+        if (this.rafId != null && typeof cancelAnimationFrame !== "undefined") { try { cancelAnimationFrame(this.rafId); } catch { /* */ } }
+        this.rafId = undefined;
     }
 
     private renderCard(wall: number): OffscreenCanvas {
