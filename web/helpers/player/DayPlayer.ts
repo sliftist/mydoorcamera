@@ -186,7 +186,7 @@ export class DayPlayer {
         }
         const frame = await getFrame(this.source, gop, fi);
         if (!frame) return false;
-        this.renderer.drawFrame(frame);
+        this.renderer.drawImage(frame);
         return true;
     }
 

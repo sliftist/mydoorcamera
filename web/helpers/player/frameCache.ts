@@ -1,12 +1,16 @@
 // Generative decoded-frame cache — a single async function.
 //
-//   getFrame(source, gop, index) -> Promise<VideoFrame | undefined>
+//   getFrame(source, gop, index) -> Promise<ImageBitmap | undefined>
 //
 // You ask for a frame; if its GOP is cached you get it, otherwise the whole GOP is decoded
-// (concurrent requests for the same GOP share one decode) and cached. The cache manages its
-// own state: a module-level map of GOP -> decoded frames, bounded to MAX_GOPS by a
-// least-recently-used sweep (only ~100 entries, so a brute-force scan is fine). Evicted
-// GOPs close their VideoFrames. There is no clear() — the LRU bound is the whole policy.
+// (concurrent requests for the same GOP share one decode) and cached. Bounded to MAX_GOPS by
+// a least-recently-used sweep.
+//
+// IMPORTANT: we cache ImageBitmaps, NOT VideoFrames. Hardware H.264 decoders only have a
+// small pool of output surfaces (~10-16); holding decoded VideoFrames open exhausts that pool
+// and the decoder stalls mid-GOP (flush() never resolves). So as each frame comes out of the
+// decoder we copy it into an ImageBitmap and close the VideoFrame right away, freeing the
+// surface — which also lets the decode finish.
 
 import { observable, runInAction } from "mobx";
 import { GopEntry } from "./types";
@@ -15,18 +19,19 @@ import { clockHMS } from "../format";
 import { accessUnitsFromGop, codecFromSps } from "../h264";
 
 const MAX_GOPS = 16;
+const MAX_FRAME_WIDTH = 1280; // downscale cached bitmaps to ~720p to bound memory
 
-type Entry = { frames: Promise<VideoFrame[]>; used: number };
+type Entry = { frames: Promise<ImageBitmap[]>; used: number };
 const entries = new Map<string, Entry>();
 let useClock = 0;
 
-// Observable set of GOP keys currently decoded in the cache — read it in an @observer
-// (via isGopDecoded) to colour the trackbar markers for decoded GOPs.
+// Observable set of GOP keys currently decoded — read via isGopDecoded() in an @observer to
+// colour the trackbar markers for decoded GOPs.
 const decodedKeys = observable.set<string>();
 const keyOf = (level: number, gopT: number): string => level + ":" + gopT;
 export function isGopDecoded(level: number, gopT: number): boolean { return decodedKeys.has(keyOf(level, gopT)); }
 
-export async function getFrame(source: GopSource, gop: GopEntry, index: number): Promise<VideoFrame | undefined> {
+export async function getFrame(source: GopSource, gop: GopEntry, index: number): Promise<ImageBitmap | undefined> {
     const key = keyOf(source.level, gop.t);
     let entry = entries.get(key);
     if (!entry) {
@@ -41,13 +46,10 @@ export async function getFrame(source: GopSource, gop: GopEntry, index: number):
     return frames[Math.max(0, Math.min(index, frames.length - 1))];
 }
 
-// Fetch bytes + decode one GOP, logging start and decode duration, and marking it decoded.
-async function loadGop(source: GopSource, gop: GopEntry, key: string): Promise<VideoFrame[]> {
+async function loadGop(source: GopSource, gop: GopEntry, key: string): Promise<ImageBitmap[]> {
     console.log(`[decode] start ${key} @ ${clockHMS(gop.t)}`);
-    const t0 = Date.now();
     const bytes = await source.getBytes(gop, true);
     const frames = await decodeGop(bytes, source.frameWalls(gop, gop.n));
-    console.log(`[decode] done  ${key} ${frames.length}f in ${Date.now() - t0}ms`);
     runInAction(() => { decodedKeys.add(key); });
     return frames;
 }
@@ -64,23 +66,20 @@ function evictOldest(): void {
         }
         if (oldestKey === undefined) break;
         const evicted = entries.get(oldestKey)!;
-        entries.delete(oldestKey);
         const key = oldestKey;
+        entries.delete(key);
         runInAction(() => { decodedKeys.delete(key); });
         void evicted.frames
-            .then(frames => { for (const f of frames) { try { f.close(); } catch { /* */ } } })
+            .then(frames => { for (const b of frames) { try { b.close(); } catch { /* */ } } })
             .catch(() => { /* */ });
     }
 }
 
-// ONE shared decoder, fed one GOP at a time (serialized). Reusing a single VideoDecoder
-// avoids the heavy per-GOP codec init and — critically — the hardware-decoder exhaustion
-// that came from spinning up a fresh decoder for every GOP (only a few decode instances
-// exist; the extras stalled, which is why decodes were taking ~8s and dropping frames).
-
+// ---- decoding: ONE shared decoder, fed one GOP at a time ----
+// Reusing a single VideoDecoder avoids per-GOP codec init and hardware-decoder contention.
 let decoder: VideoDecoder | undefined;
 let decoderCodec = "";
-let collecting: VideoFrame[] | null = null;  // output target for the in-flight decode (serialized -> unambiguous)
+let collect: ((frame: VideoFrame) => void) | null = null; // output sink for the in-flight decode (serialized)
 let decodeChain: Promise<unknown> = Promise.resolve();
 
 function ensureDecoder(codec: string): void {
@@ -88,28 +87,42 @@ function ensureDecoder(codec: string): void {
     if (decoder && decoder.state !== "closed") { try { decoder.close(); } catch { /* */ } }
     decoderCodec = codec;
     decoder = new VideoDecoder({
-        output: f => { if (collecting) collecting.push(f); else { try { f.close(); } catch { /* */ } } },
+        output: f => { if (collect) collect(f); else { try { f.close(); } catch { /* */ } } },
         error: e => { console.warn("[decode] decoder error", (e as any)?.message || e); try { decoder?.close(); } catch { /* */ } decoder = undefined; },
     });
     decoder.configure({ codec, optimizeForLatency: true });
 }
 
-// Decode one GOP into VideoFrames (presentation order). Serialized through the shared
-// decoder. Also used by the live player.
-export function decodeGop(bytes: Buffer, walls: number[]): Promise<VideoFrame[]> {
+// Decode one GOP into ImageBitmaps (presentation order). Serialized through the shared decoder.
+// Each frame is copied to a bitmap and its VideoFrame closed immediately (frees decoder surfaces).
+export function decodeGop(bytes: Buffer, walls: number[]): Promise<ImageBitmap[]> {
     const run = decodeChain.then(() => decodeOne(bytes, walls));
     decodeChain = run.then(() => { /* */ }, () => { /* keep the chain alive past errors */ });
     return run;
 }
 
-async function decodeOne(bytes: Buffer, walls: number[]): Promise<VideoFrame[]> {
-    if (typeof VideoDecoder === "undefined") return [];
+async function decodeOne(bytes: Buffer, walls: number[]): Promise<ImageBitmap[]> {
+    if (typeof VideoDecoder === "undefined" || typeof createImageBitmap === "undefined") return [];
     const { nals, units } = accessUnitsFromGop(bytes);
     if (!units.length) return [];
     try { ensureDecoder(codecFromSps(nals)); } catch (e) { console.warn("[decode] configure failed", e); return []; }
     if (!decoder) return [];
-    const out: VideoFrame[] = [];
-    collecting = out;
+
+    const t0 = Date.now();
+    const made: { ts: number; bmp: ImageBitmap }[] = [];
+    const tasks: Promise<void>[] = [];
+    collect = (f: VideoFrame) => {
+        const ts = f.timestamp;
+        const dw = f.displayWidth || MAX_FRAME_WIDTH, dh = f.displayHeight || 720;
+        const scale = Math.min(1, MAX_FRAME_WIDTH / dw);
+        const opts = { resizeWidth: Math.max(1, Math.round(dw * scale)), resizeHeight: Math.max(1, Math.round(dh * scale)), resizeQuality: "medium" as const };
+        // Copy to a bitmap, then close the VideoFrame ASAP so the decoder gets its surface back.
+        tasks.push(createImageBitmap(f as any, opts)
+            .then(bmp => { made.push({ ts, bmp }); })
+            .catch(() => { /* */ })
+            .finally(() => { try { f.close(); } catch { /* */ } }));
+    };
+
     let flushed = false;
     try {
         for (let i = 0; i < units.length; i++) {
@@ -125,10 +138,11 @@ async function decodeOne(bytes: Buffer, walls: number[]): Promise<VideoFrame[]> 
         ]);
     } catch (e) {
         console.warn("[decode] failed", e);
-    } finally {
-        collecting = null;
     }
-    if (!flushed && decoder && decoder.state !== "closed") { try { decoder.close(); } catch { /* */ } decoder = undefined; } // hung -> rebuild next time
-    out.sort((a, b) => a.timestamp - b.timestamp);
-    return out;
+    await Promise.all(tasks); // wait for bitmap copies (and the frame closes)
+    collect = null;
+    if (!flushed && decoder && decoder.state !== "closed") { try { decoder.close(); } catch { /* */ } decoder = undefined; } // hung -> rebuild
+    made.sort((a, b) => a.ts - b.ts);
+    console.log(`[decode] done ${made.length}f in ${Date.now() - t0}ms`);
+    return made.map(m => m.bmp);
 }
