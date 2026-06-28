@@ -4,10 +4,10 @@ import { observer } from "sliftutils/render-utils/observer";
 import { css } from "typesafecss";
 import { formatDateTime } from "socket-function/src/formatting/format";
 import { state } from "../helpers/appState";
-import { clockHMS } from "../helpers/format";
+import { clockHMS, fmtDur } from "../helpers/format";
 import { isGopDecoded } from "../helpers/videoHelpers";
 import { navBtnCss } from "../helpers/styles";
-import { setTrackRef, onTrackDown, onTrackHover, onTrackLeave, resetZoom, clearLoopRegion, addLoopAtView, startLoopDrag, setLoopRegion } from "../helpers/trackbarHelpers";
+import { setTrackRef, onTrackDown, onTrackHover, onTrackLeave, resetZoom, clearLoopRegion, addLoopAtView, startLoopDrag, loopAndZoomToRegion } from "../helpers/trackbarHelpers";
 import { computeRegions } from "../helpers/activityRegions";
 import { saveUrlPosition, nudgeBucket } from "../helpers/navigation";
 import { frameCount } from "../helpers/indexBuffer";
@@ -53,7 +53,7 @@ export class Trackbar extends preact.Component {
                             <div style={flank} />
                             <div className={css.relative.flexGrow(1).minWidth(0)} style={{ height: "6px" }}>
                                 {merged.map((m, i) => (
-                                    <div key={i} title="Loop this activity" onMouseDown={(e: any) => { e.stopPropagation(); setLoopRegion(m.s, m.e); }}
+                                    <div key={i} title="Zoom in and loop this activity" onMouseDown={(e: any) => { e.stopPropagation(); loopAndZoomToRegion(m.s, m.e); }}
                                         style={{ position: "absolute", top: 0, bottom: 0, left: m.x0.toFixed(1) + "px", width: Math.max(2, m.x1 - m.x0 - 3).toFixed(1) + "px", background: "hsl(40,100%,55%)", cursor: "pointer" }} />
                                 ))}
                             </div>
@@ -168,15 +168,27 @@ export class Trackbar extends preact.Component {
                 <div className={css.hbox(6).width("100%")}>
                     <div style={flank} />
                     <div className={css.relative.flexGrow(1).minWidth(0)} style={{ height: "11px" }}>
-                        {TICKS.map((k, i) => {
-                            const wall = vs + (k / 4) * span;
-                            const lbl = i === 0 ? { left: "0", transform: "translateX(0)" }
-                                : i === TICKS.length - 1 ? { left: "100%", transform: "translateX(-100%)" }
-                                    : { left: (k / 4 * 100).toFixed(2) + "%", transform: "translateX(-50%)" };
-                            return (
-                                <div key={"tl" + k} style={{ position: "absolute", top: 0, ...lbl, fontSize: "9px", color: "rgba(255,255,255,0.7)", whiteSpace: "nowrap", pointerEvents: "none" }}>{formatDateTime(wall)}</div>
-                            );
-                        })}
+                        {(() => {
+                            // While looping, annotate the zoom bounds + the loop bounds (amber);
+                            // otherwise the usual evenly-spaced time labels.
+                            const looping = !!(state.loopStart && state.loopEnd > state.loopStart);
+                            const labels: { wall: number; f: number; amber?: boolean }[] = looping
+                                ? [
+                                    { wall: vs, f: 0 },
+                                    { wall: state.loopStart, f: clamp01((state.loopStart - vs) / span), amber: true },
+                                    { wall: state.loopEnd, f: clamp01((state.loopEnd - vs) / span), amber: true },
+                                    { wall: ve, f: 1 },
+                                ]
+                                : TICKS.map(k => ({ wall: vs + (k / 4) * span, f: k / 4 }));
+                            return labels.map((L, i) => {
+                                const pos = L.f <= 0.02 ? { left: "0", transform: "translateX(0)" }
+                                    : L.f >= 0.98 ? { left: "100%", transform: "translateX(-100%)" }
+                                        : { left: (L.f * 100).toFixed(2) + "%", transform: "translateX(-50%)" };
+                                return (
+                                    <div key={"tl" + i} style={{ position: "absolute", top: 0, ...pos, fontSize: "9px", color: L.amber ? "hsl(40,100%,72%)" : "rgba(255,255,255,0.7)", whiteSpace: "nowrap", pointerEvents: "none" }}>{formatDateTime(L.wall)}</div>
+                                );
+                            });
+                        })()}
                     </div>
                     <div style={flank} />
                 </div>
@@ -193,7 +205,7 @@ export class Trackbar extends preact.Component {
                                 style={{ width: "52px", fontSize: "11px", padding: "1px 4px", background: "hsl(220,15%,16%)", color: "inherit", border: "1px solid hsl(220,15%,30%)" }} />
                         </span>
                         {!!(state.loopStart && state.loopEnd > state.loopStart)
-                            ? <button className={navBtnCss} style={{ fontSize: "11px", padding: "2px 8px", color: "hsl(40,100%,70%)" }} onClick={clearLoopRegion} title="Clear the loop">✕ loop</button>
+                            ? <button className={navBtnCss} style={{ fontSize: "11px", padding: "2px 8px", color: "hsl(40,100%,70%)" }} onClick={clearLoopRegion} title="Clear the loop">✕ loop {fmtDur((state.loopEnd - state.loopStart) / 1000)} ({Math.max(1, Math.round((state.loopEnd - state.loopStart) / (levelGopSpanSec(state.level) * 1000)))} GOPs)</button>
                             : <button className={navBtnCss} style={{ fontSize: "11px", padding: "2px 8px" }} onClick={addLoopAtView} title="Loop the middle of the current view">↻ loop</button>}
                         {zoomed
                             ? <button className={navBtnCss} style={{ fontSize: "11px", padding: "2px 8px" }} onClick={resetZoom} title="Reset zoom (show the whole period)">⤢ reset zoom</button>

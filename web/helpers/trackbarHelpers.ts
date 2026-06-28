@@ -130,6 +130,28 @@ export function setLoopRegion(start: number, end: number): void {
     player?.play();
     saveUrlPosition(start);
 }
+
+// Zoom the trackbar so [start,end] occupies roughly the centre 30% of the view (with context
+// on either side), clamped to the period. Used when clicking an activity region.
+export function zoomToRegion(start: number, end: number): void {
+    if (!state.coverage) return;
+    const c = state.coverage;
+    const daySpan = c.dayEndMs - c.dayStartMs;
+    const span = Math.min(daySpan, Math.max(2000, (end - start) / 0.30));
+    const center = (start + end) / 2;
+    let ns = center - span / 2, ne = center + span / 2;
+    if (ns < c.dayStartMs) { ns = c.dayStartMs; ne = ns + span; }
+    if (ne > c.dayEndMs) { ne = c.dayEndMs; ns = ne - span; }
+    runInAction(() => { state.viewStart = Math.max(c.dayStartMs, ns); state.viewEnd = ne; });
+    recomputeViewActivity();
+    persistView();
+}
+
+// Clicking an activity region: zoom to it and loop it.
+export function loopAndZoomToRegion(start: number, end: number): void {
+    zoomToRegion(start, end);
+    setLoopRegion(start, end);
+}
 export function clearLoopRegion(): void {
     runInAction(() => { state.loopStart = 0; state.loopEnd = 0; });
     player?.clearLoop();

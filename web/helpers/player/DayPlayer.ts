@@ -43,7 +43,7 @@ export class DayPlayer {
     private renderStartedAt = 0;
     private renderTargetWall = 0;
     private renderToken = 0;
-    private lastFrameAt = 0;
+    private lastTick = 0;
 
     private rafId: number | undefined;
     private lastEmittedWall = -1;
@@ -81,7 +81,7 @@ export class DayPlayer {
 
     // ============================ public API ============================
     seekTo(wall: number): void { if (this.destroyed) return; this.jump(wall); this.log("SEEK", Math.round(this.playWall)); }
-    play(): void { if (!this.destroyed && !this.playing) { this.playing = true; this.lastFrameAt = 0; this.log("PLAY"); } }
+    play(): void { if (!this.destroyed && !this.playing) { this.playing = true; this.log("PLAY"); } }
     pause(): void { if (this.playing) { this.playing = false; this.log("PAUSE"); } }
     togglePlay(): void { if (this.playing) this.pause(); else this.play(); }
     setSpeed(s: number): void { this.speed = s > 0 ? s : 1; }
@@ -118,14 +118,31 @@ export class DayPlayer {
 
     private step(): void {
         const now = Date.now();
+        const dt = this.lastTick ? Math.min(250, now - this.lastTick) : 0;
+        this.lastTick = now;
 
-        // One render at a time. If the last is still running, wait — but enforce MAX_WAIT,
-        // after which we abandon that frame and show the "missing" card.
+        // Advance the playhead at real-time × comp × speed (this is where the speed factor is
+        // applied). EXCEPTION: in SMOOTH while a render is still in flight we HOLD (don't
+        // advance) — that's the one grace for a slow frame, so playback just slows and shows
+        // every frame. In SKIP we keep advancing even while rendering, so frames get dropped.
+        if (this.playing) {
+            const holding = this.mode === "smooth" && this.renderInFlight;
+            if (!holding) {
+                this.playWall = this.clampWall(this.playWall + dt * this.comp * this.speed);
+                if (this.loopVal && this.playWall >= this.loopVal.end) { this.jump(this.loopVal.start); return; }
+                if (!this.source.coveredAt(this.playWall)) { this.onGap(); this.emit(); return; }
+            }
+        }
+
+        // One render at a time. If the last is still running, wait — enforce MAX_WAIT, after
+        // which we abandon that frame and show the "missing" card.
         if (this.renderInFlight) {
             if (now - this.renderStartedAt > MAX_WAIT_MS) {
                 this.renderer.drawMissing(this.renderTargetWall);
                 this.completeRender(false);
             }
+            this.prebuffer.pump(this.playWall);
+            this.emit();
             return;
         }
 
@@ -137,30 +154,8 @@ export class DayPlayer {
             return;
         }
 
-        // Loop wrap.
-        if (this.loopVal && this.playWall >= this.loopVal.end) { this.jump(this.loopVal.start); return; }
-
-        // Pick the next target frame.
-        let target: number;
-        if (this.mode === "smooth") {
-            if (now - this.lastFrameAt < this.cadence) { // pace to real time
-                this.prebuffer.pump(this.playWall);
-                this.emit();
-                return;
-            }
-            target = this.clampWall(this.shownWall + this.frameStep);
-        } else {
-            target = this.clampWall(this.playWall + (now - this.lastFrameAt) * this.comp * this.speed);
-        }
-
-        // Gaps.
-        if (!this.source.coveredAt(target)) {
-            this.onGap(target, now);
-            this.emit();
-            return;
-        }
-
-        this.beginRender(target);
+        // Render the frame at the current playhead.
+        this.beginRender(this.playWall);
         this.prebuffer.pump(this.playWall);
         this.emit();
     }
@@ -194,12 +189,11 @@ export class DayPlayer {
         const onTime = hit && (Date.now() - this.renderStartedAt) <= this.cadence;
         const wasSeek = this.seekPending;
         this.renderInFlight = false;
-        this.lastFrameAt = Date.now();
-        this.playWall = this.renderTargetWall;
-        if (hit) this.shownWall = this.renderTargetWall;
+        if (hit) this.shownWall = this.renderTargetWall; // playWall advances in step(), not here
         this.seekPending = false;
         if (this.mode === "smooth") {
-            if (onTime || wasSeek || !this.playing) { this.consecHit++; this.consecMiss = 0; }
+            // A render slower than the frame budget is a "miss" — couldn't sustain real time.
+            if (onTime || wasSeek) { this.consecHit++; this.consecMiss = 0; }
             else if (++this.consecMiss >= SKIP_AFTER_MISSES) { this.consecHit = 0; this.enterSkip(); }
             else this.consecHit = 0;
         } else {
@@ -208,19 +202,18 @@ export class DayPlayer {
         }
     }
 
-    // Coverage gap while playing: skip jumps to the next range; blank advances through it.
-    private onGap(target: number, now: number): void {
+    // Coverage gap while playing (playWall already advanced into it): skip jumps to the next
+    // range; blank paints the missing card and keeps advancing.
+    private onGap(): void {
         if (this.gapModeVal === "skip") {
-            const next = this.source.nextRangeStart(target);
+            const next = this.source.nextRangeStart(this.playWall);
             if (next != null) { this.jump(next); this.log("SKIPGAP", Math.round(next)); }
             else { this.playing = false; this.log("END"); }
             return;
         }
-        this.playWall = target;
-        this.shownWall = target;
-        this.lastFrameAt = now;
-        this.renderer.drawMissing(target);
-        if (this.source.nextRangeStart(target) == null && !this.source.hasFootageAhead(target)) { this.playing = false; this.log("END"); }
+        this.shownWall = this.playWall;
+        this.renderer.drawMissing(this.playWall);
+        if (this.source.nextRangeStart(this.playWall) == null && !this.source.hasFootageAhead(this.playWall)) { this.playing = false; this.log("END"); }
     }
 
     private enterSkip(): void { this.mode = "skip"; this.consecHit = 0; this.log("SKIP"); }
@@ -237,7 +230,6 @@ export class DayPlayer {
         this.consecHit = 0;
         this.renderToken++;
         this.renderInFlight = false;
-        this.lastFrameAt = 0;
         this.source.cancelInflight();
     }
 

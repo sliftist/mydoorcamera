@@ -5,9 +5,10 @@ import { css } from "typesafecss";
 import { formatDateTime } from "socket-function/src/formatting/format";
 import { state } from "../helpers/appState";
 import { saveUrlPosition } from "../helpers/navigation";
-import { setLoopRegion } from "../helpers/trackbarHelpers";
+import { loopAndZoomToRegion } from "../helpers/trackbarHelpers";
 import { computeRegions, regionsGopCount, ActivityRegion } from "../helpers/activityRegions";
 import { getThumbUrl } from "../helpers/thumbnails";
+import { fmtDur } from "../helpers/format";
 
 const CARD_W = 200;     // target card width (px) — column count derives from this
 const CARD_H = 132;     // fixed card height (px) — makes row virtualization trivial
@@ -50,7 +51,7 @@ export class ActivityPanel extends preact.Component<{}, { scrollTop: number; vie
         const header = (
             <div className={headerCss} style={{ cursor: "pointer", boxSizing: "border-box" }} onClick={() => this.toggle()}>
                 <span style={{ fontSize: "13px" }}>▾ Activity</span>
-                <span className={css.fontSize(12).opacity(0.7)}>{regions.length} section{regions.length === 1 ? "" : "s"} · {regionsGopCount(regions).toLocaleString()} GOPs</span>
+                <span className={css.fontSize(12).opacity(0.7)}>{regions.length} section{regions.length === 1 ? "" : "s"} · {fmtDur(regions.reduce((s, r) => s + (r.end - r.start) / 1000, 0))} ({regionsGopCount(regions).toLocaleString()} GOPs)</span>
                 <span className={css.flexGrow(1)} />
                 <span className={css.hbox(4).alignItems("center").opacity(0.7).fontSize(11)} onClick={(e: any) => e.stopPropagation()} title="Activity threshold — a GOP counts as activity when its value is at least this">
                     threshold
@@ -94,7 +95,7 @@ export class ActivityPanel extends preact.Component<{}, { scrollTop: number; vie
         const url = getThumbUrl({ level: state.level, t: r.peak.t }); // undefined while loading, "" on failure
         const looped = state.loopStart === r.start && state.loopEnd === r.end;
         return (
-            <div key={r.peak.t} onMouseDown={() => setLoopRegion(r.start, r.end)} title="Click to play this activity region on a loop"
+            <div key={r.peak.t} onMouseDown={() => loopAndZoomToRegion(r.start, r.end)} title="Click to zoom in and loop this activity region"
                 className={css.vbox(3).pad2(6, 6)}
                 style={{ position: "absolute", top: (row * CARD_H) + "px", left: (col * colW) + "%", width: colW + "%", height: CARD_H + "px", boxSizing: "border-box", cursor: "pointer" }}>
                 <div className={css.hsl(220, 15, 6).relative} style={{ width: "100%", flexGrow: 1, overflow: "hidden", outline: looped ? "2px solid hsl(40,80%,55%)" : "1px solid hsl(220,15%,22%)", outlineOffset: "-1px" }}>
@@ -103,7 +104,7 @@ export class ActivityPanel extends preact.Component<{}, { scrollTop: number; vie
                 </div>
                 <div className={css.vbox(1).minWidth(0).fontSize(11)}>
                     <span style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{formatDateTime(r.start)}</span>
-                    <span className={css.fontSize(10).opacity(0.6)}>{r.gopCount} GOPs · peak {r.peak.aMax.toFixed(4)}</span>
+                    <span className={css.fontSize(10).opacity(0.6)}>{fmtDur((r.end - r.start) / 1000)} ({r.gopCount} GOP{r.gopCount === 1 ? "" : "s"}) · peak {r.peak.aMax.toFixed(4)}</span>
                 </div>
             </div>
         );
