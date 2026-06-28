@@ -29,7 +29,8 @@ export const state = observable({
     stats: null as Stats | null,
     online: true,
     playStatus: "paused" as PlayStatus,
-    seeking: false,                  // chasing a seek target whose frame isn't shown yet
+    seeking: false,                  // chasing a seek target whose frame isn't shown yet (yellow outline)
+    dropping: false,                 // playing but the decoder can't keep up — dropping frames (red outline)
     live: false,
     speed: 1,
     level: 0,                        // thinning level being viewed (0 = full res)

@@ -1,111 +1,102 @@
-// Self-driven day player: we decode H.264 ourselves with WebCodecs `VideoDecoder`
-// and render to a <canvas> on a requestAnimationFrame loop, owning the playhead
-// entirely. No MediaSource, no mp4 muxing, no fighting the browser's <video>.
+// Day player — a simple, self-driven renderer. We decode H.264 ourselves with
+// WebCodecs VideoDecoder and paint frames onto a <canvas> on a requestAnimationFrame
+// loop. WE own the playhead (`playWall`, wall-clock ms), so there is no MediaSource,
+// no <video> element, and no FSM coordinating with the browser's playback engine.
 //
-// Because WE own the clock and only ever draw frames we actually have:
-//   - playback can't stall — at the edge of footage we simply pause;
-//   - gaps in the recording are handled explicitly (blank-with-timestamp or skip);
-//   - live is trivial — feed the stream into the same decoder and draw the newest
-//     frame, dropping backlog so it stays real-time.
-//
-// Structure is still an explicit STATE MACHINE for discrete events (seek/play/pause/
-// live/teardown) so transitions are deterministic and logged (see dispatch()); the
-// continuous work (advancing the playhead, decoding ahead, drawing) lives in the rAF
-// loop and the decode pump, which emit FRAME_SHOWN back into the machine to settle
-// seeks. The index/GOP plumbing (gopAt/ensureHour/gopsAhead/fetch) is unchanged.
+// The whole thing is one loop (step()) plus two bounded pumps:
+//   - decode pump  : keep ~DECODE_AHEAD_SEC of playback DECODED ahead of the playhead
+//                    (bounded by feedWall, advanced synchronously as GOPs are queued).
+//   - prefetch pump: fetch GOP *bytes* ~PRELOAD_PLAYBACK_SEC ahead (bounded by fetchWall).
+// Each step advances the playhead (only while playing), tops up the pumps, evicts old
+// frames, and draws the frame at the playhead. Because we only ever draw frames we
+// actually have and advance by real time, playback can't stall: at the footage edge we
+// pause; over a gap we show a "no video" card or skip; and if decoding can't keep up we
+// drop (skip) frames and flag it (red outline) instead of lagging behind real time.
 
 import { CameraApi, GopEntry } from "./api";
 import { accessUnitsFromGop, codecFromSps } from "./h264";
 import { FPS } from "../../src/config";
-import { clockHMS } from "./format";
+import { clockHMS, pad2 } from "./format";
 import { pushFsmEntry } from "./playerLog";
 
 export type PlayStatus = "playing" | "paused" | "waiting" | "unavailable";
 export type GapMode = "blank" | "skip";
 
-type FsmState = "idle" | "seeking" | "paused" | "playing" | "live" | "unavailable" | "destroyed";
-
-type FsmEvent =
-    | { type: "SEEK"; wall: number }
-    | { type: "PLAY" }
-    | { type: "PAUSE" }
-    | { type: "SET_SPEED"; s: number }
-    | { type: "SET_LOOP"; loop: { start: number; end: number } | null }
-    | { type: "SET_GAP"; m: GapMode }
-    | { type: "START_LIVE" }
-    | { type: "STOP_LIVE" }
-    | { type: "INVALIDATE_INDEX" }
-    | { type: "TEARDOWN" }
-    | { type: "FRAME_SHOWN"; wall: number; token: number }
-    | { type: "FRAME_FETCH_FAILED"; token: number }
-    | { type: "UNCOVERED"; wall: number }
-    | { type: "PAUSE_AT_END" };
-
-interface Ctx {
-    state: FsmState;
-    intent: "play" | "pause";
-    shownWall: number;     // frame the loop has actually drawn (-1 = none)
-    pumpGen: number;       // bump to supersede pumps / live (teardown, live enter/exit)
-    fetchToken: number;    // bump per SEEK; stale GOP completions are dropped
-    speed: number;         // review playback speed (multiplies real-time advance)
-    live: boolean;
-    gapMode: GapMode;
-    loop: { start: number; end: number } | null;
-    status: PlayStatus;
-    seekingFlag: boolean;
-    destroyed: boolean;
-}
-
 const DAY_MS = 24 * 3600 * 1000;
-const DECODE_MAX_FRAMES = 90;     // hard cap on decoded VideoFrames held in memory (~3s @30fps)
-const DECODE_AHEAD_SEC = 2;       // keep ~this many playback-seconds DECODED ahead (× speed)
-const PRELOAD_PLAYBACK_SEC = 10;  // prefetch GOP *bytes* this many playback-seconds ahead (× speed)
-const BYTES_CACHE_MAX = 64;       // hard cap on prefetched GOP byte buffers held
-const LIVE_KEEP_FRAMES = 4;       // live: keep only the newest few decoded frames
-const LOG_HEARTBEAT_MS = 1500;
+const DECODE_AHEAD_SEC = 2;        // keep ~this many playback-seconds DECODED ahead (× speed)
+const DECODE_MAX_FRAMES = 120;     // hard cap on decoded VideoFrames held (memory safety)
+const PRELOAD_PLAYBACK_SEC = 10;   // prefetch GOP *bytes* this many playback-seconds ahead (× speed)
+const BYTES_CACHE_MAX = 64;        // hard cap on prefetched GOP byte buffers held
+const LIVE_KEEP_FRAMES = 3;        // live: keep only the newest few decoded frames
+const BEHIND_FRAMES = 3;           // "can't keep up" once the shown frame is this many frame-intervals behind
+const DROP_HYSTERESIS_MS = 400;    // keep the red flag this long after the last behind tick (anti-flicker)
+const RESYNC_AHEAD_MULT = 2;       // if behind by > this × the decode window, drop the stale backlog and resync
+const WARN_THROTTLE_MS = 1000;
 const W: any = typeof window !== "undefined" ? window : {};
+
+type Decoded = { wall: number; frame: any }; // frame: VideoFrame
 
 export class DayPlayer {
     private c2d: CanvasRenderingContext2D | null;
     private canvasSized = false;
 
-    // ---- decode pipeline ----
-    private decoder: any | undefined;          // VideoDecoder
+    // playback state (plain — no FSM)
+    private playing = false;
+    private live = false;
+    private gapModeVal: GapMode = "blank";
+    private speed = 1;
+    private loopVal: { start: number; end: number } | null = null;
+    private destroyed = false;
+    private playWall: number;
+    private shownWall = -1;          // wall of the frame currently on the canvas
+    private seekPending = false;     // playhead jumped (seek); target frame not drawn yet -> yellow
+
+    // decode pipeline
+    private comp = 1;                // 30^level: real-seconds advanced per playback-second
+    private decoder: any | undefined;
     private decoderCodec = "";
     private decodeConfigured = false;
-    private decoded: { wall: number; frame: any }[] = []; // VideoFrame[], sorted asc by wall
-    private fedGops = new Set<number>();        // g.t of GOPs already fed to the decoder
-    private feedWall = 0;                        // wall from which the decode pump takes the next GOP
-    private fetchWall = 0;                        // wall up to which the prefetch pump has fetched bytes
-    private bytesCache = new Map<number, Buffer>(); // prefetched GOP bytes (g.t -> bytes), awaiting decode
-    private decoding = false;                    // decodeAhead re-entry guard
-    private prefetching = false;                 // prefetchAhead re-entry guard
-    private bufferGen = 0;                        // bumped on SEEK to abandon stale look-ahead
+    private decoded: Decoded[] = []; // sorted ascending by wall
+    private feedWall: number;        // wall up to which the decode pump has queued GOPs
+    private fetchWall: number;       // wall up to which the prefetch pump has fetched bytes
+    private fedGops = new Set<number>();
+    private bytesCache = new Map<number, Buffer>();
+    private decoding = false;
+    private prefetching = false;
+    private seekGen = 0;             // bumped on seek/skip to abandon stale fetch+decode work
 
-    private pendingGops = new Set<number>();    // GOP.t with a data fetch in flight (yellow markers)
-    private fetched = new Map<number, { start: number; end: number }>(); // loaded GOP spans (green band)
-
+    // index / coverage
     private hourCache = new Map<string, GopEntry[]>();
-    private comp = 1;                            // 30^level: real-seconds advanced per playback-second
     private levelGops: GopEntry[] = [];
     private levelReady: Promise<void> | undefined;
-
-    private ctx: Ctx;
-    private playWall: number;                    // authoritative playhead (wall ms)
-    private rafId: number | undefined;
-    private lastTs = 0;
-    private lastEmittedWall = -1;
-    private pendingActions: string[] = [];
-    private lastHeartbeat = 0;
     private spanEndMs = 0;
 
-    // ---- live ----
+    // markers
+    private pendingGops = new Set<number>();
+    private fetched = new Map<number, { start: number; end: number }>();
+
+    // behind / drop tracking
+    private lastBehindTs = 0;
+    private wasBehind = false;
+    private lastWarnTs = 0;
+    private lastResyncTs = 0;
+    private droppingFlag = false;
+
+    // emitted-value de-dup
+    private lastEmittedWall = -1;
+    private lastStatus: PlayStatus = "paused";
+    private lastSeeking = false;
+    private lastDropping = false;
+
     private liveChain: Promise<void> = Promise.resolve();
     private liveOp: Promise<void> = Promise.resolve();
+    private rafId: number | undefined;
+    private lastTs = 0;
 
-    onStatus: ((s: PlayStatus) => void) | undefined;
     onTime: ((wallMs: number) => void) | undefined;
-    onSeeking: ((seeking: boolean) => void) | undefined;
+    onStatus: ((s: PlayStatus) => void) | undefined;
+    onSeeking: ((seeking: boolean) => void) | undefined;   // yellow: loading a seek target
+    onDropping: ((dropping: boolean) => void) | undefined; // red: playing but can't keep up
     onPending: (() => void) | undefined;
 
     get pendingGopTimes(): number[] { return Array.from(this.pendingGops); }
@@ -126,239 +117,112 @@ export class DayPlayer {
         this.playWall = dayStartMs;
         this.feedWall = dayStartMs;
         this.fetchWall = dayStartMs;
-        this.ctx = {
-            state: "idle", intent: "pause", shownWall: -1, pumpGen: 0, fetchToken: 0,
-            speed: 1, live: false, gapMode: "blank", loop: null,
-            status: "paused", seekingFlag: false, destroyed: false,
-        };
         this.rafId = W.requestAnimationFrame ? W.requestAnimationFrame(this.tick) : undefined;
     }
 
     // ============================ public API ============================
-    seekTo(wall: number): void { this.dispatch({ type: "SEEK", wall }); }
-    play(): void { this.dispatch({ type: "PLAY" }); }
-    pause(): void { this.dispatch({ type: "PAUSE" }); }
-    togglePlay(): void { if (this.ctx.intent === "play") this.pause(); else this.play(); }
-    setSpeed(s: number): void { this.dispatch({ type: "SET_SPEED", s }); }
-    setLoop(start: number, end: number): void { this.dispatch({ type: "SET_LOOP", loop: { start, end } }); }
-    clearLoop(): void { this.dispatch({ type: "SET_LOOP", loop: null }); }
-    setGapMode(m: GapMode): void { this.dispatch({ type: "SET_GAP", m }); }
-    get loop(): { start: number; end: number } | null { return this.ctx.loop; }
-    get gapMode(): GapMode { return this.ctx.gapMode; }
-    invalidateIndex(): void { this.dispatch({ type: "INVALIDATE_INDEX" }); }
-    async startLive(): Promise<void> { this.dispatch({ type: "START_LIVE" }); await this.liveOp; }
-    async stopLive(): Promise<void> { this.dispatch({ type: "STOP_LIVE" }); await this.liveOp; }
-    teardown(): void { this.dispatch({ type: "TEARDOWN" }); }
+    seekTo(wall: number): void {
+        if (this.live || this.destroyed) return;
+        this.playWall = this.clampWall(wall);
+        this.seekPending = true;
+        this.beginSeek();
+        this.log("SEEK", Math.round(this.playWall));
+    }
+    play(): void { if (!this.live && !this.destroyed && !this.playing) { this.playing = true; this.log("PLAY"); } }
+    pause(): void { if (!this.live && this.playing) { this.playing = false; this.log("PAUSE"); } }
+    togglePlay(): void { if (this.playing) this.pause(); else this.play(); }
+    setSpeed(s: number): void { this.speed = s > 0 ? s : 1; }
+    setLoop(start: number, end: number): void { this.loopVal = { start, end }; }
+    clearLoop(): void { this.loopVal = null; }
+    setGapMode(m: GapMode): void { this.gapModeVal = m; }
+    invalidateIndex(): void { this.clearIndexCaches(); }
     nudge(deltaMs: number): void { this.seekTo(this.playWall + deltaMs); }
     seekTarget(): number { return this.playWall; }
     currentWall(): number { return this.playWall; }
+    teardown(): void { this.doTeardown(); }
+    async startLive(): Promise<void> { this.beginLive(); await this.liveOp; }
+    async stopLive(): Promise<void> { this.endLive(); await this.liveOp; }
 
-    get playStatus(): PlayStatus { return this.ctx.status; }
-    get wantsPlay(): boolean { return this.ctx.intent === "play"; }
+    get playStatus(): PlayStatus { return this.lastStatus; }
+    get wantsPlay(): boolean { return this.playing; }
     get compression(): number { return this.comp; }
-    get isLive(): boolean { return this.ctx.live; }
+    get isLive(): boolean { return this.live; }
+    get loop(): { start: number; end: number } | null { return this.loopVal; }
+    get gapMode(): GapMode { return this.gapModeVal; }
 
-    // ============================ state machine ============================
-    private dispatch(ev: FsmEvent): void {
-        if (this.ctx.destroyed && ev.type !== "TEARDOWN") return;
-        const from = this.ctx.state;
-        this.applyEvent(ev);
-        const to = this.decide(from, ev);
-        this.ctx.state = to;
-        try { this.runEffects(from, to, ev); } catch (e) { console.error("[fsm] effect error", e); }
-        this.syncOutputs();
-        this.logDispatch(ev, from, to);
-    }
-
-    private applyEvent(ev: FsmEvent): void {
-        const c = this.ctx;
-        switch (ev.type) {
-            case "SEEK":
-                if (c.live) return;
-                this.playWall = Math.max(this.dayStartMs, Math.min(this.spanEndMs - 1, ev.wall));
-                c.fetchToken++;
-                this.bufferGen++;
-                break;
-            case "PLAY": if (!c.live) { c.intent = "play"; } break;
-            case "PAUSE": if (!c.live) c.intent = "pause"; break;
-            case "SET_SPEED": c.speed = ev.s; break;
-            case "SET_LOOP": c.loop = ev.loop; break;
-            case "SET_GAP": c.gapMode = ev.m; break;
-            case "START_LIVE": c.live = true; c.intent = "play"; c.pumpGen++; break;
-            case "STOP_LIVE": c.live = false; c.intent = "pause"; c.pumpGen++; c.shownWall = -1; break;
-            case "TEARDOWN": c.destroyed = true; c.pumpGen++; break;
-            case "FRAME_SHOWN": if (ev.token === c.fetchToken) c.shownWall = ev.wall; break;
-            default: break;
-        }
-    }
-
-    private decide(from: FsmState, ev: FsmEvent): FsmState {
-        const c = this.ctx;
-        if (c.destroyed) return "destroyed";
-        switch (ev.type) {
-            case "TEARDOWN": return "destroyed";
-            case "START_LIVE": return "live";
-            case "STOP_LIVE": return "paused";
-            case "SET_SPEED": case "SET_LOOP": case "SET_GAP": return from;
-            case "INVALIDATE_INDEX": return from;
-        }
-        if (c.live || from === "live") return "live";
-        switch (ev.type) {
-            case "SEEK": return "seeking";
-            case "PLAY": return this.hasCurrentFrame() ? "playing" : "seeking";
-            case "PAUSE": return "paused";
-            case "FRAME_SHOWN":
-                if (ev.token !== c.fetchToken) return from;
-                return c.intent === "play" ? "playing" : "paused";
-            case "UNCOVERED": return "unavailable";
-            case "PAUSE_AT_END": return "paused";
-            case "FRAME_FETCH_FAILED": return from;
-            default: return from;
-        }
-    }
-
-    private runEffects(from: FsmState, to: FsmState, ev: FsmEvent): void {
-        if (ev.type === "SEEK") { try { this.api.cancelStaleGops(); } catch { /* */ } this.action("cancelStale"); this.resetDecodeForSeek(); }
-        switch (ev.type) {
-            case "TEARDOWN": this.doTeardown(); return;
-            case "START_LIVE": this.liveOp = this.doStartLive(); return;
-            case "STOP_LIVE": this.liveOp = this.doStopLive(); return;
-            case "INVALIDATE_INDEX": this.clearIndexCaches(); this.action("clearIndex"); return;
-            case "PAUSE": if (from !== "paused") this.action("pause"); return;
-        }
-        // The rAF loop drives drawing/pumping for seeking/playing/paused; nothing to do
-        // synchronously here beyond kicking the decode pump for responsiveness.
-        if (to === "seeking" || to === "playing") void this.decodeAhead();
-    }
-
-    private syncOutputs(): void {
-        const status = this.statusFor(this.ctx.state);
-        if (status !== this.ctx.status) { this.ctx.status = status; this.onStatus?.(status); }
-        const seeking = this.ctx.state === "seeking";
-        if (seeking !== this.ctx.seekingFlag) { this.ctx.seekingFlag = seeking; this.onSeeking?.(seeking); }
-    }
-
-    private statusFor(s: FsmState): PlayStatus {
-        switch (s) {
-            case "playing": return "playing";
-            case "unavailable": return "unavailable";
-            case "seeking": return this.ctx.intent === "play" ? "waiting" : "paused";
-            case "live": return this.decoded.length ? "playing" : "waiting";
-            default: return "paused";
-        }
-    }
-
-    private action(s: string): void { this.pendingActions.push(s); }
-    private logDispatch(ev: FsmEvent, from: FsmState, to: FsmState): void {
-        const actions = this.pendingActions; this.pendingActions = [];
-        const changed = from !== to;
-        const now = Date.now();
-        if (!changed && !actions.length) { if (now - this.lastHeartbeat < LOG_HEARTBEAT_MS) return; this.lastHeartbeat = now; }
-        pushFsmEntry({ ts: now, ev: ev.type, arg: this.shortArg(ev), from, to, ctx: this.ctxSnapshot(), actions: actions.length ? actions : undefined });
-    }
-    private shortArg(ev: FsmEvent): string | number | undefined {
-        switch (ev.type) {
-            case "SEEK": case "FRAME_SHOWN": case "UNCOVERED": return Math.round((ev as any).wall);
-            case "SET_SPEED": return (ev as any).s;
-            case "SET_GAP": return (ev as any).m;
-            default: return undefined;
-        }
-    }
-    private ctxSnapshot(): Record<string, unknown> {
-        const c = this.ctx;
-        return {
-            intent: c.intent, status: c.status, gapMode: c.gapMode,
-            playWall: Math.round(this.playWall), shownWall: Math.round(c.shownWall),
-            speed: c.speed, level: this.level, comp: this.comp, live: c.live,
-            fetchToken: c.fetchToken, decoded: this.decoded.length, ahead: this.aheadFrames(),
-            cached: this.bytesCache.size, fed: this.fedGops.size,
-            inFlight: this.api.outstandingGops, covered: this.coveredAt(this.playWall),
-            footageAhead: this.hasFootageAhead(this.playWall),
-            loop: c.loop ? `${Math.round(c.loop.start)}-${Math.round(c.loop.end)}` : null,
-        };
-    }
-
-    // ============================ rAF render loop ============================
+    // ============================ the loop ============================
     private tick = (ts: number): void => {
-        if (this.ctx.destroyed) return;
-        const dt = this.lastTs ? Math.min(250, ts - this.lastTs) : 0;
+        if (this.destroyed) return;
+        const dt = this.lastTs ? Math.min(250, ts - this.lastTs) : 0; // cap (tab was backgrounded)
         this.lastTs = ts;
-        try { this.frame(dt); } catch (e) { console.error("[player] frame error", e); }
+        try { this.step(dt); } catch (e) { console.error("[player] step error", e); }
         this.rafId = W.requestAnimationFrame(this.tick);
     };
 
-    private frame(dtMs: number): void {
-        const c = this.ctx;
-        if (c.live) {
-            if (this.decoded.length) this.playWall = this.decoded[this.decoded.length - 1].wall;
-            this.evictLive();
-            this.drawCurrent();
-            this.emitTime();
-            return;
+    private step(dtMs: number): void {
+        if (this.live) { this.stepLive(); return; }
+
+        if (this.playing) {
+            this.playWall = this.clampWall(this.playWall + dtMs * this.comp * this.speed);
+            this.applyLoopAndGaps();
         }
-        if (c.state === "playing") {
-            // Advance comp*speed real-ms of footage per real-ms of wall-clock (comp = 30^level).
-            this.playWall = Math.min(this.spanEndMs - 1, this.playWall + dtMs * this.comp * c.speed);
-            this.handleLoopWrap();
-            this.handleGapsAndEnd();
-        }
-        void this.decodeAhead();    // keep a small window decoded ahead of the playhead
-        void this.prefetchAhead();  // prefetch GOP bytes ~PRELOAD_PLAYBACK_SEC ahead (× speed)
-        this.evictDecoded();
-        this.drawCurrent();
-        this.emitTime();
+        void this.pumpDecode();
+        void this.pumpPrefetch();
+        this.evict();
+        this.render();
+        this.updateBehind();
+        this.emit();
     }
 
-    // Emit the playhead only when it actually moved — avoids 60Hz no-op mobx churn while paused.
-    private emitTime(): void {
-        const w = Math.round(this.playWall);
-        if (w === this.lastEmittedWall) return;
-        this.lastEmittedWall = w;
-        this.onTime?.(this.playWall);
+    private clampWall(w: number): number { return Math.max(this.dayStartMs, Math.min(this.spanEndMs - 1, w)); }
+
+    // Lightweight event log -> the ⤓ debug download (scalars only). Not an FSM; just a trace.
+    private log(ev: string, arg?: string | number): void {
+        try {
+            pushFsmEntry({
+                ts: Date.now(), ev, arg, from: this.lastStatus, to: this.statusNow(),
+                ctx: {
+                    playing: this.playing, live: this.live, status: this.lastStatus,
+                    playWall: Math.round(this.playWall), shownWall: Math.round(this.shownWall),
+                    speed: this.speed, level: this.level, comp: this.comp,
+                    decoded: this.decoded.length, cached: this.bytesCache.size, fed: this.fedGops.size,
+                    feedAhead: Math.round((this.feedWall - this.playWall) / this.comp),
+                    fetchAhead: Math.round((this.fetchWall - this.playWall) / this.comp),
+                    inFlight: this.api.outstandingGops, covered: this.coveredAt(this.playWall),
+                    seekPending: this.seekPending, dropping: this.droppingFlag,
+                    loop: this.loopVal ? `${Math.round(this.loopVal.start)}-${Math.round(this.loopVal.end)}` : null,
+                },
+            });
+        } catch { /* */ }
     }
 
-    private handleLoopWrap(): void {
-        const lp = this.ctx.loop;
-        if (lp && this.ctx.state === "playing" && this.playWall >= lp.end) this.seekTo(lp.start);
-    }
-
-    // While playing, if the playhead is over a gap (or past the end), act per gapMode.
-    private handleGapsAndEnd(): void {
-        if (this.ctx.state !== "playing") return;
+    // Loop wrap, gap crossing, and natural end-of-footage pause (only while playing).
+    private applyLoopAndGaps(): void {
+        const lp = this.loopVal;
+        if (lp && this.playWall >= lp.end) { this.seekTo(lp.start); return; }
         if (this.coveredAt(this.playWall)) return;
         const next = this.nextRangeStart(this.playWall);
-        if (this.ctx.gapMode === "skip") {
-            if (next != null) { this.action(`skipGap->${Math.round(next)}`); this.playWall = next; }
-            else this.dispatch({ type: "PAUSE_AT_END" });
-            return;
+        if (this.gapModeVal === "skip") {
+            if (next != null) { this.log("SKIPGAP", Math.round(next)); this.seekTo(next); } // jump over the gap
+            else { this.playing = false; this.log("END"); }                                  // nothing ahead -> stop
+        } else { // blank: keep advancing through the gap (render paints the card); stop only at the true end
+            if (next == null && !this.hasFootageAhead(this.playWall)) { this.playing = false; this.log("END"); }
         }
-        // blank: keep advancing (drawCurrent paints the missing-video card); pause only at the true end.
-        if (next == null && !this.hasFootageAhead(this.playWall)) this.dispatch({ type: "PAUSE_AT_END" });
     }
 
     // ============================ drawing ============================
-    private bestFrameAt(wall: number): { wall: number; frame: any } | undefined {
-        let best: { wall: number; frame: any } | undefined;
+    private bestFrameAt(wall: number): Decoded | undefined {
+        let best: Decoded | undefined;
         for (const d of this.decoded) { if (d.wall <= wall) best = d; else break; }
         return best;
     }
+    private inGap(): boolean { return !this.coveredAt(this.playWall) && this.ranges.length > 0; }
 
-    private drawCurrent(): void {
-        const c = this.ctx;
-        // Over a gap (review): paint the missing-video card with a live-updating timestamp.
-        // Shown for both gap modes when not covered — "skip" only actively jumps the playhead
-        // while PLAYING (handleGapsAndEnd); a paused/seeking landing in a gap still shows this.
-        if (!c.live && !this.coveredAt(this.playWall) && this.ranges.length) {
-            this.drawBlank(this.playWall);
-            if (c.state === "seeking") this.dispatch({ type: "FRAME_SHOWN", wall: this.playWall, token: c.fetchToken });
-            return;
-        }
+    private render(): void {
+        if (this.inGap()) { this.drawBlank(this.playWall); this.shownWall = this.playWall; return; }
         const best = this.bestFrameAt(this.playWall);
-        if (best) {
-            this.drawFrame(best.frame);
-            if (c.state === "seeking") this.dispatch({ type: "FRAME_SHOWN", wall: this.playWall, token: c.fetchToken });
-        }
-        // else: target frame not decoded yet — keep the previous canvas contents.
+        if (best) { this.drawFrame(best.frame); this.shownWall = best.wall; }
+        // else: target frame not decoded yet — keep whatever's on the canvas.
     }
 
     private drawFrame(frame: any): void {
@@ -373,7 +237,7 @@ export class DayPlayer {
         const ctx = this.c2d, w = this.canvas.width, h = this.canvas.height;
         ctx.fillStyle = "#0a0a0a"; ctx.fillRect(0, 0, w, h);
         ctx.textAlign = "center"; ctx.textBaseline = "middle";
-        ctx.fillStyle = "rgba(255,255,255,0.5)";
+        ctx.fillStyle = "rgba(255,255,255,0.45)";
         ctx.font = `${Math.round(h * 0.05)}px sans-serif`;
         ctx.fillText("No video at", w / 2, h / 2 - h * 0.06);
         ctx.fillStyle = "rgba(255,255,255,0.9)";
@@ -381,17 +245,69 @@ export class DayPlayer {
         ctx.fillText(clockHMS(wall), w / 2, h / 2 + h * 0.04);
     }
 
-    // ============================ decode pump ============================
-    private hasCurrentFrame(): boolean {
-        // Over a gap we can always settle immediately (blank card / skip handles it).
-        if (!this.coveredAt(this.playWall)) return this.ranges.length > 0;
-        return !!this.bestFrameAt(this.playWall);
+    // ============================ behind / dropping ============================
+    private frameIntervalMs(): number { return (this.comp * 1000) / FPS; }
+
+    private updateBehind(): void {
+        const now = Date.now();
+        const best = this.bestFrameAt(this.playWall);
+        const inGap = this.inGap();
+        const tol = BEHIND_FRAMES * this.frameIntervalMs();
+        const haveTarget = inGap || (!!best && (this.playWall - best.wall) <= tol);
+        if (haveTarget) this.seekPending = false; // the seek/jump target is now on screen
+
+        // "behind" = we're playing past a settled seek, the area is covered, but we can't
+        // show a current frame (decoder can't keep up). NOT the same as a fresh seek (yellow).
+        const behind = this.playing && !this.live && !this.seekPending && !inGap && this.coveredAt(this.playWall) && !haveTarget;
+        if (behind) {
+            this.lastBehindTs = now;
+            if (!this.wasBehind || now - this.lastWarnTs >= WARN_THROTTLE_MS) {
+                const behindMs = best ? Math.round((this.playWall - best.wall) / this.comp) : -1;
+                console.warn(`[player] dropping frames — can't keep up (behind ${behindMs >= 0 ? behindMs + "ms playback" : "starved"}, decoded=${this.decoded.length})`);
+                this.lastWarnTs = now;
+            }
+            if (!this.wasBehind) this.log("BEHIND", best ? Math.round((this.playWall - best.wall) / this.comp) : -1);
+            // Far behind: the decoder backlog is stale. Drop it and resync to the playhead.
+            const window = DECODE_AHEAD_SEC * 1000 * this.comp;
+            if (best && (this.playWall - best.wall) > RESYNC_AHEAD_MULT * window && now - this.lastResyncTs > 500) {
+                this.lastResyncTs = now;
+                console.warn("[player] resync: dropping stale decode backlog");
+                this.log("RESYNC");
+                this.beginSeek(); // reset decoder + caches at the current playWall
+            }
+        }
+        this.wasBehind = behind;
+        this.droppingFlag = this.playing && (now - this.lastBehindTs) < DROP_HYSTERESIS_MS;
     }
 
-    private aheadFrames(): number {
-        let n = 0;
-        for (const d of this.decoded) if (d.wall > this.playWall) n++;
-        return n;
+    // ============================ emit derived signals ============================
+    private statusNow(): PlayStatus {
+        if (this.live) return this.decoded.length ? "playing" : "waiting";
+        if (!this.ranges.length) return "unavailable";
+        if (this.seekPending) return this.playing ? "waiting" : "paused";
+        return this.playing ? "playing" : "paused";
+    }
+    private emit(): void {
+        const w = Math.round(this.playWall);
+        if (w !== this.lastEmittedWall) { this.lastEmittedWall = w; this.onTime?.(this.playWall); }
+        const s = this.statusNow();
+        if (s !== this.lastStatus) { this.lastStatus = s; this.onStatus?.(s); }
+        const seeking = this.seekPending && !this.live;
+        if (seeking !== this.lastSeeking) { this.lastSeeking = seeking; this.onSeeking?.(seeking); }
+        if (this.droppingFlag !== this.lastDropping) { this.lastDropping = this.droppingFlag; this.onDropping?.(this.droppingFlag); }
+    }
+
+    // ============================ decode ============================
+    private beginSeek(): void {
+        this.seekGen++;
+        try { this.api.cancelStaleGops(); } catch { /* */ }
+        if (this.decoder) { try { this.decoder.reset(); } catch { /* */ } }
+        this.decodeConfigured = false;
+        this.closeDecoded();
+        this.fedGops.clear();
+        this.bytesCache.clear();
+        this.feedWall = this.playWall;
+        this.fetchWall = this.playWall;
     }
 
     private ensureDecoder(codec: string): void {
@@ -407,43 +323,27 @@ export class DayPlayer {
     }
 
     private onDecoded(frame: any): void {
-        if (this.ctx.destroyed) { try { frame.close(); } catch { /* */ } return; }
+        if (this.destroyed) { try { frame.close(); } catch { /* */ } return; }
         const wall = frame.timestamp / 1000;
-        // insert sorted (streams are in order, so this is almost always a push)
         if (!this.decoded.length || wall >= this.decoded[this.decoded.length - 1].wall) this.decoded.push({ wall, frame });
-        else {
-            let i = this.decoded.length;
-            while (i > 0 && this.decoded[i - 1].wall > wall) i--;
-            this.decoded.splice(i, 0, { wall, frame });
-        }
+        else { let i = this.decoded.length; while (i > 0 && this.decoded[i - 1].wall > wall) i--; this.decoded.splice(i, 0, { wall, frame }); }
         if (this.decoded.length > DECODE_MAX_FRAMES) { const d = this.decoded.shift()!; try { d.frame.close(); } catch { /* */ } }
     }
 
-    private resetDecodeForSeek(): void {
-        if (this.decoder) { try { this.decoder.reset(); } catch { /* */ } }
-        this.decodeConfigured = false;
-        this.closeDecoded();
-        this.fedGops.clear();
-        this.bytesCache.clear();
-        this.feedWall = this.playWall;
-        this.fetchWall = this.playWall;
-    }
-
-    // Per-frame wall times inside a GOP, spreading n frames over its real span.
+    // Per-frame wall times inside a GOP, spread over its real span (don't stretch over a gap).
     private frameWalls(g: GopEntry, n: number): number[] {
-        const nominal = (g.n / FPS) * 1000 * this.comp;       // expected real span of the GOP
+        const nominal = (g.n / FPS) * 1000 * this.comp;
         const next = this.nextStartWallSync(g);
         let span = next != null ? next - g.t : nominal;
-        if (!(span > 0) || span > nominal * 2) span = nominal;  // gap after this GOP -> don't stretch
+        if (!(span > 0) || span > nominal * 2) span = nominal;
         const step = span / Math.max(1, n);
         const out: number[] = [];
         for (let i = 0; i < n; i++) out.push(g.t + i * step);
         return out;
     }
 
-    // Decode one GOP's bytes into the decoder (no fetching — bytes are supplied).
     private feedDecoder(g: GopEntry, data: Buffer): boolean {
-        if (this.ctx.destroyed || this.ctx.live) return false;
+        if (this.destroyed || this.live) return false;
         const { nals, units } = accessUnitsFromGop(data);
         if (!units.length) return false;
         this.ensureDecoder(codecFromSps(nals));
@@ -457,79 +357,77 @@ export class DayPlayer {
         return true;
     }
 
-    // DECODE pump: keep only a small window decoded ahead of the playhead. Bounded by how
-    // far we've FED (feedWall, updated synchronously per GOP) — NOT by the decoder's async
-    // output count, which lags far behind feeding and would let us overfeed/over-fetch every
-    // tick. Bytes come from the prefetch cache when available; the seek/play target is
-    // fetched with priority on a miss. Subordinate to seeks via bufferGen.
-    private async decodeAhead(): Promise<void> {
-        if (this.decoding || this.ctx.live || this.ctx.destroyed) return;
+    // DECODE pump: keep a small window decoded ahead of the playhead. Bounded by how far
+    // we've FED (feedWall, synchronous) — never by the decoder's async output, which lags.
+    private async pumpDecode(): Promise<void> {
+        if (this.decoding || this.live || this.destroyed) return;
         this.decoding = true;
-        const gen = this.bufferGen;
+        const gen = this.seekGen;
+        const horizon = DECODE_AHEAD_SEC * 1000 * this.comp * Math.max(1, this.speed);
         try {
             let guard = 0;
-            const horizon = DECODE_AHEAD_SEC * 1000 * this.comp * Math.max(1, this.ctx.speed);
-            while (gen === this.bufferGen && !this.ctx.destroyed && !this.ctx.live
+            while (gen === this.seekGen && !this.destroyed && !this.live
                 && this.decoded.length < DECODE_MAX_FRAMES
                 && (this.decoded.length === 0 || this.feedWall < this.playWall + horizon)) {
-                if (++guard > 64) break;
-                const isFirst = this.decoded.length === 0;
-                // First fill after a seek: the GOP at the playhead (or, if the playhead is in
-                // a gap, the next GOP ahead). Look-ahead: the GOP after the last fed.
-                const g = isFirst
-                    ? (this.coveredAt(this.playWall) ? await this.gopAt2(this.playWall) : (await this.gopsAhead(this.playWall, 1))[0])
+                if (++guard > 32) break;
+                const first = this.decoded.length === 0;
+                const sel = first
+                    ? (this.coveredAt(this.playWall) ? await this.gopAt(this.playWall) : (await this.gopsAhead(this.playWall, 1))[0])
                     : (await this.gopsAhead(this.feedWall, 1))[0];
-                if (!g) break;                         // nothing here/ahead (gap-end or footage-end)
-                if (this.fedGops.has(g.g.t)) { this.feedWall = g.g.t + this.gopDurMs(g.g) + 1; continue; }
-                let data = this.bytesCache.get(g.g.t);
-                if (data) this.bytesCache.delete(g.g.t);
-                else data = await this.fetchGopData(g.g, isFirst);  // miss -> fetch (priority for the target)
-                if (gen !== this.bufferGen || this.ctx.destroyed || this.ctx.live) break;
-                this.fedGops.add(g.g.t);
-                if (!this.feedDecoder(g.g, data)) { this.fedGops.delete(g.g.t); break; }
-                this.recordFetched(g.g);
-                this.feedWall = g.g.t + this.gopDurMs(g.g) + 1;
-                if (isFirst && this.decoder) { try { await this.decoder.flush(); } catch { /* */ } } // surface the target promptly
+                if (!sel) break;
+                const g = sel.g;
+                if (this.fedGops.has(g.t)) { this.feedWall = g.t + this.gopDurMs(g) + 1; continue; }
+                let data = this.bytesCache.get(g.t);
+                if (data) this.bytesCache.delete(g.t);
+                else data = await this.fetchGopData(g, first); // miss -> fetch (priority for the target)
+                if (gen !== this.seekGen || this.destroyed || this.live) break;
+                this.fedGops.add(g.t);
+                if (!this.feedDecoder(g, data)) { this.fedGops.delete(g.t); break; }
+                this.recordFetched(g);
+                this.feedWall = g.t + this.gopDurMs(g) + 1;
+                if (first && this.decoder) { try { await this.decoder.flush(); } catch { /* */ } } // surface the target promptly
             }
         } finally { this.decoding = false; }
     }
 
-    // PREFETCH pump: fetch GOP *bytes* ahead of the playhead up to PRELOAD_PLAYBACK_SEC of
-    // playback (scaled by speed: faster playback drains faster, so look further). Bytes are
-    // cached for the decode pump to consume — this bounds network preloading to ~10s of
-    // upcoming content instead of racing arbitrarily far ahead.
-    private async prefetchAhead(): Promise<void> {
-        if (this.prefetching || this.ctx.live || this.ctx.destroyed) return;
+    // PREFETCH pump: fetch GOP *bytes* ~PRELOAD_PLAYBACK_SEC of playback ahead (× speed),
+    // cached for the decode pump. Bounds network preloading instead of racing arbitrarily far.
+    private async pumpPrefetch(): Promise<void> {
+        if (this.prefetching || this.live || this.destroyed) return;
         this.prefetching = true;
-        const gen = this.bufferGen;
+        const gen = this.seekGen;
+        const horizon = PRELOAD_PLAYBACK_SEC * 1000 * this.comp * Math.max(1, this.speed);
         try {
-            const horizon = PRELOAD_PLAYBACK_SEC * 1000 * this.comp * Math.max(1, this.ctx.speed);
             let guard = 0;
-            while (gen === this.bufferGen && !this.ctx.destroyed && !this.ctx.live && this.fetchWall < this.playWall + horizon) {
-                if (++guard > 256) break;
-                const g = (await this.gopsAhead(this.fetchWall, 1))[0];
-                if (!g) break;
-                this.fetchWall = g.g.t + this.gopDurMs(g.g) + 1;
-                const t = g.g.t;
-                if (this.bytesCache.has(t) || this.fedGops.has(t) || this.pendingGops.has(t)) continue;
-                if (gen !== this.bufferGen) break;
+            while (gen === this.seekGen && !this.destroyed && !this.live && this.fetchWall < this.playWall + horizon) {
+                if (++guard > 64) break;
+                const sel = (await this.gopsAhead(this.fetchWall, 1))[0];
+                if (!sel) break;
+                const g = sel.g;
+                this.fetchWall = g.t + this.gopDurMs(g) + 1;
+                if (this.bytesCache.has(g.t) || this.fedGops.has(g.t) || this.pendingGops.has(g.t)) continue;
+                if (gen !== this.seekGen) break;
                 try {
-                    const data = await this.fetchGopData(g.g, false); // cancellable background prefetch
-                    if (gen === this.bufferGen && !this.ctx.destroyed && !this.ctx.live) { this.bytesCache.set(t, data); this.recordFetched(g.g); this.trimCaches(); }
-                } catch { /* cancelled / failed — decode pump will refetch on demand */ }
+                    const data = await this.fetchGopData(g, false); // cancellable background prefetch
+                    if (gen === this.seekGen && !this.destroyed && !this.live) { this.bytesCache.set(g.t, data); this.recordFetched(g); this.trimCaches(); }
+                } catch { /* cancelled / failed — decode pump refetches on demand */ }
             }
         } finally { this.prefetching = false; }
     }
 
-    // Bound the prefetch byte cache and the fed-GOP set (drop entries well behind the playhead).
     private trimCaches(): void {
         const behind = this.playWall - this.comp * 1000;
         for (const t of Array.from(this.bytesCache.keys())) if (t < behind) this.bytesCache.delete(t);
         while (this.bytesCache.size > BYTES_CACHE_MAX) { const k = this.bytesCache.keys().next().value as number; this.bytesCache.delete(k); }
-        if (this.fedGops.size > 600) { for (const t of Array.from(this.fedGops)) if (t < behind) this.fedGops.delete(t); }
+        if (this.fedGops.size > 600) for (const t of Array.from(this.fedGops)) if (t < behind) this.fedGops.delete(t);
     }
 
-    // ============================ index / fetch (unchanged plumbing) ============================
+    private evict(): void {
+        while (this.decoded.length >= 2 && this.decoded[1].wall <= this.playWall) { const d = this.decoded.shift()!; try { d.frame.close(); } catch { /* */ } }
+    }
+    private closeDecoded(): void { for (const d of this.decoded) { try { d.frame.close(); } catch { /* */ } } this.decoded = []; }
+
+    // ============================ index / fetch ============================
     private hourNumOf(wall: number): number { return Math.floor((wall - this.dayStartMs) / 3600_000); }
     private gopDurMs(g: GopEntry): number { return this.level > 0 ? Math.max(1, g.e - g.t) : Math.round((g.n / FPS) * 1000); }
     private coveredAt(wall: number): boolean { return this.ranges.some(r => wall >= r.start && wall <= r.end + 500); }
@@ -558,47 +456,44 @@ export class DayPlayer {
         return this.hourCache.get(hh) || [];
     }
 
-    // GOP at-or-before `wall` (level-aware), as { hh, g } — the GOP whose IDR we feed.
-    private async gopAt2(wall: number): Promise<{ hh: string; g: GopEntry } | undefined> {
+    private async gopAt(wall: number): Promise<{ g: GopEntry } | undefined> {
         if (this.level > 0) {
             await this.ensureLevelLoaded();
             let found: GopEntry | undefined;
             for (const g of this.levelGops) { if (g.t <= wall) found = g; else break; }
             if (!found && this.levelGops.length) found = this.levelGops[0];
-            return found ? { hh: "", g: found } : undefined;
+            return found ? { g: found } : undefined;
         }
         const base = this.hourNumOf(wall);
         for (let hn = base; hn >= Math.max(0, base - 3); hn--) {
             const gops = await this.ensureHour(hn);
             let found: GopEntry | undefined;
             for (const g of gops) { if (g.t <= wall) found = g; else break; }
-            if (found) return { hh: pad2(hn), g: found };
+            if (found) return { g: found };
         }
         for (let hn = base; hn <= Math.min(23, base + 3); hn++) {
             const gops = await this.ensureHour(hn);
-            if (gops.length) return { hh: pad2(hn), g: gops[0] };
+            if (gops.length) return { g: gops[0] };
         }
         return undefined;
     }
 
-    private async gopsAhead(fromWall: number, count: number): Promise<{ hh: string; g: GopEntry }[]> {
-        const out: { hh: string; g: GopEntry }[] = [];
+    private async gopsAhead(fromWall: number, count: number): Promise<{ g: GopEntry }[]> {
+        const out: { g: GopEntry }[] = [];
         if (this.level > 0) {
             await this.ensureLevelLoaded();
-            for (const g of this.levelGops) { if (g.t + this.gopDurMs(g) < fromWall) continue; out.push({ hh: "", g }); if (out.length >= count) break; }
+            for (const g of this.levelGops) { if (g.t + this.gopDurMs(g) < fromWall) continue; out.push({ g }); if (out.length >= count) break; }
             return out;
         }
         for (let hn = this.hourNumOf(fromWall); hn <= 23 && out.length < count; hn++) {
-            const hh = pad2(hn);
-            for (const g of await this.ensureHour(hn)) { if (g.t + this.gopDurMs(g) < fromWall) continue; out.push({ hh, g }); if (out.length >= count) break; }
+            for (const g of await this.ensureHour(hn)) { if (g.t + this.gopDurMs(g) < fromWall) continue; out.push({ g }); if (out.length >= count) break; }
         }
         return out;
     }
 
     private nextStartWallSync(g: GopEntry): number | null {
         if (this.level > 0) { for (const x of this.levelGops) if (x.t > g.t) return x.t; return null; }
-        const hn = this.hourNumOf(g.t);
-        for (let h = hn; h <= 23; h++) { const gops = this.hourCache.get(pad2(h)); if (!gops) continue; for (const x of gops) if (x.t > g.t) return x.t; }
+        for (let h = this.hourNumOf(g.t); h <= 23; h++) { const gops = this.hourCache.get(pad2(h)); if (!gops) continue; for (const x of gops) if (x.t > g.t) return x.t; }
         return null;
     }
 
@@ -613,12 +508,8 @@ export class DayPlayer {
         } finally { this.pendingGops.delete(g.t); this.firePending(); }
     }
 
-    private recordFetched(g: GopEntry): void {
-        this.fetched.set(g.t, { start: g.t, end: g.t + this.gopDurMs(g) });
-        this.firePending();
-    }
+    private recordFetched(g: GopEntry): void { this.fetched.set(g.t, { start: g.t, end: g.t + this.gopDurMs(g) }); this.firePending(); }
 
-    // Merged wall-clock spans of GOPs we've fetched/decoded (drives the green loaded band).
     bufferedWallRanges(): { start: number; end: number }[] {
         const items = Array.from(this.fetched.values()).sort((a, b) => a.start - b.start);
         const out: { start: number; end: number }[] = [];
@@ -630,38 +521,36 @@ export class DayPlayer {
         return out;
     }
 
-    // ============================ frame memory management ============================
-    private evictDecoded(): void {
-        // Keep the current best (<=playWall) plus everything ahead; drop older ones.
-        while (this.decoded.length >= 2 && this.decoded[1].wall <= this.playWall) {
-            const d = this.decoded.shift()!; try { d.frame.close(); } catch { /* */ }
-        }
-    }
-    private evictLive(): void {
-        while (this.decoded.length > LIVE_KEEP_FRAMES) { const d = this.decoded.shift()!; try { d.frame.close(); } catch { /* */ } }
-    }
-    private closeDecoded(): void { for (const d of this.decoded) { try { d.frame.close(); } catch { /* */ } } this.decoded = []; }
-
     // ============================ live ============================
+    private beginLive(): void {
+        if (this.live || this.destroyed) return;
+        this.live = true; this.playing = true; this.seekPending = false; this.droppingFlag = false;
+        this.log("LIVE_START");
+        this.liveOp = this.doStartLive();
+    }
+    private endLive(): void {
+        if (!this.live) { this.liveOp = Promise.resolve(); return; }
+        this.live = false; this.playing = false;
+        this.log("LIVE_STOP");
+        this.liveOp = this.doStopLive();
+    }
     private async doStartLive(): Promise<void> {
         this.disposeDecoder();
         this.fetched.clear(); this.pendingGops.clear(); this.firePending();
         this.liveChain = Promise.resolve();
         try { await this.api.startStream(this.dayParts.join("/"), (meta, bytes) => void this.onLiveData(meta, bytes)); }
-        catch (e) { this.ctx.live = false; this.ctx.state = "paused"; this.syncOutputs(); throw e; }
+        catch (e) { this.live = false; this.playing = false; throw e; }
     }
-
     private async doStopLive(): Promise<void> {
         try { await this.api.stopStream(); } catch { /* */ }
         this.disposeDecoder();
     }
-
     private onLiveData(meta: { t: number; e: number; n: number }, bytes: Uint8Array): void {
-        if (!this.ctx.live) return;
+        if (!this.live) return;
         this.liveChain = this.liveChain.then(() => this.feedLive(meta, bytes)).catch(() => { /* */ });
     }
     private async feedLive(meta: { t: number; e: number; n: number }, bytes: Uint8Array): Promise<void> {
-        if (!this.ctx.live) return;
+        if (!this.live) return;
         const { nals, units } = accessUnitsFromGop(Buffer.from(bytes));
         if (!units.length) return;
         this.ensureDecoder(codecFromSps(nals));
@@ -674,6 +563,14 @@ export class DayPlayer {
             catch { return; }
         }
     }
+    // Live: follow the newest decoded frame, dropping backlog so we stay real-time.
+    private stepLive(): void {
+        if (this.decoded.length) this.playWall = this.decoded[this.decoded.length - 1].wall;
+        while (this.decoded.length > LIVE_KEEP_FRAMES) { const d = this.decoded.shift()!; try { d.frame.close(); } catch { /* */ } }
+        const newest = this.decoded[this.decoded.length - 1];
+        if (newest) { this.drawFrame(newest.frame); this.shownWall = newest.wall; }
+        this.emit();
+    }
 
     // ============================ teardown ============================
     private disposeDecoder(): void {
@@ -682,6 +579,7 @@ export class DayPlayer {
         this.closeDecoded(); this.fedGops.clear(); this.bytesCache.clear();
     }
     private doTeardown(): void {
+        this.destroyed = true;
         if (this.rafId != null && W.cancelAnimationFrame) { try { W.cancelAnimationFrame(this.rafId); } catch { /* */ } }
         this.rafId = undefined;
         try { void this.api.stopStream(); } catch { /* */ }
@@ -689,5 +587,3 @@ export class DayPlayer {
         this.fetched.clear(); this.pendingGops.clear(); this.hourCache.clear();
     }
 }
-
-function pad2(n: number): string { return String(n).padStart(2, "0"); }

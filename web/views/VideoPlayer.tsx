@@ -24,8 +24,9 @@ export class VideoPlayer extends preact.Component {
                         style={{
                             width: "100%", maxWidth: "1200px", maxHeight: "calc(100vh - 150px)", aspectRatio: "16 / 9",
                             background: "#000", objectFit: "contain", cursor: "pointer",
-                            // outline (not border) so it never shifts layout; shown while the seeked frame isn't rendered yet
-                            outline: state.seeking ? "3px solid hsl(45,100%,60%)" : "none", outlineOffset: "-3px",
+                            // outline (not border) so it never shifts layout: red while dropping frames
+                            // (decoder can't keep up), else yellow while a seek target hasn't rendered yet
+                            outline: state.dropping ? "3px solid hsl(0,90%,55%)" : state.seeking ? "3px solid hsl(45,100%,60%)" : "none", outlineOffset: "-3px",
                         }}
                         onMouseDown={(e: any) => { e.preventDefault(); if (!state.live) { player?.togglePlay(); saveUrlPosition(state.playWall); } }} />
                     {state.live
