@@ -57,8 +57,10 @@ interface Ctx {
 }
 
 const DAY_MS = 24 * 3600 * 1000;
-const DECODE_MAX_FRAMES = 90;     // cap decoded VideoFrames held in memory (~3s @30fps)
-const DECODE_AHEAD_FRAMES = 60;   // stop the pump once this many frames are queued ahead
+const DECODE_MAX_FRAMES = 90;     // hard cap on decoded VideoFrames held in memory (~3s @30fps)
+const DECODE_AHEAD_FRAMES = 60;   // keep ~2s of frames decoded ahead of the playhead
+const PRELOAD_PLAYBACK_SEC = 10;  // prefetch GOP *bytes* this many playback-seconds ahead (× speed)
+const BYTES_CACHE_MAX = 64;       // hard cap on prefetched GOP byte buffers held
 const LIVE_KEEP_FRAMES = 4;       // live: keep only the newest few decoded frames
 const LOG_HEARTBEAT_MS = 1500;
 const W: any = typeof window !== "undefined" ? window : {};
@@ -73,8 +75,11 @@ export class DayPlayer {
     private decodeConfigured = false;
     private decoded: { wall: number; frame: any }[] = []; // VideoFrame[], sorted asc by wall
     private fedGops = new Set<number>();        // g.t of GOPs already fed to the decoder
-    private feedWall = 0;                        // wall from which the pump fetches the next GOP
-    private decoding = false;                    // fillDecode re-entry guard
+    private feedWall = 0;                        // wall from which the decode pump takes the next GOP
+    private fetchWall = 0;                        // wall up to which the prefetch pump has fetched bytes
+    private bytesCache = new Map<number, Buffer>(); // prefetched GOP bytes (g.t -> bytes), awaiting decode
+    private decoding = false;                    // decodeAhead re-entry guard
+    private prefetching = false;                 // prefetchAhead re-entry guard
     private bufferGen = 0;                        // bumped on SEEK to abandon stale look-ahead
 
     private pendingGops = new Set<number>();    // GOP.t with a data fetch in flight (yellow markers)
@@ -120,6 +125,7 @@ export class DayPlayer {
         this.c2d = canvas.getContext("2d");
         this.playWall = dayStartMs;
         this.feedWall = dayStartMs;
+        this.fetchWall = dayStartMs;
         this.ctx = {
             state: "idle", intent: "pause", shownWall: -1, pumpGen: 0, fetchToken: 0,
             speed: 1, live: false, gapMode: "blank", loop: null,
@@ -222,7 +228,7 @@ export class DayPlayer {
         }
         // The rAF loop drives drawing/pumping for seeking/playing/paused; nothing to do
         // synchronously here beyond kicking the decode pump for responsiveness.
-        if (to === "seeking" || to === "playing") void this.fillDecode();
+        if (to === "seeking" || to === "playing") void this.decodeAhead();
     }
 
     private syncOutputs(): void {
@@ -264,7 +270,8 @@ export class DayPlayer {
             intent: c.intent, status: c.status, gapMode: c.gapMode,
             playWall: Math.round(this.playWall), shownWall: Math.round(c.shownWall),
             speed: c.speed, level: this.level, comp: this.comp, live: c.live,
-            fetchToken: c.fetchToken, decoded: this.decoded.length, fed: this.fedGops.size,
+            fetchToken: c.fetchToken, decoded: this.decoded.length, ahead: this.aheadFrames(),
+            cached: this.bytesCache.size, fed: this.fedGops.size,
             inFlight: this.api.outstandingGops, covered: this.coveredAt(this.playWall),
             footageAhead: this.hasFootageAhead(this.playWall),
             loop: c.loop ? `${Math.round(c.loop.start)}-${Math.round(c.loop.end)}` : null,
@@ -295,7 +302,8 @@ export class DayPlayer {
             this.handleLoopWrap();
             this.handleGapsAndEnd();
         }
-        void this.fillDecode();
+        void this.decodeAhead();    // keep a small window decoded ahead of the playhead
+        void this.prefetchAhead();  // prefetch GOP bytes ~PRELOAD_PLAYBACK_SEC ahead (× speed)
         this.evictDecoded();
         this.drawCurrent();
         this.emitTime();
@@ -416,7 +424,9 @@ export class DayPlayer {
         this.decodeConfigured = false;
         this.closeDecoded();
         this.fedGops.clear();
+        this.bytesCache.clear();
         this.feedWall = this.playWall;
+        this.fetchWall = this.playWall;
     }
 
     // Per-frame wall times inside a GOP, spreading n frames over its real span.
@@ -431,8 +441,8 @@ export class DayPlayer {
         return out;
     }
 
-    private async feedGop(g: GopEntry, priority: boolean): Promise<boolean> {
-        const data = await this.fetchGopData(g, priority);
+    // Decode one GOP's bytes into the decoder (no fetching — bytes are supplied).
+    private feedDecoder(g: GopEntry, data: Buffer): boolean {
         if (this.ctx.destroyed || this.ctx.live) return false;
         const { nals, units } = accessUnitsFromGop(data);
         if (!units.length) return false;
@@ -447,9 +457,11 @@ export class DayPlayer {
         return true;
     }
 
-    // Keep the decoder fed: the GOP at the playhead first, then look-ahead, bounded by
-    // DECODE_AHEAD_FRAMES / DECODE_MAX_FRAMES. Subordinate to seeks via bufferGen.
-    private async fillDecode(): Promise<void> {
+    // DECODE pump: keep only a small window decoded ahead of the playhead (memory-bounded
+    // by DECODE_AHEAD_FRAMES / DECODE_MAX_FRAMES). Bytes come from the prefetch cache when
+    // available; the seek/play target is fetched with priority on a miss. Subordinate to
+    // seeks via bufferGen.
+    private async decodeAhead(): Promise<void> {
         if (this.decoding || this.ctx.live || this.ctx.destroyed) return;
         this.decoding = true;
         const gen = this.bufferGen;
@@ -459,23 +471,59 @@ export class DayPlayer {
                 && this.decoded.length < DECODE_MAX_FRAMES && this.aheadFrames() < DECODE_AHEAD_FRAMES) {
                 if (++guard > 64) break;
                 const isFirst = this.decoded.length === 0;
-                // First fill after a seek: feed the GOP at the playhead (or, if the playhead
-                // is in a gap, the next GOP ahead). Look-ahead: the GOP after the last fed.
+                // First fill after a seek: the GOP at the playhead (or, if the playhead is in
+                // a gap, the next GOP ahead). Look-ahead: the GOP after the last fed.
                 const g = isFirst
                     ? (this.coveredAt(this.playWall) ? await this.gopAt2(this.playWall) : (await this.gopsAhead(this.playWall, 1))[0])
                     : (await this.gopsAhead(this.feedWall, 1))[0];
                 if (!g) break;                         // nothing here/ahead (gap-end or footage-end)
                 if (this.fedGops.has(g.g.t)) { this.feedWall = g.g.t + this.gopDurMs(g.g) + 1; continue; }
-                if (gen !== this.bufferGen) break;
+                let data = this.bytesCache.get(g.g.t);
+                if (data) this.bytesCache.delete(g.g.t);
+                else data = await this.fetchGopData(g.g, isFirst);  // miss -> fetch (priority for the target)
+                if (gen !== this.bufferGen || this.ctx.destroyed || this.ctx.live) break;
                 this.fedGops.add(g.g.t);
-                const ok = await this.feedGop(g.g, isFirst);  // the seek/play target frame is priority
-                if (!ok) { this.fedGops.delete(g.g.t); break; }
+                if (!this.feedDecoder(g.g, data)) { this.fedGops.delete(g.g.t); break; }
                 this.recordFetched(g.g);
                 this.feedWall = g.g.t + this.gopDurMs(g.g) + 1;
-                // force the target frame to surface promptly on a seek
-                if (isFirst && this.decoder) { try { await this.decoder.flush(); } catch { /* */ } }
+                if (isFirst && this.decoder) { try { await this.decoder.flush(); } catch { /* */ } } // surface the target promptly
             }
         } finally { this.decoding = false; }
+    }
+
+    // PREFETCH pump: fetch GOP *bytes* ahead of the playhead up to PRELOAD_PLAYBACK_SEC of
+    // playback (scaled by speed: faster playback drains faster, so look further). Bytes are
+    // cached for the decode pump to consume — this bounds network preloading to ~10s of
+    // upcoming content instead of racing arbitrarily far ahead.
+    private async prefetchAhead(): Promise<void> {
+        if (this.prefetching || this.ctx.live || this.ctx.destroyed) return;
+        this.prefetching = true;
+        const gen = this.bufferGen;
+        try {
+            const horizon = PRELOAD_PLAYBACK_SEC * 1000 * this.comp * Math.max(1, this.ctx.speed);
+            let guard = 0;
+            while (gen === this.bufferGen && !this.ctx.destroyed && !this.ctx.live && this.fetchWall < this.playWall + horizon) {
+                if (++guard > 256) break;
+                const g = (await this.gopsAhead(this.fetchWall, 1))[0];
+                if (!g) break;
+                this.fetchWall = g.g.t + this.gopDurMs(g.g) + 1;
+                const t = g.g.t;
+                if (this.bytesCache.has(t) || this.fedGops.has(t) || this.pendingGops.has(t)) continue;
+                if (gen !== this.bufferGen) break;
+                try {
+                    const data = await this.fetchGopData(g.g, false); // cancellable background prefetch
+                    if (gen === this.bufferGen && !this.ctx.destroyed && !this.ctx.live) { this.bytesCache.set(t, data); this.recordFetched(g.g); this.trimCaches(); }
+                } catch { /* cancelled / failed — decode pump will refetch on demand */ }
+            }
+        } finally { this.prefetching = false; }
+    }
+
+    // Bound the prefetch byte cache and the fed-GOP set (drop entries well behind the playhead).
+    private trimCaches(): void {
+        const behind = this.playWall - this.comp * 1000;
+        for (const t of Array.from(this.bytesCache.keys())) if (t < behind) this.bytesCache.delete(t);
+        while (this.bytesCache.size > BYTES_CACHE_MAX) { const k = this.bytesCache.keys().next().value as number; this.bytesCache.delete(k); }
+        if (this.fedGops.size > 600) { for (const t of Array.from(this.fedGops)) if (t < behind) this.fedGops.delete(t); }
     }
 
     // ============================ index / fetch (unchanged plumbing) ============================
@@ -628,7 +676,7 @@ export class DayPlayer {
     private disposeDecoder(): void {
         if (this.decoder) { try { this.decoder.close(); } catch { /* */ } this.decoder = undefined; }
         this.decoderCodec = ""; this.decodeConfigured = false;
-        this.closeDecoded(); this.fedGops.clear();
+        this.closeDecoded(); this.fedGops.clear(); this.bytesCache.clear();
     }
     private doTeardown(): void {
         if (this.rafId != null && W.cancelAnimationFrame) { try { W.cancelAnimationFrame(this.rafId); } catch { /* */ } }
