@@ -8,18 +8,19 @@ import { saveUrlPosition } from "../helpers/navigation";
 import { setLoopRegion } from "../helpers/trackbarHelpers";
 import { computeRegions, regionsGopCount, ActivityRegion } from "../helpers/activityRegions";
 import { getThumbUrl } from "../helpers/thumbnails";
-import { navBtnCss } from "../helpers/styles";
 
-const ROW_H = 64;       // fixed card height (px) — makes virtualization trivial
-const OVERSCAN = 3;     // rows rendered beyond the viewport on each side
+const CARD_W = 200;     // target card width (px) — column count derives from this
+const CARD_H = 132;     // fixed card height (px) — makes row virtualization trivial
+const OVERSCAN = 2;     // extra rows rendered beyond the viewport on each side
 
 // Activity-region browser: collapsed by default, expands into a virtualized,
-// scrollable list of region thumbnails. Shown above the date picker.
+// scrollable GRID of region thumbnails. Shown above the date picker. Clicking a
+// card immediately seeks to that region and loops it (no separate loop button).
 @observer
-export class ActivityPanel extends preact.Component<{}, { scrollTop: number; viewportH: number }> {
-    state = { scrollTop: 0, viewportH: 0 };
-    private onScroll = (e: any) => { this.setState({ scrollTop: e.target.scrollTop, viewportH: e.target.clientHeight }); };
-    private setScroller = (el: HTMLElement | null) => { if (el && !this.state.viewportH) this.setState({ viewportH: el.clientHeight }); };
+export class ActivityPanel extends preact.Component<{}, { scrollTop: number; viewportH: number; viewportW: number }> {
+    state = { scrollTop: 0, viewportH: 0, viewportW: 0 };
+    private onScroll = (e: any) => { this.setState({ scrollTop: e.target.scrollTop, viewportH: e.target.clientHeight, viewportW: e.target.clientWidth }); };
+    private setScroller = (el: HTMLElement | null) => { if (el && (!this.state.viewportH || el.clientWidth !== this.state.viewportW)) this.setState({ viewportH: el.clientHeight, viewportW: el.clientWidth }); };
 
     private toggle() {
         runInAction(() => { state.activityPanelOpen = !state.activityPanelOpen; });
@@ -53,19 +54,29 @@ export class ActivityPanel extends preact.Component<{}, { scrollTop: number; vie
                 <span className={css.flexGrow(1)} />
                 <span className={css.hbox(4).alignItems("center").opacity(0.7).fontSize(11)} onClick={(e: any) => e.stopPropagation()} title="Activity threshold — a GOP counts as activity when its value is at least this">
                     threshold
-                    <input type="number" step="0.001" min="0" max="1" value={state.activityThreshold}
+                    <input type="number" step="0.0001" min="0" max="1" value={state.activityThreshold}
                         onInput={(e: any) => { const v = Number(e.target.value); runInAction(() => { state.activityThreshold = v >= 0 ? v : 0; }); saveUrlPosition(state.playWall); }}
-                        style={{ width: "64px", fontSize: "11px", padding: "1px 4px", background: "hsl(220,15%,16%)", color: "inherit", border: "1px solid hsl(220,15%,30%)" }} />
+                        style={{ width: "72px", fontSize: "11px", padding: "1px 4px", background: "hsl(220,15%,16%)", color: "inherit", border: "1px solid hsl(220,15%,30%)" }} />
                 </span>
             </div>
         );
 
-        const total = regions.length * ROW_H;
+        const w = this.state.viewportW || Math.min(1200, window.innerWidth);
+        const cols = Math.max(1, Math.floor(w / CARD_W));
+        const rows = Math.ceil(regions.length / cols);
+        const total = rows * CARD_H;
         const vh = this.state.viewportH || Math.round(window.innerHeight * 0.7);
-        const first = Math.max(0, Math.floor(this.state.scrollTop / ROW_H) - OVERSCAN);
-        const last = Math.min(regions.length, Math.ceil((this.state.scrollTop + vh) / ROW_H) + OVERSCAN);
+        const firstRow = Math.max(0, Math.floor(this.state.scrollTop / CARD_H) - OVERSCAN);
+        const lastRow = Math.min(rows, Math.ceil((this.state.scrollTop + vh) / CARD_H) + OVERSCAN);
+        const colW = 100 / cols; // percent
         const cards: preact.JSX.Element[] = [];
-        for (let i = first; i < last; i++) cards.push(this.card(regions[i], i));
+        for (let row = firstRow; row < lastRow; row++) {
+            for (let c = 0; c < cols; c++) {
+                const i = row * cols + c;
+                if (i >= regions.length) break;
+                cards.push(this.card(regions[i], row, c, colW));
+            }
+        }
 
         return (
             <div className={css.width("100%").maxWidth(1200).vbox(0)}>
@@ -79,23 +90,21 @@ export class ActivityPanel extends preact.Component<{}, { scrollTop: number; vie
         );
     }
 
-    private card(r: ActivityRegion, i: number): preact.JSX.Element {
+    private card(r: ActivityRegion, row: number, col: number, colW: number): preact.JSX.Element {
         const url = getThumbUrl({ level: state.level, t: r.peak.t }); // undefined while loading, "" on failure
         const looped = state.loopStart === r.start && state.loopEnd === r.end;
         return (
-            <div key={r.peak.t} onMouseDown={() => setLoopRegion(r.start, r.end)} title="Loop this activity region"
-                className={css.hbox(10).alignItems("center").pad2(4, 8)}
-                style={{ position: "absolute", top: (i * ROW_H) + "px", left: 0, right: 0, height: ROW_H + "px", boxSizing: "border-box", cursor: "pointer", borderBottom: "1px solid hsl(220,15%,18%)", background: looped ? "hsl(40,60%,18%)" : "transparent" }}>
-                <div className={css.hsl(220, 15, 6)} style={{ width: "96px", height: "54px", flexShrink: 0, overflow: "hidden" }}>
+            <div key={r.peak.t} onMouseDown={() => setLoopRegion(r.start, r.end)} title="Click to play this activity region on a loop"
+                className={css.vbox(3).pad2(6, 6)}
+                style={{ position: "absolute", top: (row * CARD_H) + "px", left: (col * colW) + "%", width: colW + "%", height: CARD_H + "px", boxSizing: "border-box", cursor: "pointer" }}>
+                <div className={css.hsl(220, 15, 6).relative} style={{ width: "100%", flexGrow: 1, overflow: "hidden", outline: looped ? "2px solid hsl(40,80%,55%)" : "1px solid hsl(220,15%,22%)", outlineOffset: "-1px" }}>
                     {url ? <img src={url} style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} />
                         : <div className={css.fontSize(10).opacity(0.4)} style={{ width: "100%", height: "100%", display: "flex", alignItems: "center", justifyContent: "center" }}>{url === "" ? "—" : "…"}</div>}
                 </div>
-                <div className={css.vbox(2).flexGrow(1).minWidth(0).fontSize(12)}>
-                    <span style={{ whiteSpace: "nowrap" }}>{formatDateTime(r.start)}</span>
-                    <span className={css.fontSize(11).opacity(0.6)}>{r.gopCount} GOPs · peak {r.peak.aMax.toFixed(4)}</span>
+                <div className={css.vbox(1).minWidth(0).fontSize(11)}>
+                    <span style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{formatDateTime(r.start)}</span>
+                    <span className={css.fontSize(10).opacity(0.6)}>{r.gopCount} GOPs · peak {r.peak.aMax.toFixed(4)}</span>
                 </div>
-                <button className={navBtnCss} style={{ fontSize: "11px", padding: "2px 8px", flexShrink: 0 }}
-                    onMouseDown={(e: any) => { e.stopPropagation(); setLoopRegion(r.start, r.end); }}>↻ loop</button>
             </div>
         );
     }

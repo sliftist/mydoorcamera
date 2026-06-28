@@ -49,7 +49,7 @@ export const state = observable({
     activityExp: 0.4,                // gamma for the activity chart (<1 emphasizes small activity); restored from ?ac
     catchupMode: "rate" as "rate" | "compress", // live catch-up: speed up the player, or mux frames shorter; restored from ?cu
     // ---- activity regions + looping ----
-    activityThreshold: 0.001,        // aMax >= this counts as activity for region detection; restored from ?at
+    activityThreshold: 0.0001,       // aMax >= this counts as activity for region detection; restored from ?at
     activityPanelOpen: false,        // is the activity-region panel expanded; restored from ?ar
     loopStart: 0,                    // loop region start (wall ms); 0 = no loop
     loopEnd: 0,                      // loop region end (wall ms); 0 = no loop

@@ -2,6 +2,7 @@
 // renders <App />. All logic lives in the controller modules (session /
 // navigation / trackbar) and the components under ./views.
 
+import "./helpers/fileApiKey"; // MUST be first: calls setFileAPIKey before any BulkDatabase2 use
 import * as preact from "preact";
 import { runInAction } from "mobx";
 import { configureMobxNextFrameScheduler } from "sliftutils/render-utils/mobxTyped";

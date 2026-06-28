@@ -8,13 +8,18 @@
 // returns a blob URL. Decode time is logged so cache hits/misses are visible.
 
 import { asyncCache } from "sliftutils/render-utils/asyncObservable";
-import { BulkDatabase2 } from "sliftutils/storage/BulkDatabase2/BulkDatabase2";
+import { BulkDatabase2, IBulkDatabase2 } from "sliftutils/storage/BulkDatabase2/BulkDatabase2";
 import { splitFramedNals } from "../../src/annexb";
 import { api } from "./session";
 
 const THUMB_W = 256, THUMB_H = 144;
 const START = new Uint8Array([0, 0, 0, 1]);
-const thumbDb = new BulkDatabase2<{ key: string; jpeg: Uint8Array }>("activityThumbs");
+// NOTE: typed via the IBulkDatabase2 interface. The concrete BulkDatabase2 class
+// extends BulkDatabaseBase through a circular re-export, which makes TS collapse
+// the derived instance type to {} (all methods vanish) — so we view it through
+// the interface, which carries the real surface. Runtime is unaffected.
+type ThumbRow = { key: string; jpeg: Uint8Array };
+const thumbDb = new BulkDatabase2<ThumbRow>("activityThumbs") as unknown as IBulkDatabase2<ThumbRow>;
 
 function codecFromSps(nals: Buffer[]): string {
     const sps = nals.find(n => (n[0] & 0x1f) === 7);

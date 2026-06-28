@@ -35,8 +35,8 @@ export interface Rpc {
     close(): void;
 }
 
-function rpcLog(dir: "→" | "←", type: string, verb: string): void {
-    try { console.log(`[rpc] ${dir} ${type} ${verb}`); } catch { /* ignore */ }
+function rpcLog(_dir: "→" | "←", _type: string, _verb: string): void {
+    /* RPC tracing disabled — too noisy. Re-enable here if debugging the wire. */
 }
 
 export function createRpc(channel: Channel, handlers: Handlers = {}): Rpc {
