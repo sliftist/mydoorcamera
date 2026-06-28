@@ -58,7 +58,7 @@ interface Ctx {
 
 const DAY_MS = 24 * 3600 * 1000;
 const DECODE_MAX_FRAMES = 90;     // hard cap on decoded VideoFrames held in memory (~3s @30fps)
-const DECODE_AHEAD_FRAMES = 60;   // keep ~2s of frames decoded ahead of the playhead
+const DECODE_AHEAD_SEC = 2;       // keep ~this many playback-seconds DECODED ahead (× speed)
 const PRELOAD_PLAYBACK_SEC = 10;  // prefetch GOP *bytes* this many playback-seconds ahead (× speed)
 const BYTES_CACHE_MAX = 64;       // hard cap on prefetched GOP byte buffers held
 const LIVE_KEEP_FRAMES = 4;       // live: keep only the newest few decoded frames
@@ -457,18 +457,21 @@ export class DayPlayer {
         return true;
     }
 
-    // DECODE pump: keep only a small window decoded ahead of the playhead (memory-bounded
-    // by DECODE_AHEAD_FRAMES / DECODE_MAX_FRAMES). Bytes come from the prefetch cache when
-    // available; the seek/play target is fetched with priority on a miss. Subordinate to
-    // seeks via bufferGen.
+    // DECODE pump: keep only a small window decoded ahead of the playhead. Bounded by how
+    // far we've FED (feedWall, updated synchronously per GOP) — NOT by the decoder's async
+    // output count, which lags far behind feeding and would let us overfeed/over-fetch every
+    // tick. Bytes come from the prefetch cache when available; the seek/play target is
+    // fetched with priority on a miss. Subordinate to seeks via bufferGen.
     private async decodeAhead(): Promise<void> {
         if (this.decoding || this.ctx.live || this.ctx.destroyed) return;
         this.decoding = true;
         const gen = this.bufferGen;
         try {
             let guard = 0;
+            const horizon = DECODE_AHEAD_SEC * 1000 * this.comp * Math.max(1, this.ctx.speed);
             while (gen === this.bufferGen && !this.ctx.destroyed && !this.ctx.live
-                && this.decoded.length < DECODE_MAX_FRAMES && this.aheadFrames() < DECODE_AHEAD_FRAMES) {
+                && this.decoded.length < DECODE_MAX_FRAMES
+                && (this.decoded.length === 0 || this.feedWall < this.playWall + horizon)) {
                 if (++guard > 64) break;
                 const isFirst = this.decoded.length === 0;
                 // First fill after a seek: the GOP at the playhead (or, if the playhead is in
