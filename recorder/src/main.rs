@@ -220,9 +220,12 @@ fn reader_loop(mut stdout: ChildStdout, tx: mpsc::Sender<(Vec<Vec<u8>>, usize)>,
     finalize_gop(&mut cur, &sps, &pps, &tx);
 }
 
-// Client-settable: encode EVERY GOP (bypass activity-gating) — a stress test. Trivial parse.
-fn always_encode() -> bool {
-    std::fs::read_to_string(CONTROL_FILE).map(|s| s.contains("\"alwaysEncode\":true")).unwrap_or(false)
+// Encode EVERY GOP (bypass activity-gating) when the manual stress toggle is on OR a client is
+// watching the live stream (so the live view is continuous). Trivial parse of the control file.
+fn encode_all() -> bool {
+    std::fs::read_to_string(CONTROL_FILE)
+        .map(|s| s.contains("\"alwaysEncode\":true") || s.contains("\"liveStreaming\":true"))
+        .unwrap_or(false)
 }
 
 fn mem_available_kb() -> u64 {
@@ -405,7 +408,7 @@ fn capture_loop(gop_tx: mpsc::SyncSender<GopMsg>, thin_tx: mpsc::SyncSender<thin
         let hour_key = file_hour_key(gop_t);
         let new_file = last_hour_key != Some(hour_key); // first GOP of a new hour file -> must encode
         last_hour_key = Some(hour_key);
-        let active = (mx as f64) >= ACTIVITY_THRESHOLD || !have_encoded || new_file || always_encode();
+        let active = (mx as f64) >= ACTIVITY_THRESHOLD || !have_encoded || new_file || encode_all();
         let frames = std::mem::take(&mut col);
 
         if active {

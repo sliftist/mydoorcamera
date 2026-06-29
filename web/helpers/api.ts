@@ -23,7 +23,7 @@ export type Stats = {
         tempC: number | null;
     };
     encoder: { fps: number; cpuPct: number; updatedMs: number; jpegDecodeMs?: number; activityMs?: number; encodeMs?: number; droppedFps?: number; rung?: number } | null;
-    control?: { alwaysEncode: boolean };
+    control?: { alwaysEncode: boolean; liveStreaming: boolean };
 };
 
 export class CameraApi {

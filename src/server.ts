@@ -76,8 +76,15 @@ async function start(): Promise<void> {
         res.end(CERT_PAGE);
     });
 
+    // Count clients currently watching the live stream. While >0, tell the recorder to encode
+    // continuously (control.liveStreaming) so the live view is smooth; back to activity-gating at 0.
+    let liveCount = 0;
+    const syncLive = () => { void writeControl({ liveStreaming: liveCount > 0 }); };
+    void writeControl({ liveStreaming: false }); // reset on server start
+
     const wss = new WebSocketServer({ server: httpsServer });
     wss.on("connection", async (ws, req) => {
+        let streaming = false; // does THIS connection currently hold a live stream?
         const clientIp = (req.socket.remoteAddress || "").replace(/^::ffff:/, "");
         if (await isBlacklisted(clientIp)) { ws.close(); return; }
 
@@ -130,7 +137,7 @@ async function start(): Promise<void> {
             } finally { watchPolling = false; }
         }
 
-        ws.on("close", () => { stopStream(); if (watchTimer) clearInterval(watchTimer); });
+        ws.on("close", () => { stopStream(); if (streaming) { streaming = false; liveCount--; syncLive(); } if (watchTimer) clearInterval(watchTimer); });
 
         rpc = createRpc(nodeWsChannel(ws), {
             async login(pw: string) {
@@ -179,13 +186,14 @@ async function start(): Promise<void> {
                 }
                 stream = { parts, file: live || "", offset };
                 streamTimer = setInterval(() => void pollStream(), 500);
+                if (!streaming) { streaming = true; liveCount++; syncLive(); }
                 if (initial) {
                     const r = initial.r;
                     try { if (await dataReady(parts, r.f, r.o, r.l)) { const bytes = await readGopBytes(parts, r.f, r.o, r.l); rpc.call("onStreamData", { t: r.t, e: r.e, n: r.n }, bytes).catch(() => { /* */ }); } } catch { /* */ }
                 }
                 return { ok: true };
             },
-            async stopStream() { stopStream(); return { ok: true }; },
+            async stopStream() { stopStream(); if (streaming) { streaming = false; liveCount--; syncLive(); } return { ok: true }; },
 
             // ---- watch a day for growing coverage ----
             async watchDay(day: string) {
