@@ -16,7 +16,7 @@ import { getTimezone } from "./timezone";
 process.env.TZ = getTimezone();
 import { THIN_LEVELS, THIN_BITRATE, levelGopSpanSec } from "./config";
 import {
-    GopEntry, LevelWriter, readLevelGops, readLevelGopAt, levelTimeBounds, ACT_SCALE, actToU16,
+    GopEntry, LevelWriter, readLevelGops, readLevelGopAt, levelTimeBounds, ACT_SCALE, actToU16, enforceRetention,
 } from "./storage";
 import { AnnexBSplitter, splitFramedNals } from "./annexb";
 
@@ -220,6 +220,13 @@ async function loop(): Promise<void> {
         setTimeout(loop, PERIOD_MS);
     }
 }
+
+// Disk retention lives here now (the Rust recorder doesn't manage it): enforce each level's
+// byte budget periodically, deleting the oldest buckets first.
+setInterval(async () => {
+    try { const r = await enforceRetention(); if (r.deleted.length) console.log(`[thin] retention: deleted ${r.deleted.length} pair(s), now ${(r.totalBytes / 1e9).toFixed(2)} GB`); }
+    catch (e) { console.error("[thin] retention failed:", (e as Error).message); }
+}, 60_000);
 
 console.log(`[thin] worker started (levels 1..${THIN_LEVELS}, smart-from-L0, ${THIN_BITRATE / 1e6} Mbps re-encode)`);
 loop();

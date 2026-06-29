@@ -42,3 +42,4 @@ Thumbs.db
 *.log
 yarn-error.log
 npm-debug.log*
+/recorder/target

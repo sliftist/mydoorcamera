@@ -1,12 +1,12 @@
 [Unit]
-Description=mydoorcamera capture daemon (hardware H.264 -> indexed NAL store)
+Description=mydoorcamera capture daemon (Rust: activity-gated hardware H.264 recorder)
 After=multi-user.target
 
 [Service]
 Type=simple
 User=root
-WorkingDirectory=/root/mydoorcamera
-ExecStart=/usr/bin/node -r /root/mydoorcamera/node_modules/typenode/index.js /root/mydoorcamera/src/capture.ts
+WorkingDirectory=/root/mydoorcamera/recorder
+ExecStart=/root/mydoorcamera/recorder/target/release/recorder
 Restart=always
 RestartSec=3
 
