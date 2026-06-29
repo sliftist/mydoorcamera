@@ -4,7 +4,7 @@
 // instead of holding VideoFrames open — is what made playback fast; rendering was never the
 // bottleneck, so there's no need for WebGPU here.
 
-import { clockHMS } from "../format";
+import { clockHMS, dateYMD } from "../format";
 
 type Drawable = ImageBitmap | OffscreenCanvas;
 
@@ -26,21 +26,23 @@ export class Renderer {
         if (wall != null) this.drawClock(wall, note);
     }
 
-    // Compact top-left clock chip, sized to its text (mirrors the old burned-in overlay).
+    // Compact top-left chip: date line over time line (mirrors the old burned-in overlay).
     private drawClock(wall: number, note?: string): void {
         const ctx = this.c2d!, w = this.canvas.width, h = this.canvas.height;
-        const text = clockHMS(wall) + (note ? ` · ${note}` : "");
+        const dateStr = dateYMD(wall);
+        const timeStr = clockHMS(wall) + (note ? ` · ${note}` : "");
         const fs = Math.max(11, Math.round(h * 0.035));
         ctx.font = `${fs}px monospace`;
         ctx.textAlign = "left";
         ctx.textBaseline = "middle";
-        const padX = Math.round(fs * 0.5), padY = Math.round(fs * 0.35);
-        const tw = ctx.measureText(text).width;
+        const padX = Math.round(fs * 0.5), padY = Math.round(fs * 0.35), gap = Math.round(fs * 0.25);
+        const tw = Math.max(ctx.measureText(dateStr).width, ctx.measureText(timeStr).width);
         const x = Math.round(w * 0.012), y = Math.round(h * 0.012);
         ctx.fillStyle = "rgba(0,0,0,0.5)";
-        ctx.fillRect(x, y, tw + padX * 2, fs + padY * 2);
+        ctx.fillRect(x, y, tw + padX * 2, fs * 2 + gap + padY * 2);
         ctx.fillStyle = "rgba(255,255,255,0.95)";
-        ctx.fillText(text, x + padX, y + padY + fs / 2);
+        ctx.fillText(dateStr, x + padX, y + padY + fs / 2);
+        ctx.fillText(timeStr, x + padX, y + padY + fs + gap + fs / 2);
     }
 
     drawMissing(wall: number): void {
@@ -53,10 +55,12 @@ export class Renderer {
         ctx.textBaseline = "middle";
         ctx.fillStyle = "rgba(255,255,255,0.45)";
         ctx.font = `${Math.round(h * 0.05)}px sans-serif`;
-        ctx.fillText("No video at", w / 2, h / 2 - h * 0.06);
+        ctx.fillText("No video at", w / 2, h / 2 - h * 0.1);
         ctx.fillStyle = "rgba(255,255,255,0.9)";
+        ctx.font = `${Math.round(h * 0.05)}px monospace`;
+        ctx.fillText(dateYMD(wall), w / 2, h / 2 - h * 0.01);
         ctx.font = `${Math.round(h * 0.08)}px monospace`;
-        ctx.fillText(clockHMS(wall), w / 2, h / 2 + h * 0.04);
+        ctx.fillText(clockHMS(wall), w / 2, h / 2 + h * 0.08);
     }
 
     destroy(): void { /* nothing to clean up for 2D */ }

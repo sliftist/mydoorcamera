@@ -5,6 +5,8 @@ import { PlayStatus } from "./videoHelpers";
 
 export const pad2 = (n: number): string => String(n).padStart(2, "0");
 export const clockHMS = (ms: number): string => new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+// Date as "2026 / June / 26" (year / full month name / day).
+export const dateYMD = (ms: number): string => { const d = new Date(ms); return `${d.getFullYear()} / ${d.toLocaleString([], { month: "long" })} / ${d.getDate()}`; };
 
 export const SPEEDS = [1 / 16, 1 / 8, 1 / 4, 1 / 2, 1, 2, 4, 8, 16];
 export function speedLabel(s: number): string { return s < 1 ? `1/${Math.round(1 / s)}` : String(s); }
