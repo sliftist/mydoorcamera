@@ -86,7 +86,10 @@ function encodeGop(jpegs: Buffer[]): Promise<{ nals: Buffer[]; frameCount: numbe
             "-hide_banner", "-loglevel", "error",
             "-f", "mjpeg", "-i", "pipe:0",
             "-vf", "format=yuv420p",
-            "-c:v", "h264_v4l2m2m", "-b:v", String(THIN_BITRATE), "-g", String(SLOTS),
+            // SOFTWARE encode (libx264), NOT the bcm2835 HW codec: the recorder owns /dev/video11,
+            // and two processes on the Pi's single HW H.264 encoder can deadlock the codec driver
+            // (hard hang). Thinning is background work, so software encoding is fine here.
+            "-c:v", "libx264", "-preset", "veryfast", "-b:v", String(THIN_BITRATE), "-g", String(SLOTS),
             "-f", "h264", "pipe:1",
         ], { stdio: ["pipe", "pipe", "ignore"] });
         const split = new AnnexBSplitter();

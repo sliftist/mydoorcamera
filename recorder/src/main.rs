@@ -269,9 +269,21 @@ fn capture_loop(gop_tx: mpsc::Sender<GopMsg>) -> std::io::Result<()> {
     let mut gop_acts: Vec<u16> = Vec::with_capacity(GOP);
     let mut gop_t: i64 = 0;
     let mut have_encoded = false;
+    let mut errs = 0u32;
 
     loop {
-        let (buf, _meta) = stream.next()?;
+        let (buf, _meta) = match stream.next() {
+            Ok(v) => { errs = 0; v }
+            Err(e) => {
+                // Transient camera/USB hiccup: back off and retry rather than exiting (a fast
+                // restart loop re-opening a flaky UVC device is worse). Give up only if it persists.
+                eprintln!("[recorder] capture next() error: {}", e);
+                errs += 1;
+                if errs > 150 { return Err(e); }
+                std::thread::sleep(Duration::from_millis(100));
+                continue;
+            }
+        };
         let t = now_ms();
         if gop_jpegs.is_empty() { gop_t = t; }
         let jpeg = buf.to_vec();

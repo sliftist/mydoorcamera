@@ -419,13 +419,14 @@ export class LevelWriter {
         const { dir, stem } = bucketOf(this.level, ms);
         const absDir = path.join(levelRoot(this.level), ...dir);
         const key = absDir + "|" + stem;
-        if (key === this.curKey && this.dataPath) return;
-        await fsp.mkdir(absDir, { recursive: true });
-        this.curKey = key;
-        this.dataPath = path.join(absDir, `${stem}.${this.session}.data`);
-        this.idxPath = path.join(absDir, `${stem}.${this.session}.idx`);
-        const sz = await sizeOf(this.dataPath);
-        this.offset = sz >= 0 ? sz : 0;
+        if (key !== this.curKey || !this.dataPath) {
+            this.curKey = key;
+            this.dataPath = path.join(absDir, `${stem}.${this.session}.data`);
+            this.idxPath = path.join(absDir, `${stem}.${this.session}.idx`);
+            const sz = await sizeOf(this.dataPath);
+            this.offset = sz >= 0 ? sz : 0;
+        }
+        await fsp.mkdir(absDir, { recursive: true }); // ensure the dir exists every time (cheap; survives a wipe)
     }
 
     writeGop(nals: Buffer[], t: number, e: number, frameCount: number, acts?: Uint16Array): Promise<void> {
