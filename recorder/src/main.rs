@@ -46,7 +46,9 @@ fn act_to_u16(a: f32) -> u16 { (a.max(0.0).min(1.0) * 65535.0).round() as u16 }
 
 // --- shared stats counters ---
 static FRAMES: AtomicU64 = AtomicU64::new(0);
-static ACT_SUM_US: AtomicU64 = AtomicU64::new(0);
+static DEC_SUM_US: AtomicU64 = AtomicU64::new(0); // JPEG decode (1/8) time
+static DEC_CNT: AtomicU64 = AtomicU64::new(0);
+static ACT_SUM_US: AtomicU64 = AtomicU64::new(0); // activity-detector time
 static ACT_CNT: AtomicU64 = AtomicU64::new(0);
 static ENC_SUM_MS: AtomicU64 = AtomicU64::new(0);
 static ENC_CNT: AtomicU64 = AtomicU64::new(0);
@@ -288,10 +290,20 @@ fn capture_loop(gop_tx: mpsc::Sender<GopMsg>) -> std::io::Result<()> {
         if gop_jpegs.is_empty() { gop_t = t; }
         let jpeg = buf.to_vec();
 
-        let a0 = Instant::now();
-        let act = decode_gray(&jpeg).map(|g| model.compute(&g)).unwrap_or(0.0);
-        ACT_SUM_US.fetch_add(a0.elapsed().as_micros() as u64, Ordering::Relaxed);
-        ACT_CNT.fetch_add(1, Ordering::Relaxed);
+        let d0 = Instant::now();
+        let gray = decode_gray(&jpeg);
+        DEC_SUM_US.fetch_add(d0.elapsed().as_micros() as u64, Ordering::Relaxed);
+        DEC_CNT.fetch_add(1, Ordering::Relaxed);
+        let act = match gray {
+            Some(g) => {
+                let a0 = Instant::now();
+                let a = model.compute(&g);
+                ACT_SUM_US.fetch_add(a0.elapsed().as_micros() as u64, Ordering::Relaxed);
+                ACT_CNT.fetch_add(1, Ordering::Relaxed);
+                a
+            }
+            None => 0.0,
+        };
         FRAMES.fetch_add(1, Ordering::Relaxed);
 
         gop_jpegs.push(jpeg);
@@ -348,16 +360,19 @@ fn stats_loop() {
         let cpu = if total > last_total { proc.saturating_sub(last_proc) as f64 / (total - last_total) as f64 * 100.0 } else { 0.0 };
         last_proc = proc; last_total = total;
 
+        let dc = DEC_CNT.swap(0, Ordering::Relaxed);
+        let dsum = DEC_SUM_US.swap(0, Ordering::Relaxed);
         let ac = ACT_CNT.swap(0, Ordering::Relaxed);
         let asum = ACT_SUM_US.swap(0, Ordering::Relaxed);
         let ec = ENC_CNT.swap(0, Ordering::Relaxed);
         let esum = ENC_SUM_MS.swap(0, Ordering::Relaxed);
+        let decode_ms = if dc > 0 { dsum as f64 / dc as f64 / 1000.0 } else { 0.0 };
         let activity_ms = if ac > 0 { asum as f64 / ac as f64 / 1000.0 } else { 0.0 };
         let encode_ms = if ec > 0 { esum as f64 / ec as f64 } else { 0.0 };
 
         let json = format!(
-            "{{\"fps\":{:.1},\"cpuPct\":{},\"updatedMs\":{},\"jpegDecodeMs\":0,\"activityMs\":{:.2},\"encodeMs\":{:.1}}}",
-            (fps * 10.0).round() / 10.0, cpu.round() as i64, now, activity_ms, encode_ms
+            "{{\"fps\":{:.1},\"cpuPct\":{},\"updatedMs\":{},\"jpegDecodeMs\":{:.2},\"activityMs\":{:.2},\"encodeMs\":{:.1}}}",
+            (fps * 10.0).round() / 10.0, cpu.round() as i64, now, decode_ms, activity_ms, encode_ms
         );
         let _ = std::fs::write(STATS_FILE, json);
     }
