@@ -1,49 +1,42 @@
 // Client-side activity-region detection over the per-GOP index (state.index).
-// A "region" is a contiguous stretch of footage around activity, defined purely in
-// GOP-index-entry counts (NOT wall time), so it's independent of how often the
-// activity worker samples: a LEAD-GOP lead-in buffer before the first active GOP,
-// the region stays alive across gaps up to GAP GOPs, and a TAIL-GOP trailing buffer.
+// A "region" is a maximal run of CONSECUTIVE active GOPs (aMax >= threshold) — nothing
+// more. No lead-in, no tail, no gap bridging: a single inactive GOP ends the region, and
+// adjacent active GOPs belong to the same region. The region is tight around the activity:
+// it spans from the first active GOP's start to the last active GOP's end.
 
 import { IndexGop } from "./indexBuffer";
 
 export type ActivityRegion = {
-    start: number;        // wall ms (region start, incl. lead-in)
-    end: number;          // wall ms (region end, incl. tail)
-    peak: IndexGop;       // the GOP with the most activity in the region (its keyframe is the thumbnail)
-    gopCount: number;     // GOPs covered by the region
+    start: number;        // wall ms — start of the first active GOP
+    end: number;          // wall ms — end of the last active GOP
+    peak: IndexGop;       // the most-active GOP in the region (its peak frame is the thumbnail)
+    gopCount: number;     // active GOPs in the region
     startIdx: number;     // index into `gops` of the region start (for virtualization / debugging)
 };
-
-const LEAD = 5;   // GOPs of buffer before the first active GOP
-const GAP = 10;   // region stays alive while activity recurs within this many GOPs
-const TAIL = 5;   // GOPs of buffer after the last active GOP
 
 // Detect regions across the whole index, then keep only those overlapping [vs, ve]
 // (so zooming the trackbar in shows fewer regions). `gops` must be sorted by t.
 export function computeRegions(gops: IndexGop[] | null, threshold: number, vs: number, ve: number): ActivityRegion[] {
     if (!gops || !gops.length) return [];
-    const n = gops.length;
     const out: ActivityRegion[] = [];
-    let firstActive = -1, lastActive = -1, peak: IndexGop | null = null;
+    let start = -1, peak: IndexGop | null = null, count = 0;
 
-    const flush = () => {
-        if (firstActive < 0) return;
-        const s = Math.max(0, firstActive - LEAD);
-        const e = Math.min(n - 1, lastActive + TAIL);
-        out.push({ start: gops[s].t, end: gops[e].e, peak: peak!, gopCount: e - s + 1, startIdx: s });
-        firstActive = lastActive = -1; peak = null;
+    const flush = (endIdx: number) => {
+        if (start < 0) return;
+        out.push({ start: gops[start].t, end: gops[endIdx].e, peak: peak!, gopCount: count, startIdx: start });
+        start = -1; peak = null; count = 0;
     };
 
-    for (let i = 0; i < n; i++) {
-        const active = gops[i].aMax >= threshold;
-        if (active) {
-            if (firstActive < 0) firstActive = i;
-            else if (i - lastActive > GAP) { flush(); firstActive = i; } // gap too big -> close, start new
-            lastActive = i;
-            if (!peak || gops[i].aMax > peak.aMax) peak = gops[i];
+    for (let i = 0; i < gops.length; i++) {
+        if (gops[i].aMax >= threshold) {
+            if (start < 0) { start = i; peak = gops[i]; count = 0; }
+            else if (gops[i].aMax > peak!.aMax) peak = gops[i];
+            count++;
+        } else {
+            flush(i - 1); // the run ended at the previous GOP
         }
     }
-    flush();
+    flush(gops.length - 1);
 
     return out.filter(r => r.end > vs && r.start < ve);
 }
