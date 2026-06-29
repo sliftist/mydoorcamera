@@ -173,17 +173,18 @@ export class DayPlayer {
     private async drawFrameAt(wall: number): Promise<boolean> {
         const gop = await this.source.gopForWall(wall);
         if (!gop) return false;
-        // No-change (static) span: it has no video of its own.
+        // No-change (static) span: it has no video of its own. While PLAYING in skip mode we fast-
+        // forward to the next real activity; but if there's none ahead (or we're paused, or in
+        // blank mode) we still SHOW the scene — repeat the referenced frame with a ticking clock —
+        // rather than freezing on a blank screen. This also fetches the ref GOP (so it loads).
         if (this.source.isNoChange(gop)) {
-            if (this.gapModeVal === "skip") {
+            if (this.playing && this.gapModeVal === "skip") {
                 const next = await this.source.nextActiveStart(gop.e + 1);
-                if (next != null) this.jump(next);
-                else { this.playing = false; this.log("END"); }
-                return false; // the jump (or pause) supersedes this render
+                if (next != null) { this.jump(next); return false; } // jump supersedes this render
+                // no activity ahead -> fall through and show the static scene instead of pausing
             }
-            // blank: repeat the referenced frame, clobbering the clock with the real time.
             const ref = await this.source.gopForWall(this.source.refOf(gop));
-            if (!ref) return false;
+            if (!ref || this.source.isNoChange(ref)) return false;
             const bmp = await getFrame(this.source, ref, ref.n - 1);
             if (!bmp) return false;
             this.renderer.drawImage(bmp, wall, "no activity");
