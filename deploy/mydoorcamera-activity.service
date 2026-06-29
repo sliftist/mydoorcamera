@@ -1,0 +1,15 @@
+[Unit]
+Description=mydoorcamera activity worker (HW keyframe decode -> activity index field)
+After=multi-user.target
+
+[Service]
+Type=simple
+User=root
+Nice=10
+WorkingDirectory=/root/mydoorcamera
+ExecStart=/usr/bin/node -r /root/mydoorcamera/node_modules/typenode/index.js /root/mydoorcamera/src/activity.ts
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
