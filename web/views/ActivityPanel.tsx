@@ -45,9 +45,8 @@ export class ActivityPanel extends preact.Component<{}, { scrollTop: number; vie
             );
         }
 
-        // Expanded: compute regions for the current zoom window.
-        const vs = state.viewStart || state.coverage.dayStartMs, ve = state.viewEnd || state.coverage.dayEndMs;
-        const regions = computeRegions(state.index, state.activityThreshold, vs, ve);
+        // Expanded: compute regions across the WHOLE bucket (not just the trackbar zoom).
+        const regions = computeRegions(state.index, state.activityThreshold, state.coverage.dayStartMs, state.coverage.dayEndMs);
         const header = (
             <div className={headerCss} style={{ cursor: "pointer", boxSizing: "border-box" }} onClick={() => this.toggle()}>
                 <span style={{ fontSize: "13px" }}>▾ Activity</span>
