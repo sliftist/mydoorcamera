@@ -26,6 +26,7 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use storage::Writer;
 
+use chrono::{Datelike, Local, TimeZone, Timelike};
 use v4l::buffer::Type;
 use v4l::io::traits::CaptureStream;
 use v4l::prelude::*;
@@ -64,6 +65,13 @@ fn rung_params(r: usize) -> (usize, usize, usize) {
 }
 
 fn now_ms() -> i64 { SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as i64 }
+// A key that changes whenever the storage hour-file rolls over (local Y/day-of-year/hour). The
+// first GOP of each new file must be encoded so the file is self-contained (its no-change records
+// reference a baseline within the same file, not one in a previous file the player won't load).
+fn file_hour_key(ms: i64) -> i64 {
+    let dt = Local.timestamp_millis_opt(ms).single().unwrap_or_else(|| Local.timestamp_opt(0, 0).unwrap());
+    dt.year() as i64 * 1_000_000 + dt.ordinal() as i64 * 100 + dt.hour() as i64
+}
 fn act_to_u16(a: f32) -> u16 { (a.max(0.0).min(1.0) * 65535.0).round() as u16 }
 
 static FRAMES: AtomicU64 = AtomicU64::new(0);   // raw frames received (capture rate)
@@ -343,6 +351,7 @@ fn capture_loop(gop_tx: mpsc::SyncSender<GopMsg>, thin_tx: mpsc::SyncSender<thin
     let mut model = ActivityModel::new();
     let mut col: Vec<(Vec<u8>, f32, i64)> = Vec::new(); // decoded frames of the current GOP
     let mut have_encoded = false;
+    let mut last_hour_key: Option<i64> = None;
     let mut raw_i: u64 = 0;
     let mut errs = 0u32;
     let mut last_drop = Instant::now();
@@ -393,7 +402,10 @@ fn capture_loop(gop_tx: mpsc::SyncSender<GopMsg>, thin_tx: mpsc::SyncSender<thin
         let gop_t = col[0].2;
         let mut mx = 0f32;
         for c in &col { if c.1 > mx { mx = c.1; } }
-        let active = (mx as f64) >= ACTIVITY_THRESHOLD || !have_encoded || always_encode();
+        let hour_key = file_hour_key(gop_t);
+        let new_file = last_hour_key != Some(hour_key); // first GOP of a new hour file -> must encode
+        last_hour_key = Some(hour_key);
+        let active = (mx as f64) >= ACTIVITY_THRESHOLD || !have_encoded || new_file || always_encode();
         let frames = std::mem::take(&mut col);
 
         if active {

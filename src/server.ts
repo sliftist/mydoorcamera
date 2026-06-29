@@ -107,6 +107,7 @@ async function start(): Promise<void> {
                 for (let i = 0; i < records.length; i++) {
                     const r = records[i];
                     if (!stream) break;
+                    if (r.l === 0) { stream.offset = ends[i]; continue; } // no-change: no video bytes — just advance past it
                     if (!(await dataReady(stream.parts, r.f, r.o, r.l))) break; // not flushed yet — retry next tick
                     const bytes = await readGopBytes(stream.parts, r.f, r.o, r.l);
                     rpc.call("onStreamData", { t: r.t, e: r.e, n: r.n }, bytes).catch(() => { /* */ });
@@ -166,9 +167,22 @@ async function start(): Promise<void> {
                 // Start at the live edge: skip the existing backlog of the current file.
                 const live = await latestIdxFile(parts);
                 let offset = 0;
-                if (live) { try { offset = (await readIdxIncremental(parts, live, 0)).nextByte; } catch { offset = 0; } }
+                let initial: { r: { t: number; e: number; n: number; f: string; o: number; l: number } } | undefined;
+                if (live) {
+                    try {
+                        const { records } = await readIdxIncremental(parts, live, 0);
+                        offset = (await readIdxIncremental(parts, live, 0)).nextByte;
+                        // Find the most recent encoded GOP so the live view has an initial frame to
+                        // show (a static scene has no new GOPs to stream until activity happens).
+                        for (let i = records.length - 1; i >= 0; i--) { if (records[i].l > 0) { initial = { r: records[i] }; break; } }
+                    } catch { offset = 0; }
+                }
                 stream = { parts, file: live || "", offset };
                 streamTimer = setInterval(() => void pollStream(), 500);
+                if (initial) {
+                    const r = initial.r;
+                    try { if (await dataReady(parts, r.f, r.o, r.l)) { const bytes = await readGopBytes(parts, r.f, r.o, r.l); rpc.call("onStreamData", { t: r.t, e: r.e, n: r.n }, bytes).catch(() => { /* */ }); } } catch { /* */ }
+                }
                 return { ok: true };
             },
             async stopStream() { stopStream(); return { ok: true }; },
