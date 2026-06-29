@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- Source for the page favicon (a simple video recorder). It is inlined as a data: URI in
+       index.html so it ships without an extra asset-copy step; edit both if you change it. -->
+  <rect width="64" height="64" rx="14" fill="#15171e"/>
+  <rect x="9" y="20" width="30" height="24" rx="5" fill="#e6e9ef"/>
+  <path d="M41 27 L55 20 L55 44 L41 37 Z" fill="#e6e9ef"/>
+  <circle cx="24" cy="32" r="6.5" fill="#15171e"/>
+  <circle cx="24" cy="32" r="3" fill="#e5484d"/>
+</svg>
