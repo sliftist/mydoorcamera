@@ -22,7 +22,8 @@ export type Stats = {
         netRxBps: number; netTxBps: number;
         tempC: number | null;
     };
-    encoder: { fps: number; cpuPct: number; updatedMs: number; jpegDecodeMs?: number; activityMs?: number; encodeMs?: number } | null;
+    encoder: { fps: number; cpuPct: number; updatedMs: number; jpegDecodeMs?: number; activityMs?: number; encodeMs?: number; droppedFps?: number; rung?: number } | null;
+    control?: { alwaysEncode: boolean };
 };
 
 export class CameraApi {
@@ -143,6 +144,7 @@ export class CameraApi {
         return this.fetchGop("getGopData", [parts, file, off, len], !!opt?.cancellable);
     }
     getStats(): Promise<Stats> { return this.call("getStats"); }
+    setAlwaysEncode(on: boolean): Promise<{ alwaysEncode: boolean }> { return this.call("setAlwaysEncode", on); }
 
     // A GOP-data fetch, cancellable + tracked. Background (cancellable) prefetches can be
     // dropped on a seek (cancelStaleGops); and if a LATER request returns while an earlier

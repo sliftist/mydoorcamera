@@ -1,17 +1,16 @@
-// Self-contained activity-gated recorder (Rust). ONE V4L2 capture, per-frame activity, and a
-// persistent hardware H.264 encoder that is fed ONLY the GOPs that contain activity — static GOPs
-// are never encoded, just recorded as no-change index entries. This is the spec the JS/ffmpeg
-// versions couldn't satisfy: gating the encode (not just the storage) while keeping up under
-// motion. The heavy work (capture, JPEG decode for activity, feeding/parsing the encoder) is in
-// native threads, so nothing blocks the capture loop.
+// Self-contained activity-gated recorder (Rust). V4L2 capture -> per-frame activity (1/8 decode)
+// -> activity-gated hardware H.264 encode. Static GOPs are never encoded (no-change records);
+// only GOPs with activity are encoded, by a per-burst persistent ffmpeg h264_v4l2m2m process.
 //
-// Pipeline:
-//   capture thread  : V4L2 MJPEG -> per-frame activity (1/8 decode) -> 30-frame GOPs.
-//                     active GOP  -> feed encoder + emit an Active job; static GOP -> Static job.
-//   feeder  thread  : writes active-GOP JPEGs to the persistent ffmpeg encoder's stdin.
-//   reader  thread  : parses the encoder's H.264 stdout into GOPs (one per active GOP, in order).
-//   storage thread  : consumes jobs IN ORDER; Active -> wait for the matching encoded GOP + store;
-//                     Static -> write a no-change record. Single writer keeps the index ordered.
+// ADAPTIVE FRAME-DROPPING LADDER: under pressure (when the encoder can't keep up and GOPs would
+// pile up) the recorder climbs a ladder that does LESS work, so it degrades gracefully instead of
+// buffering to an out-of-memory hard-hang:
+//   rung 0-2 : decode every frame (30fps), encode the N highest-activity frames per GOP (30->15).
+//   rung 3-5 : decode fewer frames too (15->5 fps), encoding all decoded.
+//   rung 6-7 : below 5fps — expand the GOP window (up to 5s) so each GOP still has >=5 frames.
+// The ladder is driven by drops: if the bounded GOP channel is full (encoder behind) we drop the
+// GOP AND climb a rung; after a calm period we descend. The bounded channel is the hard floor
+// (memory can't run away), and a memory guard kills the encoder if RAM still gets critical.
 
 mod activity;
 mod storage;
@@ -21,7 +20,7 @@ use jpeg_decoder::PixelFormat;
 use std::collections::VecDeque;
 use std::io::{Read, Write};
 use std::process::{Child, ChildStdout, Command, Stdio};
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use storage::Writer;
@@ -36,96 +35,51 @@ const VIDEO_DEVICE: &str = "/dev/video0";
 const WIDTH: u32 = 1920;
 const HEIGHT: u32 = 1080;
 const BITRATE: u32 = 5_000_000;
-const GOP: usize = 30;
 const DATA_DIR: &str = "/var/lib/mydoorcamera/video";
 const STATS_FILE: &str = "/var/lib/mydoorcamera/encoder-stats.json";
+const CONTROL_FILE: &str = "/var/lib/mydoorcamera/control.json";
 const ACTIVITY_THRESHOLD: f64 = 0.0001; // GOP max activity below this -> no encode
+
+const CHAN_CAP: usize = 3;              // bounded GOP channel: at most this many GOPs (~MBs) buffered
+const MAX_RUNG: usize = 7;
+const RECOVER_SECS: u64 = 8;           // descend a rung after this long with no drops
+const MEM_CRIT_KB: u64 = 350_000;      // < this much MemAvailable -> kill the encoder, max degrade
+
+// Ladder rung -> (decode_stride, decode_target, encode_budget).
+//   decode_stride  : process activity on every Nth captured frame (others skipped).
+//   decode_target  : finalize a GOP after this many DECODED frames (sets the GOP's wall span).
+//   encode_budget  : how many of the decoded frames to actually encode (the highest-activity ones).
+// encode_budget <= decode_target always, so each GOP feeds the encoder exactly encode_budget frames.
+fn rung_params(r: usize) -> (usize, usize, usize) {
+    match r {
+        0 => (1, 30, 30),  // decode 30, encode 30   (~1s GOP)
+        1 => (1, 30, 22),  // decode 30, encode 22
+        2 => (1, 30, 15),  // decode 30, encode 15 (most active)
+        3 => (2, 15, 15),  // decode 15, encode 15
+        4 => (3, 10, 10),  // decode 10, encode 10
+        5 => (6, 5, 5),    // decode 5,  encode 5    (~1s GOP)
+        6 => (15, 5, 5),   // decode 2fps -> 5 frames over ~2.5s
+        _ => (30, 5, 5),   // decode 1fps -> 5 frames over ~5s (floor)
+    }
+}
 
 fn now_ms() -> i64 { SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as i64 }
 fn act_to_u16(a: f32) -> u16 { (a.max(0.0).min(1.0) * 65535.0).round() as u16 }
 
-// --- shared stats counters ---
-static FRAMES: AtomicU64 = AtomicU64::new(0);
-static DEC_SUM_US: AtomicU64 = AtomicU64::new(0); // JPEG decode (1/8) time
+static FRAMES: AtomicU64 = AtomicU64::new(0);   // raw frames received (capture rate)
+static DEC_SUM_US: AtomicU64 = AtomicU64::new(0);
 static DEC_CNT: AtomicU64 = AtomicU64::new(0);
-static ACT_SUM_US: AtomicU64 = AtomicU64::new(0); // activity-detector time
+static ACT_SUM_US: AtomicU64 = AtomicU64::new(0);
 static ACT_CNT: AtomicU64 = AtomicU64::new(0);
 static ENC_SUM_MS: AtomicU64 = AtomicU64::new(0);
 static ENC_CNT: AtomicU64 = AtomicU64::new(0);
-static ENC_PID: AtomicU32 = AtomicU32::new(0); // current encoder ffmpeg pid (0 when idle)
+static ENC_PID: AtomicU32 = AtomicU32::new(0);  // current encoder ffmpeg pid (0 when idle)
+static DROPS: AtomicU64 = AtomicU64::new(0);    // GOPs dropped because the encoder couldn't keep up
+static RUNG: AtomicUsize = AtomicUsize::new(0); // current ladder rung
 
 enum GopMsg {
     Active { t: i64, acts: Vec<u16>, jpegs: Vec<Vec<u8>> },
     Static { t: i64, acts: Vec<u16> },
-}
-
-// A per-burst persistent ffmpeg HW encoder. Spawned when activity starts, fed every active GOP
-// (continuous input lets the HW encoder flush and keep up), and CLOSED when activity stops — the
-// close drains the buffered tail. Static periods run no encoder, so they cost ~0 CPU.
-struct Encoder {
-    child: Child,
-    stdin: std::process::ChildStdin,
-    rx: mpsc::Receiver<(Vec<Vec<u8>>, usize)>,
-}
-
-impl Encoder {
-    fn spawn() -> std::io::Result<Encoder> {
-        let mut child = Command::new("ffmpeg")
-            .args([
-                "-hide_banner", "-loglevel", "error",
-                "-f", "mjpeg", "-i", "pipe:0",
-                "-vf", "format=yuv420p",
-                "-c:v", "h264_v4l2m2m", "-b:v", &BITRATE.to_string(), "-g", &GOP.to_string(),
-                "-force_key_frames", &format!("expr:gte(n,n_forced*{})", GOP),
-                "-flush_packets", "1", "-f", "h264", "pipe:1",
-            ])
-            .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::inherit())
-            .spawn()?;
-        ENC_PID.store(child.id(), Ordering::Relaxed);
-        let stdin = child.stdin.take().unwrap();
-        let stdout = child.stdout.take().unwrap();
-        let (tx, rx) = mpsc::channel();
-        std::thread::spawn(move || reader_loop(stdout, tx));
-        Ok(Encoder { child, stdin, rx })
-    }
-    fn feed(&mut self, jpegs: &[Vec<u8>]) {
-        for j in jpegs { if self.stdin.write_all(j).is_err() { return; } }
-        let _ = self.stdin.flush();
-    }
-    // GOPs the encoder has already emitted (non-blocking).
-    fn drain_available(&self) -> Vec<(Vec<Vec<u8>>, usize)> { self.rx.try_iter().collect() }
-    // Close stdin -> ffmpeg flushes its buffered frames and exits -> read the rest (blocking).
-    fn close(self) -> Vec<(Vec<Vec<u8>>, usize)> {
-        let Encoder { mut child, stdin, rx } = self;
-        ENC_PID.store(0, Ordering::Relaxed);
-        drop(stdin);
-        let rest: Vec<_> = rx.iter().collect();
-        let _ = child.wait();
-        rest
-    }
-}
-
-// Read the encoder's H.264 stdout, split into GOPs (one per active GOP, in order), send them out.
-fn reader_loop(mut stdout: ChildStdout, tx: mpsc::Sender<(Vec<Vec<u8>>, usize)>) {
-    let mut split = AnnexB::new();
-    let mut sps: Option<Vec<u8>> = None;
-    let mut pps: Option<Vec<u8>> = None;
-    let mut cur: Option<Vec<Vec<u8>>> = None;
-    let mut buf = [0u8; 65536];
-    loop {
-        let n = match stdout.read(&mut buf) { Ok(0) | Err(_) => break, Ok(n) => n };
-        for nal in split.push(&buf[..n]) {
-            match nal[0] & 0x1f {
-                7 => sps = Some(nal),
-                8 => pps = Some(nal),
-                5 => { finalize_gop(&mut cur, &sps, &pps, &tx); cur = Some(vec![nal]); }
-                1 => { if let Some(c) = cur.as_mut() { c.push(nal); } }
-                _ => {}
-            }
-            if cur.as_ref().map_or(false, |c| c.len() >= GOP) { finalize_gop(&mut cur, &sps, &pps, &tx); }
-        }
-    }
-    finalize_gop(&mut cur, &sps, &pps, &tx); // flush the final GOP on EOF
 }
 
 // MJPEG frame -> GW×GH grayscale for the activity detector (1/8-scale DCT decode, then box-down).
@@ -184,33 +138,125 @@ impl AnnexB {
     }
 }
 
-fn finalize_gop(cur: &mut Option<Vec<Vec<u8>>>, sps: &Option<Vec<u8>>, pps: &Option<Vec<u8>>, nal_tx: &mpsc::Sender<(Vec<Vec<u8>>, usize)>) {
+fn finalize_gop(cur: &mut Option<Vec<Vec<u8>>>, sps: &Option<Vec<u8>>, pps: &Option<Vec<u8>>, tx: &mpsc::Sender<(Vec<Vec<u8>>, usize)>) {
     if let Some(slices) = cur.take() {
         let mut nals = Vec::with_capacity(slices.len() + 2);
         if let Some(s) = sps { nals.push(s.clone()); }
         if let Some(p) = pps { nals.push(p.clone()); }
         let fc = slices.len();
         nals.extend(slices);
-        let _ = nal_tx.send((nals, fc));
+        let _ = tx.send((nals, fc));
     }
 }
 
+// A per-burst persistent encoder. `period` = frames per GOP (forces an IDR every `period` frames),
+// so the continuous H.264 stream splits into GOPs that map 1:1 to the GOPs we feed.
+struct Encoder { child: Child, stdin: std::process::ChildStdin, rx: mpsc::Receiver<(Vec<Vec<u8>>, usize)> }
+
+impl Encoder {
+    fn spawn(period: usize) -> std::io::Result<Encoder> {
+        let g = period.max(1).to_string();
+        let mut child = Command::new("ffmpeg")
+            .args([
+                "-hide_banner", "-loglevel", "error",
+                "-f", "mjpeg", "-i", "pipe:0",
+                "-vf", "format=yuv420p",
+                "-c:v", "h264_v4l2m2m", "-b:v", &BITRATE.to_string(), "-g", &g,
+                "-force_key_frames", &format!("expr:gte(n,n_forced*{})", g),
+                "-flush_packets", "1", "-f", "h264", "pipe:1",
+            ])
+            .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::inherit())
+            .spawn()?;
+        ENC_PID.store(child.id(), Ordering::Relaxed);
+        let stdin = child.stdin.take().unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let (tx, rx) = mpsc::channel();
+        let p = period.max(1);
+        std::thread::spawn(move || reader_loop(stdout, tx, p));
+        Ok(Encoder { child, stdin, rx })
+    }
+    fn feed(&mut self, jpegs: &[Vec<u8>]) -> std::io::Result<()> {
+        for j in jpegs { self.stdin.write_all(j)?; }
+        self.stdin.flush()
+    }
+    fn drain_available(&self) -> Vec<(Vec<Vec<u8>>, usize)> { self.rx.try_iter().collect() }
+    fn close(self) -> Vec<(Vec<Vec<u8>>, usize)> {
+        let Encoder { mut child, stdin, rx } = self;
+        ENC_PID.store(0, Ordering::Relaxed);
+        drop(stdin);
+        let rest: Vec<_> = rx.iter().collect();
+        let _ = child.wait();
+        rest
+    }
+}
+
+fn reader_loop(mut stdout: ChildStdout, tx: mpsc::Sender<(Vec<Vec<u8>>, usize)>, period: usize) {
+    let mut split = AnnexB::new();
+    let mut sps: Option<Vec<u8>> = None;
+    let mut pps: Option<Vec<u8>> = None;
+    let mut cur: Option<Vec<Vec<u8>>> = None;
+    let mut buf = [0u8; 65536];
+    loop {
+        let n = match stdout.read(&mut buf) { Ok(0) | Err(_) => break, Ok(n) => n };
+        for nal in split.push(&buf[..n]) {
+            match nal[0] & 0x1f {
+                7 => sps = Some(nal),
+                8 => pps = Some(nal),
+                5 => { finalize_gop(&mut cur, &sps, &pps, &tx); cur = Some(vec![nal]); }
+                1 => { if let Some(c) = cur.as_mut() { c.push(nal); } }
+                _ => {}
+            }
+            if cur.as_ref().map_or(false, |c| c.len() >= period) { finalize_gop(&mut cur, &sps, &pps, &tx); }
+        }
+    }
+    finalize_gop(&mut cur, &sps, &pps, &tx);
+}
+
+// Client-settable: encode EVERY GOP (bypass activity-gating) — a stress test. Trivial parse.
+fn always_encode() -> bool {
+    std::fs::read_to_string(CONTROL_FILE).map(|s| s.contains("\"alwaysEncode\":true")).unwrap_or(false)
+}
+
+fn mem_available_kb() -> u64 {
+    if let Ok(s) = std::fs::read_to_string("/proc/meminfo") {
+        for line in s.lines() {
+            if let Some(rest) = line.strip_prefix("MemAvailable:") {
+                return rest.split_whitespace().next().and_then(|x| x.parse().ok()).unwrap_or(u64::MAX);
+            }
+        }
+    }
+    u64::MAX
+}
+
 fn main() {
-    println!("[recorder] starting activity-gated recorder {}x{} (Rust)", WIDTH, HEIGHT);
+    println!("[recorder] starting activity-gated recorder {}x{} (Rust, adaptive)", WIDTH, HEIGHT);
     let session = now_ms() as u64;
 
-    let (gop_tx, gop_rx) = mpsc::channel::<GopMsg>();
+    let (gop_tx, gop_rx) = mpsc::sync_channel::<GopMsg>(CHAN_CAP);
 
-    // manager: owns the per-burst encoder + the single writer (keeps the index time-ordered).
     std::thread::spawn(move || manager_loop(session, gop_rx));
-
-    // stats
     std::thread::spawn(stats_loop);
+    std::thread::spawn(mem_guard);
 
-    // capture (this thread)
     if let Err(e) = capture_loop(gop_tx) {
         eprintln!("[recorder] capture failed: {}", e);
         std::process::exit(1);
+    }
+}
+
+// If RAM gets critical, drop to the lowest-work rung and kill the encoder (frees its memory; the
+// manager respawns it on the next active GOP). Belt-and-suspenders against an OOM hard-hang.
+fn mem_guard() {
+    loop {
+        std::thread::sleep(Duration::from_secs(1));
+        if mem_available_kb() < MEM_CRIT_KB {
+            RUNG.store(MAX_RUNG, Ordering::Relaxed);
+            let pid = ENC_PID.swap(0, Ordering::Relaxed);
+            if pid != 0 {
+                let _ = Command::new("kill").arg("-9").arg(pid.to_string()).status();
+                eprintln!("[recorder] MEM GUARD: low memory, killed encoder pid {}", pid);
+            }
+        }
     }
 }
 
@@ -218,6 +264,7 @@ fn manager_loop(session: u64, gop_rx: mpsc::Receiver<GopMsg>) {
     let mut writer = Writer::new(DATA_DIR, session);
     let mut last_encoded_t: Option<f64> = None;
     let mut enc: Option<Encoder> = None;
+    let mut cur_period: usize = 0;
     let mut pending: VecDeque<(i64, Vec<u16>, Instant)> = VecDeque::new();
 
     let write_gops = |writer: &mut Writer, last: &mut Option<f64>, pending: &mut VecDeque<(i64, Vec<u16>, Instant)>, gops: Vec<(Vec<Vec<u8>>, usize)>| {
@@ -234,21 +281,29 @@ fn manager_loop(session: u64, gop_rx: mpsc::Receiver<GopMsg>) {
     for msg in gop_rx {
         match msg {
             GopMsg::Active { t, acts, jpegs } => {
-                if enc.is_none() {
-                    match Encoder::spawn() { Ok(e) => enc = Some(e), Err(e) => { eprintln!("[recorder] encoder spawn: {}", e); continue; } }
+                let period = jpegs.len();
+                if period == 0 { continue; }
+                let need_respawn = match &enc { None => true, Some(_) => cur_period != period };
+                if need_respawn {
+                    if let Some(e) = enc.take() { let rest = e.close(); write_gops(&mut writer, &mut last_encoded_t, &mut pending, rest); pending.clear(); }
+                    match Encoder::spawn(period) { Ok(e) => { enc = Some(e); cur_period = period; } Err(err) => { eprintln!("[recorder] encoder spawn: {}", err); continue; } }
                 }
-                let e = enc.as_mut().unwrap();
-                e.feed(&jpegs);
-                pending.push_back((t, acts, Instant::now()));
-                let ready = e.drain_available();
-                write_gops(&mut writer, &mut last_encoded_t, &mut pending, ready);
-            }
-            GopMsg::Static { t, acts } => {
-                if let Some(e) = enc.take() {
-                    let rest = e.close(); // flush the burst tail
-                    write_gops(&mut writer, &mut last_encoded_t, &mut pending, rest);
+                let (fed_ok, ready) = {
+                    let e = enc.as_mut().unwrap();
+                    let ok = e.feed(&jpegs).is_ok();
+                    (ok, if ok { e.drain_available() } else { Vec::new() })
+                };
+                if fed_ok {
+                    pending.push_back((t, acts, Instant::now()));
+                    write_gops(&mut writer, &mut last_encoded_t, &mut pending, ready);
+                } else {
+                    // encoder died (e.g. mem guard killed it) -> drain + respawn next time
+                    if let Some(e) = enc.take() { let rest = e.close(); write_gops(&mut writer, &mut last_encoded_t, &mut pending, rest); }
                     pending.clear();
                 }
+            }
+            GopMsg::Static { t, acts } => {
+                if let Some(e) = enc.take() { let rest = e.close(); write_gops(&mut writer, &mut last_encoded_t, &mut pending, rest); pending.clear(); }
                 if let Some(rt) = last_encoded_t {
                     if let Err(e) = writer.write_no_change(t, rt, &acts) { eprintln!("[recorder] write_no_change: {}", e); }
                 }
@@ -257,7 +312,20 @@ fn manager_loop(session: u64, gop_rx: mpsc::Receiver<GopMsg>) {
     }
 }
 
-fn capture_loop(gop_tx: mpsc::Sender<GopMsg>) -> std::io::Result<()> {
+// Pick the `k` highest-activity frames from a temporally-ordered collection, returned in temporal
+// order (jpegs + acts). If there are <= k, returns them all.
+fn select_top(col: &[(Vec<u8>, f32, i64)], k: usize) -> (Vec<Vec<u8>>, Vec<u16>) {
+    if col.len() <= k {
+        return (col.iter().map(|c| c.0.clone()).collect(), col.iter().map(|c| act_to_u16(c.1)).collect());
+    }
+    let mut idx: Vec<usize> = (0..col.len()).collect();
+    idx.sort_by(|&a, &b| col[b].1.partial_cmp(&col[a].1).unwrap_or(std::cmp::Ordering::Equal));
+    idx.truncate(k);
+    idx.sort_unstable();
+    (idx.iter().map(|&i| col[i].0.clone()).collect(), idx.iter().map(|&i| act_to_u16(col[i].1)).collect())
+}
+
+fn capture_loop(gop_tx: mpsc::SyncSender<GopMsg>) -> std::io::Result<()> {
     let dev = Device::with_path(VIDEO_DEVICE)?;
     let mut fmt: Format = Capture::format(&dev)?;
     fmt.width = WIDTH;
@@ -267,18 +335,16 @@ fn capture_loop(gop_tx: mpsc::Sender<GopMsg>) -> std::io::Result<()> {
     let mut stream = MmapStream::with_buffers(&dev, Type::VideoCapture, 8)?;
 
     let mut model = ActivityModel::new();
-    let mut gop_jpegs: Vec<Vec<u8>> = Vec::with_capacity(GOP);
-    let mut gop_acts: Vec<u16> = Vec::with_capacity(GOP);
-    let mut gop_t: i64 = 0;
+    let mut col: Vec<(Vec<u8>, f32, i64)> = Vec::new(); // decoded frames of the current GOP
     let mut have_encoded = false;
+    let mut raw_i: u64 = 0;
     let mut errs = 0u32;
+    let mut last_drop = Instant::now();
 
     loop {
         let (buf, _meta) = match stream.next() {
             Ok(v) => { errs = 0; v }
             Err(e) => {
-                // Transient camera/USB hiccup: back off and retry rather than exiting (a fast
-                // restart loop re-opening a flaky UVC device is worse). Give up only if it persists.
                 eprintln!("[recorder] capture next() error: {}", e);
                 errs += 1;
                 if errs > 150 { return Err(e); }
@@ -286,10 +352,17 @@ fn capture_loop(gop_tx: mpsc::Sender<GopMsg>) -> std::io::Result<()> {
                 continue;
             }
         };
-        let t = now_ms();
-        if gop_jpegs.is_empty() { gop_t = t; }
-        let jpeg = buf.to_vec();
+        FRAMES.fetch_add(1, Ordering::Relaxed);
+        raw_i += 1;
 
+        let rung = RUNG.load(Ordering::Relaxed);
+        let (stride, decode_target, enc_budget) = rung_params(rung);
+
+        // Skip decoding for non-stride frames (cheap path — just consume the camera frame).
+        if stride > 1 && raw_i % stride as u64 != 0 { continue; }
+
+        let t = now_ms();
+        let jpeg = buf.to_vec();
         let d0 = Instant::now();
         let gray = decode_gray(&jpeg);
         DEC_SUM_US.fetch_add(d0.elapsed().as_micros() as u64, Ordering::Relaxed);
@@ -304,28 +377,44 @@ fn capture_loop(gop_tx: mpsc::Sender<GopMsg>) -> std::io::Result<()> {
             }
             None => 0.0,
         };
-        FRAMES.fetch_add(1, Ordering::Relaxed);
+        col.push((jpeg, act, t));
 
-        gop_jpegs.push(jpeg);
-        gop_acts.push(act_to_u16(act));
+        if col.len() < decode_target { continue; }
 
-        if gop_jpegs.len() >= GOP {
-            let mx = gop_acts.iter().copied().max().unwrap_or(0);
-            let active = (mx as f64 / 65535.0) >= ACTIVITY_THRESHOLD || !have_encoded;
-            let acts = std::mem::take(&mut gop_acts);
-            let jpegs = std::mem::take(&mut gop_jpegs);
-            if active {
-                have_encoded = true;
-                let _ = gop_tx.send(GopMsg::Active { t: gop_t, acts, jpegs });
-            } else {
-                drop(jpegs);
-                let _ = gop_tx.send(GopMsg::Static { t: gop_t, acts });
+        // ---- finalize this GOP ----
+        let gop_t = col[0].2;
+        let mut mx = 0f32;
+        for c in &col { if c.1 > mx { mx = c.1; } }
+        let active = (mx as f64) >= ACTIVITY_THRESHOLD || !have_encoded || always_encode();
+        let frames = std::mem::take(&mut col);
+
+        if active {
+            have_encoded = true;
+            let (jpegs, acts) = select_top(&frames, enc_budget);
+            match gop_tx.try_send(GopMsg::Active { t: gop_t, acts, jpegs }) {
+                Ok(()) => {}
+                Err(mpsc::TrySendError::Full(_)) => {
+                    // Encoder is behind — drop this GOP and climb a rung (do less next time).
+                    DROPS.fetch_add(1, Ordering::Relaxed);
+                    last_drop = Instant::now();
+                    if rung < MAX_RUNG { RUNG.store(rung + 1, Ordering::Relaxed); }
+                }
+                Err(mpsc::TrySendError::Disconnected(_)) => return Ok(()),
             }
+        } else {
+            let acts: Vec<u16> = frames.iter().map(|c| act_to_u16(c.1)).collect();
+            let _ = gop_tx.try_send(GopMsg::Static { t: gop_t, acts });
+        }
+
+        // Descend a rung after a calm stretch with no drops.
+        if rung > 0 && last_drop.elapsed() >= Duration::from_secs(RECOVER_SECS) {
+            RUNG.store(rung - 1, Ordering::Relaxed);
+            last_drop = Instant::now();
         }
     }
 }
 
-// --- stats: fps (5s), combined recorder+ffmpeg CPU, activity ms, encode latency ms ---
+// --- stats: fps (capture), combined recorder+ffmpeg CPU, stage timings, drops, rung ---
 fn proc_jiffies(pid: u32) -> u64 {
     let s = match std::fs::read_to_string(format!("/proc/{}/stat", pid)) { Ok(s) => s, Err(_) => return 0 };
     let after = &s[s.rfind(')').map(|i| i + 1).unwrap_or(0)..];
@@ -344,6 +433,7 @@ fn stats_loop() {
     let self_pid = std::process::id();
     let enc_jiffies = || { let p = ENC_PID.load(Ordering::Relaxed); if p != 0 { proc_jiffies(p) } else { 0 } };
     let mut last_frames = 0u64;
+    let mut last_drops = 0u64;
     let mut last_proc = proc_jiffies(self_pid) + enc_jiffies();
     let mut last_total = cpu_total_jiffies();
     let mut last = Instant::now();
@@ -351,9 +441,11 @@ fn stats_loop() {
         std::thread::sleep(Duration::from_secs(5));
         let now = now_ms();
         let frames = FRAMES.load(Ordering::Relaxed);
+        let drops = DROPS.load(Ordering::Relaxed);
         let dt = last.elapsed().as_secs_f64().max(0.001);
         let fps = (frames - last_frames) as f64 / dt;
-        last_frames = frames; last = Instant::now();
+        let dropped_fps = (drops - last_drops) as f64 / dt;
+        last_frames = frames; last_drops = drops; last = Instant::now();
 
         let proc = proc_jiffies(self_pid) + enc_jiffies();
         let total = cpu_total_jiffies();
@@ -371,8 +463,9 @@ fn stats_loop() {
         let encode_ms = if ec > 0 { esum as f64 / ec as f64 } else { 0.0 };
 
         let json = format!(
-            "{{\"fps\":{:.1},\"cpuPct\":{},\"updatedMs\":{},\"jpegDecodeMs\":{:.2},\"activityMs\":{:.2},\"encodeMs\":{:.1}}}",
-            (fps * 10.0).round() / 10.0, cpu.round() as i64, now, decode_ms, activity_ms, encode_ms
+            "{{\"fps\":{:.1},\"cpuPct\":{},\"updatedMs\":{},\"jpegDecodeMs\":{:.2},\"activityMs\":{:.2},\"encodeMs\":{:.1},\"droppedFps\":{:.1},\"rung\":{}}}",
+            (fps * 10.0).round() / 10.0, cpu.round() as i64, now, decode_ms, activity_ms, encode_ms,
+            (dropped_fps * 10.0).round() / 10.0, RUNG.load(Ordering::Relaxed)
         );
         let _ = std::fs::write(STATS_FILE, json);
     }

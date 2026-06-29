@@ -23,6 +23,7 @@ import { createRpc, Channel, Rpc } from "./rpc";
 import { listChildren, combineHour, readGopBytes, getAvailableDays, getDayCoverage, latestIdxFile, readIdxIncremental, dataReady, daySignature, getLevelsInfo, getLevelCoverage, readLevelGops, readLevelGopData, getGopBytesAt, getRawIndex } from "./storage";
 import { getPassword, checkPassword, isBlacklisted, recordFailedAttempt } from "./auth";
 import { getSystemStats, readEncoderStats } from "./stats";
+import { readControl, writeControl } from "./control";
 import { getTimezone } from "./timezone";
 
 // Match the capture daemon's zone so day boundaries / folders line up.
@@ -154,7 +155,8 @@ async function start(): Promise<void> {
             async getRawIndex(level: number, fromMs: number, toMs: number) { requireAuth(); return getRawIndex(level, fromMs, toMs); },
 
             async serverInfo() { requireAuth(); return { ip, port: SERVER_PORT }; },
-            async getStats() { requireAuth(); return { system: await getSystemStats(DATA_DIR), encoder: await readEncoderStats() }; },
+            async getStats() { requireAuth(); return { system: await getSystemStats(DATA_DIR), encoder: await readEncoderStats(), control: await readControl() }; },
+            async setAlwaysEncode(on: boolean) { requireAuth(); return writeControl({ alwaysEncode: !!on }); },
 
             // ---- live streaming ----
             async startStream(day: string) {

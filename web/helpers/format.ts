@@ -47,8 +47,11 @@ export function formatStats(s: Stats): string {
     const ms = (v?: number) => v != null ? Math.round(v) + "ms" : "—";
     const stages = e && (e.jpegDecodeMs != null || e.activityMs != null || e.encodeMs != null)
         ? ` · decode ${ms(e.jpegDecodeMs)} · activity ${ms(e.activityMs)} · encode ${ms(e.encodeMs)}` : "";
+    // Adaptive ladder: rung>0 means it's shedding work to keep up; drops mean it couldn't.
+    const ladder = e && ((e.rung ?? 0) > 0 || (e.droppedFps ?? 0) > 0)
+        ? ` · ⚙️rung ${e.rung ?? 0}${(e.droppedFps ?? 0) > 0 ? ` · drop ${e.droppedFps}fps` : ""}` : "";
     const temp = sy.tempC != null ? ` · ${sy.tempC.toFixed(1)}°C${sy.tempC >= 75 ? " 🔥" : ""}` : "";
-    return `${fps}${stages} · CPU ${sy.cpuPct}%${temp} · RAM ${gb(sy.ramUsedBytes)}/${gb(sy.ramTotalBytes)} GB · Disk ${gb(sy.diskUsedBytes)}/${gb(sy.diskTotalBytes)} GB · net ↓${bps(sy.netRxBps)} ↑${bps(sy.netTxBps)}`;
+    return `${fps}${stages}${ladder} · CPU ${sy.cpuPct}%${temp} · RAM ${gb(sy.ramUsedBytes)}/${gb(sy.ramTotalBytes)} GB · Disk ${gb(sy.diskUsedBytes)}/${gb(sy.diskTotalBytes)} GB · net ↓${bps(sy.netRxBps)} ↑${bps(sy.netTxBps)}`;
 }
 
 export function statusLabel(s: PlayStatus): string {

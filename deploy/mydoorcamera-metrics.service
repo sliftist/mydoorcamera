@@ -1,0 +1,13 @@
+[Unit]
+Description=mydoorcamera metrics logger (heartbeat to disk + last-resort low-memory reboot)
+After=multi-user.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=/bin/bash /root/mydoorcamera/deploy/metrics-logger.sh
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
