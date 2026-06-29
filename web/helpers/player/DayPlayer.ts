@@ -16,7 +16,6 @@ import { GopSource } from "./gopSource";
 import { Prebuffer } from "./prebuffer";
 import { Renderer } from "./renderer";
 import { getFrame } from "./frameCache";
-import { clockHMS } from "../format";
 import { pushFsmEntry } from "../playerLog";
 
 const MAX_WAIT_MS = 5000;       // give up on a frame's render after this, show "missing"
@@ -187,7 +186,7 @@ export class DayPlayer {
             if (!ref) return false;
             const bmp = await getFrame(this.source, ref, ref.n - 1);
             if (!bmp) return false;
-            this.renderer.drawImage(bmp, `no activity · ${clockHMS(wall)}`);
+            this.renderer.drawImage(bmp, wall, "no activity");
             return true;
         }
         const walls = this.source.frameWalls(gop, gop.n);
@@ -198,7 +197,7 @@ export class DayPlayer {
         }
         const frame = await getFrame(this.source, gop, fi);
         if (!frame) return false;
-        this.renderer.drawImage(frame);
+        this.renderer.drawImage(frame, walls[fi]);
         return true;
     }
 

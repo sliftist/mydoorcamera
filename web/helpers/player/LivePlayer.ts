@@ -51,7 +51,7 @@ export class LivePlayer {
                 try { bitmaps = await decodeGop(Buffer.from(bytes), walls); }
                 catch { continue; }
                 const newest = bitmaps[bitmaps.length - 1];
-                if (newest && !this.stopped) this.renderer.drawImage(newest);
+                if (newest && !this.stopped) this.renderer.drawImage(newest, walls[bitmaps.length - 1] ?? meta.t);
                 for (const b of bitmaps) { try { b.close(); } catch { /* */ } } // copy is done at draw; free them
             }
         } finally {

@@ -23,8 +23,7 @@ const MASK_ROWS = Math.round(0.11 * H), MASK_COLS = Math.round(0.75 * W);
 const masked = (i: number): boolean => { const row = (i / W) | 0, col = i % W; return row < MASK_ROWS && col < MASK_COLS; };
 const COUNTED = FRAME - MASK_ROWS * MASK_COLS;
 
-function boxBlur(src: Float32Array, r: number): Float32Array {
-    const tmp = new Float32Array(FRAME), out = new Float32Array(FRAME);
+function boxBlur(src: Float32Array, r: number, tmp: Float32Array, out: Float32Array): Float32Array {
     for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
         let s = 0, c = 0;
         for (let dx = -r; dx <= r; dx++) { const xx = x + dx; if (xx >= 0 && xx < W) { s += src[y * W + xx]; c++; } }
@@ -56,19 +55,26 @@ export class ActivityModel {
         return bg;
     }
 
-    // Cheap per-frame measure against the CACHED background (diff + gate + density).
+    // Reused per-frame scratch (no per-frame allocation — keeps the event loop free).
+    private s = new Float32Array(FRAME);
+    private mask = new Float32Array(FRAME);
+
+    // Cheap per-frame measure against the CACHED background (diff + gate + density). The global
+    // brightness shift uses the MEAN (O(n), no sort) — the background dominates the frame so the
+    // mean tracks auto-exposure shifts without a per-frame median sort (the old hot spot).
     private activityOf(cur: Buffer, bg: Float32Array): number {
-        const s = new Float32Array(FRAME);
-        const vals: number[] = [];
-        for (let i = 0; i < FRAME; i++) { if (masked(i)) { s[i] = 0; continue; } s[i] = cur[i] - bg[i]; vals.push(s[i]); }
-        const shift = medianOf(vals); // global brightness shift (uniform auto-exposure)
-        const mask = new Float32Array(FRAME);
+        const s = this.s, mask = this.mask;
+        let sum = 0, cnt = 0;
+        for (let i = 0; i < FRAME; i++) { if (masked(i)) { s[i] = 0; continue; } const d = cur[i] - bg[i]; s[i] = d; sum += d; cnt++; }
+        const shift = cnt ? sum / cnt : 0; // global brightness shift (uniform auto-exposure)
         for (let i = 0; i < FRAME; i++) mask[i] = (!masked(i) && Math.abs(s[i] - shift) > STRONG) ? 1 : 0;
-        const density = boxBlur(mask, DENSITY_R);
+        const density = boxBlur(mask, DENSITY_R, this.blurTmp, this.blurOut);
         let area = 0;
         for (let i = 0; i < FRAME; i++) { if (masked(i)) continue; if (density[i] > DENSITY_THR) area++; }
         return area / COUNTED;
     }
+    private blurTmp = new Float32Array(FRAME);
+    private blurOut = new Float32Array(FRAME);
 
     // Measure one GRAY8 frame (length FRAME). The median background is refreshed only every
     // BG_EVERY frames (it changes slowly), so the per-frame cost is just the cheap diff.

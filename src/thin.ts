@@ -78,8 +78,8 @@ function decodeFrames(level: number, g: GopEntry, indices: number[]): Promise<Bu
 }
 
 // Encode a sequence of JPEG frames into one H.264 GOP (hardware h264_v4l2m2m).
-// Returns [sps, pps, slice...] and the slice count. Frames already carry L0's
-// burned-in clock, so no drawtext here.
+// Returns [sps, pps, slice...] and the slice count. No clock overlay — playback draws the
+// timestamp client-side from each frame's stored wall time (same as L0).
 function encodeGop(jpegs: Buffer[]): Promise<{ nals: Buffer[]; frameCount: number }> {
     return new Promise(resolve => {
         const enc = spawn("ffmpeg", [

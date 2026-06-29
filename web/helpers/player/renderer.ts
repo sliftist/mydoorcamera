@@ -16,24 +16,31 @@ export class Renderer {
         this.c2d = canvas.getContext("2d");
     }
 
-    drawImage(source: Drawable, label?: string): void {
+    // Paint a frame and overlay the clock for `wall` (the timestamp is no longer burned into the
+    // video — capture dropped the SW drawtext to stay realtime — so we draw it here from the exact
+    // stored frame time). `note` adds context (e.g. "no activity") next to the clock.
+    drawImage(source: Drawable, wall?: number, note?: string): void {
         if (!this.c2d) return;
         if (!this.sized) { this.canvas.width = source.width; this.canvas.height = source.height; this.sized = true; }
         try { this.c2d.drawImage(source as any, 0, 0, this.canvas.width, this.canvas.height); } catch { /* */ }
-        if (label) this.drawLabel(label);
+        if (wall != null) this.drawClock(wall, note);
     }
 
-    // Overlay text across the top (clobbering the burned-in clock) — used for no-activity spans
-    // to show the real time instead of the stale repeated frame's clock.
-    private drawLabel(text: string): void {
+    // Compact top-left clock chip, sized to its text (mirrors the old burned-in overlay).
+    private drawClock(wall: number, note?: string): void {
         const ctx = this.c2d!, w = this.canvas.width, h = this.canvas.height;
-        ctx.fillStyle = "rgba(0,0,0,0.6)";
-        ctx.fillRect(0, 0, w, Math.round(h * 0.12));
-        ctx.fillStyle = "rgba(255,255,255,0.95)";
+        const text = clockHMS(wall) + (note ? ` · ${note}` : "");
+        const fs = Math.max(11, Math.round(h * 0.035));
+        ctx.font = `${fs}px monospace`;
         ctx.textAlign = "left";
         ctx.textBaseline = "middle";
-        ctx.font = `${Math.round(h * 0.06)}px monospace`;
-        ctx.fillText(text, Math.round(w * 0.02), Math.round(h * 0.06));
+        const padX = Math.round(fs * 0.5), padY = Math.round(fs * 0.35);
+        const tw = ctx.measureText(text).width;
+        const x = Math.round(w * 0.012), y = Math.round(h * 0.012);
+        ctx.fillStyle = "rgba(0,0,0,0.5)";
+        ctx.fillRect(x, y, tw + padX * 2, fs + padY * 2);
+        ctx.fillStyle = "rgba(255,255,255,0.95)";
+        ctx.fillText(text, x + padX, y + padY + fs / 2);
     }
 
     drawMissing(wall: number): void {
