@@ -10,9 +10,12 @@ import { computeRegions, regionsGopCount, ActivityRegion } from "../helpers/acti
 import { getThumbUrl } from "../helpers/thumbnails";
 import { fmtDur } from "../helpers/format";
 
-const CARD_W = 200;     // target card width (px) — column count derives from this
-const CARD_H = 132;     // fixed card height (px) — makes row virtualization trivial
+const CARD_W = 220;     // target card width (px) — column count derives from this
+const CARD_PAD = 6;     // inner padding around each card
+const TEXT_H = 34;      // height reserved for the two text lines under a thumbnail
 const OVERSCAN = 2;     // extra rows rendered beyond the viewport on each side
+// Frames are 16:9; we reserve each card's thumbnail box at that aspect from the column
+// width, so the grid has its exact size before any image loads (no shift, no cropping).
 
 // Activity-region browser: collapsed by default, expands into a virtualized,
 // scrollable GRID of region thumbnails. Shown above the date picker. Clicking a
@@ -63,18 +66,21 @@ export class ActivityPanel extends preact.Component<{}, { scrollTop: number; vie
 
         const w = this.state.viewportW || Math.min(1200, window.innerWidth);
         const cols = Math.max(1, Math.floor(w / CARD_W));
+        const cardWpx = w / cols;
+        const thumbH = (cardWpx - CARD_PAD * 2) * 9 / 16; // 16:9 thumbnail box
+        const cardH = Math.round(thumbH + TEXT_H + CARD_PAD * 2);
         const rows = Math.ceil(regions.length / cols);
-        const total = rows * CARD_H;
+        const total = rows * cardH;
         const vh = this.state.viewportH || Math.round(window.innerHeight * 0.7);
-        const firstRow = Math.max(0, Math.floor(this.state.scrollTop / CARD_H) - OVERSCAN);
-        const lastRow = Math.min(rows, Math.ceil((this.state.scrollTop + vh) / CARD_H) + OVERSCAN);
+        const firstRow = Math.max(0, Math.floor(this.state.scrollTop / cardH) - OVERSCAN);
+        const lastRow = Math.min(rows, Math.ceil((this.state.scrollTop + vh) / cardH) + OVERSCAN);
         const colW = 100 / cols; // percent
         const cards: preact.JSX.Element[] = [];
         for (let row = firstRow; row < lastRow; row++) {
             for (let c = 0; c < cols; c++) {
                 const i = row * cols + c;
                 if (i >= regions.length) break;
-                cards.push(this.card(regions[i], row, c, colW));
+                cards.push(this.card(regions[i], row, c, colW, cardH, thumbH));
             }
         }
 
@@ -90,15 +96,14 @@ export class ActivityPanel extends preact.Component<{}, { scrollTop: number; vie
         );
     }
 
-    private card(r: ActivityRegion, row: number, col: number, colW: number): preact.JSX.Element {
+    private card(r: ActivityRegion, row: number, col: number, colW: number, cardH: number, thumbH: number): preact.JSX.Element {
         const url = getThumbUrl({ level: state.level, t: r.peak.t }); // undefined while loading, "" on failure
         const looped = state.loopStart === r.start && state.loopEnd === r.end;
         return (
             <div key={r.peak.t} onMouseDown={() => loopAndZoomToRegion(r.start, r.end)} title="Click to zoom in and loop this activity region"
-                className={css.vbox(3).pad2(6, 6)}
-                style={{ position: "absolute", top: (row * CARD_H) + "px", left: (col * colW) + "%", width: colW + "%", height: CARD_H + "px", boxSizing: "border-box", cursor: "pointer" }}>
-                <div className={css.hsl(220, 15, 6).relative} style={{ width: "100%", flexGrow: 1, overflow: "hidden", outline: looped ? "2px solid hsl(40,80%,55%)" : "1px solid hsl(220,15%,22%)", outlineOffset: "-1px" }}>
-                    {url ? <img src={url} style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} />
+                className={css.vbox(3)} style={{ position: "absolute", top: (row * cardH) + "px", left: (col * colW) + "%", width: colW + "%", height: cardH + "px", padding: CARD_PAD + "px", boxSizing: "border-box", cursor: "pointer" }}>
+                <div className={css.hsl(220, 15, 6).relative} style={{ width: "100%", height: thumbH + "px", flexShrink: 0, overflow: "hidden", outline: looped ? "2px solid hsl(40,80%,55%)" : "1px solid hsl(220,15%,22%)", outlineOffset: "-1px" }}>
+                    {url ? <img src={url} style={{ width: "100%", height: "100%", objectFit: "contain", display: "block" }} />
                         : <div className={css.fontSize(10).opacity(0.4)} style={{ width: "100%", height: "100%", display: "flex", alignItems: "center", justifyContent: "center" }}>{url === "" ? "—" : "…"}</div>}
                 </div>
                 <div className={css.vbox(1).minWidth(0).fontSize(11)}>
