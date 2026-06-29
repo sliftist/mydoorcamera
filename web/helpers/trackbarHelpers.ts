@@ -147,10 +147,17 @@ export function zoomToRegion(start: number, end: number): void {
     persistView();
 }
 
-// Clicking an activity region: zoom to it and loop it.
-export function loopAndZoomToRegion(start: number, end: number): void {
-    zoomToRegion(start, end);
-    setLoopRegion(start, end);
+// Clicking an activity region: zoom to it and set the loop to its exact range. Seek to the
+// peak-activity frame when paused (so you see the moment, without starting playback) or to the
+// activity start when playing (so it plays the event on a loop). Never changes play/pause state.
+export function goToActivity(startWall: number, endWall: number, peakWall: number): void {
+    zoomToRegion(startWall, endWall);
+    const playing = !!player && player.wantsPlay;
+    const target = playing ? startWall : peakWall;
+    runInAction(() => { state.loopStart = startWall; state.loopEnd = endWall; state.desiredWall = target; });
+    player?.setLoop(startWall, endWall);
+    player?.seekTo(target);
+    saveUrlPosition(target);
 }
 export function clearLoopRegion(): void {
     runInAction(() => { state.loopStart = 0; state.loopEnd = 0; });

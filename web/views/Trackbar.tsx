@@ -7,7 +7,7 @@ import { state } from "../helpers/appState";
 import { clockHMS, fmtDur } from "../helpers/format";
 import { isGopDecoded } from "../helpers/videoHelpers";
 import { navBtnCss } from "../helpers/styles";
-import { setTrackRef, onTrackDown, onTrackHover, onTrackLeave, resetZoom, clearLoopRegion, addLoopAtView, startLoopDrag, loopAndZoomToRegion } from "../helpers/trackbarHelpers";
+import { setTrackRef, onTrackDown, onTrackHover, onTrackLeave, resetZoom, clearLoopRegion, addLoopAtView, startLoopDrag, goToActivity } from "../helpers/trackbarHelpers";
 import { computeRegions } from "../helpers/activityRegions";
 import { saveUrlPosition, nudgeBucket } from "../helpers/navigation";
 import { frameCount } from "../helpers/indexBuffer";
@@ -41,19 +41,19 @@ export class Trackbar extends preact.Component {
                     if (!idx || !idx.length || !widthPx) return null;
                     const regions = computeRegions(idx, state.activityThreshold, vs, ve);
                     if (!regions.length) return null;
-                    const segs = regions.map(r => ({ r, x0: clamp01((r.start - vs) / span) * widthPx, x1: clamp01((r.end - vs) / span) * widthPx }));
-                    const merged: { x0: number; x1: number; s: number; e: number }[] = [];
+                    const segs = regions.map(r => ({ r, x0: clamp01((r.startWall - vs) / span) * widthPx, x1: clamp01((r.endWall - vs) / span) * widthPx }));
+                    const merged: { x0: number; x1: number; s: number; e: number; pk: number; pkAct: number }[] = [];
                     for (const sg of segs) {
                         const last = merged[merged.length - 1];
-                        if (last && sg.x0 - last.x1 < 3) { last.x1 = Math.max(last.x1, sg.x1); last.e = sg.r.end; }
-                        else merged.push({ x0: sg.x0, x1: sg.x1, s: sg.r.start, e: sg.r.end });
+                        if (last && sg.x0 - last.x1 < 3) { last.x1 = Math.max(last.x1, sg.x1); last.e = sg.r.endWall; if (sg.r.peak.aMax > last.pkAct) { last.pkAct = sg.r.peak.aMax; last.pk = sg.r.peakWall; } }
+                        else merged.push({ x0: sg.x0, x1: sg.x1, s: sg.r.startWall, e: sg.r.endWall, pk: sg.r.peakWall, pkAct: sg.r.peak.aMax });
                     }
                     return (
                         <div className={css.hbox(6).width("100%")}>
                             <div style={flank} />
                             <div className={css.relative.flexGrow(1).minWidth(0)} style={{ height: "6px" }}>
                                 {merged.map((m, i) => (
-                                    <div key={i} title="Zoom in and loop this activity" onMouseDown={(e: any) => { e.stopPropagation(); loopAndZoomToRegion(m.s, m.e); }}
+                                    <div key={i} title="Zoom in and loop this activity" onMouseDown={(e: any) => { e.stopPropagation(); goToActivity(m.s, m.e, m.pk); }}
                                         style={{ position: "absolute", top: 0, bottom: 0, left: m.x0.toFixed(1) + "px", width: Math.max(2, m.x1 - m.x0 - 3).toFixed(1) + "px", background: "hsl(40,100%,55%)", cursor: "pointer" }} />
                                 ))}
                             </div>

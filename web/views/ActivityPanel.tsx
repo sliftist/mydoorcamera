@@ -5,7 +5,7 @@ import { css } from "typesafecss";
 import { formatDateTime } from "socket-function/src/formatting/format";
 import { state } from "../helpers/appState";
 import { saveUrlPosition } from "../helpers/navigation";
-import { loopAndZoomToRegion } from "../helpers/trackbarHelpers";
+import { goToActivity } from "../helpers/trackbarHelpers";
 import { computeRegions, regionsGopCount, ActivityRegion } from "../helpers/activityRegions";
 import { getThumbUrl } from "../helpers/thumbnails";
 import { fmtDur } from "../helpers/format";
@@ -53,7 +53,7 @@ export class ActivityPanel extends preact.Component<{}, { scrollTop: number; vie
         const header = (
             <div className={headerCss} style={{ cursor: "pointer", boxSizing: "border-box" }} onClick={() => this.toggle()}>
                 <span style={{ fontSize: "13px" }}>▾ Activity</span>
-                <span className={css.fontSize(12).opacity(0.7)}>{regions.length} section{regions.length === 1 ? "" : "s"} · {fmtDur(regions.reduce((s, r) => s + (r.end - r.start) / 1000, 0))} ({regionsGopCount(regions).toLocaleString()} GOPs)</span>
+                <span className={css.fontSize(12).opacity(0.7)}>{regions.length} section{regions.length === 1 ? "" : "s"} · {fmtDur(regions.reduce((s, r) => s + (r.endWall - r.startWall) / 1000, 0))} ({regionsGopCount(regions).toLocaleString()} GOPs)</span>
                 <span className={css.flexGrow(1)} />
                 <span className={css.hbox(4).alignItems("center").opacity(0.7).fontSize(11)} onClick={(e: any) => e.stopPropagation()} title="Activity threshold — a GOP counts as activity when its value is at least this">
                     threshold
@@ -98,17 +98,17 @@ export class ActivityPanel extends preact.Component<{}, { scrollTop: number; vie
 
     private card(r: ActivityRegion, row: number, col: number, colW: number, cardH: number, thumbH: number): preact.JSX.Element {
         const url = getThumbUrl({ level: state.level, t: r.peak.t }); // undefined while loading, "" on failure
-        const looped = state.loopStart === r.start && state.loopEnd === r.end;
+        const looped = state.loopStart === r.startWall && state.loopEnd === r.endWall;
         return (
-            <div key={r.peak.t} onMouseDown={() => loopAndZoomToRegion(r.start, r.end)} title="Click to zoom in and loop this activity region"
+            <div key={r.peak.t} onMouseDown={() => goToActivity(r.startWall, r.endWall, r.peakWall)} title="Click to zoom in and loop this activity region"
                 className={css.vbox(3)} style={{ position: "absolute", top: (row * cardH) + "px", left: (col * colW) + "%", width: colW + "%", height: cardH + "px", padding: CARD_PAD + "px", boxSizing: "border-box", cursor: "pointer" }}>
                 <div className={css.hsl(220, 15, 6).relative} style={{ width: "100%", height: thumbH + "px", flexShrink: 0, overflow: "hidden", outline: looped ? "2px solid hsl(40,80%,55%)" : "1px solid hsl(220,15%,22%)", outlineOffset: "-1px" }}>
                     {url ? <img src={url} style={{ width: "100%", height: "100%", objectFit: "contain", display: "block" }} />
                         : <div className={css.fontSize(10).opacity(0.4)} style={{ width: "100%", height: "100%", display: "flex", alignItems: "center", justifyContent: "center" }}>{url === "" ? "—" : "…"}</div>}
                 </div>
                 <div className={css.vbox(1).minWidth(0).fontSize(11)}>
-                    <span style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{formatDateTime(r.start)}</span>
-                    <span className={css.fontSize(10).opacity(0.6)}>{fmtDur((r.end - r.start) / 1000)} ({r.gopCount} GOP{r.gopCount === 1 ? "" : "s"}) · peak {r.peak.aMax.toFixed(4)}</span>
+                    <span style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{formatDateTime(r.startWall)}</span>
+                    <span className={css.fontSize(10).opacity(0.6)}>{fmtDur((r.endWall - r.startWall) / 1000)} ({r.frameCount} frame{r.frameCount === 1 ? "" : "s"}) · peak {r.peak.aMax.toFixed(4)}</span>
                 </div>
             </div>
         );

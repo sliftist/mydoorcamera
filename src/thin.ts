@@ -106,11 +106,7 @@ async function buildLevel(level: number): Promise<boolean> {
             const gop = annexb.length ? await reencode(annexb) : [];
             const frameCount = gop.filter(n => { const t = n[0] & 0x1f; return t === 5 || t === 1; }).length;
             if (frameCount > 0) {
-                const avgs = active.map(g => g.a).filter(a => a >= 0);
-                const maxs = active.map(g => Math.max(g.a, g.aMax)).filter(a => a >= 0);
-                const aAvg = avgs.length ? avgs.reduce((s, x) => s + x, 0) / avgs.length : -1;
-                const aMax = maxs.length ? Math.max(...maxs) : -1;
-                await writers[level].writeGop(gop, win[0].t, we, frameCount, aAvg, aMax);
+                await writers[level].writeGop(gop, win[0].t, we, frameCount); // per-frame acts: Phase 4
                 lastEncoded[level] = win[0].t;
                 did = true;
             }
@@ -118,7 +114,7 @@ async function buildLevel(level: number): Promise<boolean> {
             // The whole window is static: propagate a no-change record referencing the last
             // encoded thinned GOP (skipped if we have no reference yet).
             const n = win.reduce((s, g) => s + g.n, 0);
-            await writers[level].writeNoChange(win[0].t, we, lastEncoded[level]!, n);
+            await writers[level].writeNoChange(win[0].t, we, lastEncoded[level]!, new Uint16Array(n));
             did = true;
         }
         cursor[level] = we;

@@ -10,7 +10,7 @@
 //
 // `ActivityModel` holds the background ring; feed it the live GRAY8 frames in order.
 
-export const W = 256, H = 144, FRAME = W * H;   // grayscale analysis frame
+export const W = 120, H = 68, FRAME = W * H;    // small grayscale analysis frame (cheap per-frame activity)
 const STRONG = 12;        // a pixel must differ from background by > this to be a candidate
 const DENSITY_R = 2;      // clustering radius (local strong-pixel density window)
 const DENSITY_THR = 0.18; // a candidate counts only where >18% of its neighborhood is also strong
@@ -42,8 +42,12 @@ function medianOf(a: number[]): number { if (!a.length) return 0; const s = a.sl
 function frameMean(f: Buffer): number { let s = 0; for (let i = 0; i < FRAME; i++) s += f[i]; return s / FRAME; }
 function frameVar(f: Buffer, m: number): number { let s = 0; for (let i = 0; i < FRAME; i++) s += (f[i] - m) * (f[i] - m); return s / FRAME; }
 
+const BG_EVERY = 15; // recompute the (expensive) median background every N frames, not every frame
+
 export class ActivityModel {
     private ring: Buffer[] = []; // recent good frames (background source)
+    private bg: Float32Array | null = null; // cached median background
+    private since = 0;           // frames until the next background refresh
 
     // Per-pixel median background over the ring.
     private backgroundMedian(): Float32Array {
@@ -52,8 +56,8 @@ export class ActivityModel {
         return bg;
     }
 
-    private activityOf(cur: Buffer): number {
-        const bg = this.backgroundMedian();
+    // Cheap per-frame measure against the CACHED background (diff + gate + density).
+    private activityOf(cur: Buffer, bg: Float32Array): number {
         const s = new Float32Array(FRAME);
         const vals: number[] = [];
         for (let i = 0; i < FRAME; i++) { if (masked(i)) { s[i] = 0; continue; } s[i] = cur[i] - bg[i]; vals.push(s[i]); }
@@ -66,14 +70,18 @@ export class ActivityModel {
         return area / COUNTED;
     }
 
-    // Measure one GRAY8 frame (length FRAME). Updates the background ring. Returns the
-    // activity fraction (0 while warming up, or for blank/corrupt frames).
+    // Measure one GRAY8 frame (length FRAME). The median background is refreshed only every
+    // BG_EVERY frames (it changes slowly), so the per-frame cost is just the cheap diff.
     compute(gray: Buffer): number {
         const v = frameVar(gray, frameMean(gray));
         if (v < LOWVAR) return 0; // blank/corrupt -> skip (don't measure, don't learn)
-        const a = this.ring.length >= MIN_RING ? this.activityOf(gray) : 0;
-        this.ring.push(Buffer.from(gray)); // copy: the input may be a slice of a shared buffer
-        if (this.ring.length > RING) this.ring.shift();
-        return a;
+        if (this.since <= 0 || !this.bg) {
+            this.ring.push(Buffer.from(gray)); // copy: the input may be a slice of a shared buffer
+            if (this.ring.length > RING) this.ring.shift();
+            if (this.ring.length >= MIN_RING) this.bg = this.backgroundMedian();
+            this.since = BG_EVERY;
+        }
+        this.since--;
+        return this.bg ? this.activityOf(gray, this.bg) : 0;
     }
 }
