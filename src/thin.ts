@@ -231,5 +231,7 @@ setInterval(async () => {
     catch (e) { console.error("[thin] retention failed:", (e as Error).message); }
 }, 60_000);
 
-console.log(`[thin] worker started (levels 1..${THIN_LEVELS}, smart-from-L0, ${THIN_BITRATE / 1e6} Mbps re-encode)`);
-loop();
+// Level building now happens IN THE RECORDER (direct thinning from the original frames). This Node
+// worker is retention-only — it no longer builds L1..L4 (that would double-write the thinned data).
+console.log(`[thin] worker started (retention only; thinning is done by the recorder)`);
+void loop; // (kept for reference; intentionally not started)

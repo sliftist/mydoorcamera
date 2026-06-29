@@ -14,6 +14,7 @@
 
 mod activity;
 mod storage;
+mod thin;
 
 use activity::{ActivityModel, FRAME, H as GH, W as GW};
 use jpeg_decoder::PixelFormat;
@@ -35,7 +36,6 @@ const VIDEO_DEVICE: &str = "/dev/video0";
 const WIDTH: u32 = 1920;
 const HEIGHT: u32 = 1080;
 const BITRATE: u32 = 5_000_000;
-const DATA_DIR: &str = "/var/lib/mydoorcamera/video";
 const STATS_FILE: &str = "/var/lib/mydoorcamera/encoder-stats.json";
 const CONTROL_FILE: &str = "/var/lib/mydoorcamera/control.json";
 const ACTIVITY_THRESHOLD: f64 = 0.0001; // GOP max activity below this -> no encode
@@ -233,12 +233,16 @@ fn main() {
     let session = now_ms() as u64;
 
     let (gop_tx, gop_rx) = mpsc::sync_channel::<GopMsg>(CHAN_CAP);
+    // Thinning runs off-thread on its own (best-effort) bounded channel — dropping thinning input
+    // under load is fine (it only coarsens the overview), and it must never stall capture.
+    let (thin_tx, thin_rx) = mpsc::sync_channel::<thin::Frame>(60);
 
     std::thread::spawn(move || manager_loop(session, gop_rx));
+    std::thread::spawn(move || thin::run(session, thin_rx));
     std::thread::spawn(stats_loop);
     std::thread::spawn(mem_guard);
 
-    if let Err(e) = capture_loop(gop_tx) {
+    if let Err(e) = capture_loop(gop_tx, thin_tx) {
         eprintln!("[recorder] capture failed: {}", e);
         std::process::exit(1);
     }
@@ -261,7 +265,7 @@ fn mem_guard() {
 }
 
 fn manager_loop(session: u64, gop_rx: mpsc::Receiver<GopMsg>) {
-    let mut writer = Writer::new(DATA_DIR, session);
+    let mut writer = Writer::new(0, session);
     let mut last_encoded_t: Option<f64> = None;
     let mut enc: Option<Encoder> = None;
     let mut cur_period: usize = 0;
@@ -270,7 +274,8 @@ fn manager_loop(session: u64, gop_rx: mpsc::Receiver<GopMsg>) {
     let write_gops = |writer: &mut Writer, last: &mut Option<f64>, pending: &mut VecDeque<(i64, Vec<u16>, Instant)>, gops: Vec<(Vec<Vec<u8>>, usize)>| {
         for (nals, fc) in gops {
             if let Some((pt, pacts, created)) = pending.pop_front() {
-                if let Err(e) = writer.write_gop(&nals, pt, fc, &pacts) { eprintln!("[recorder] write_gop: {}", e); }
+                let e = pt + ((fc as f64 / 30.0) * 1000.0).round() as i64;
+                if let Err(err) = writer.write_gop(&nals, pt, e, fc, &pacts) { eprintln!("[recorder] write_gop: {}", err); }
                 *last = Some(pt as f64);
                 ENC_SUM_MS.fetch_add(created.elapsed().as_millis() as u64, Ordering::Relaxed);
                 ENC_CNT.fetch_add(1, Ordering::Relaxed);
@@ -305,7 +310,8 @@ fn manager_loop(session: u64, gop_rx: mpsc::Receiver<GopMsg>) {
             GopMsg::Static { t, acts } => {
                 if let Some(e) = enc.take() { let rest = e.close(); write_gops(&mut writer, &mut last_encoded_t, &mut pending, rest); pending.clear(); }
                 if let Some(rt) = last_encoded_t {
-                    if let Err(e) = writer.write_no_change(t, rt, &acts) { eprintln!("[recorder] write_no_change: {}", e); }
+                    let e = t + ((acts.len() as f64 / 30.0) * 1000.0).round() as i64;
+                    if let Err(err) = writer.write_no_change(t, e, rt, &acts) { eprintln!("[recorder] write_no_change: {}", err); }
                 }
             }
         }
@@ -325,7 +331,7 @@ fn select_top(col: &[(Vec<u8>, f32, i64)], k: usize) -> (Vec<Vec<u8>>, Vec<u16>)
     (idx.iter().map(|&i| col[i].0.clone()).collect(), idx.iter().map(|&i| act_to_u16(col[i].1)).collect())
 }
 
-fn capture_loop(gop_tx: mpsc::SyncSender<GopMsg>) -> std::io::Result<()> {
+fn capture_loop(gop_tx: mpsc::SyncSender<GopMsg>, thin_tx: mpsc::SyncSender<thin::Frame>) -> std::io::Result<()> {
     let dev = Device::with_path(VIDEO_DEVICE)?;
     let mut fmt: Format = Capture::format(&dev)?;
     fmt.width = WIDTH;
@@ -377,6 +383,8 @@ fn capture_loop(gop_tx: mpsc::SyncSender<GopMsg>) -> std::io::Result<()> {
             }
             None => 0.0,
         };
+        // Feed the thinner (best-effort: drop if it's behind — never stall capture).
+        let _ = thin_tx.try_send((jpeg.clone(), act, t));
         col.push((jpeg, act, t));
 
         if col.len() < decode_target { continue; }
