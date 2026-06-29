@@ -177,6 +177,19 @@ export class StorageWriter {
         this.tail = this.tail.then(run).catch(err => { console.error("[storage] writeGop failed:", (err as Error)?.message); });
         return this.tail;
     }
+
+    // A GOP with no activity: write only an index record (no video bytes). `l` (length) = 0
+    // is the sentinel; the `o` (offset) field carries `refT` — the start time of the GOP
+    // whose last frame this static span repeats. Activity is 0.
+    writeNoChange(timeMs: number, refT: number, frameCount: number): Promise<void> {
+        const run = async (): Promise<void> => {
+            const e = timeMs + Math.round((frameCount / 30) * 1000);
+            const idxPath = path.join(DATA_DIR, ...dayPartsOf(timeMs), `${hourOf(timeMs)}.${SESSION}.idx`);
+            await fsp.appendFile(idxPath, encodeRecord(timeMs, e, refT, 0, frameCount, 0));
+        };
+        this.tail = this.tail.then(run).catch(err => { console.error("[storage] writeNoChange failed:", (err as Error)?.message); });
+        return this.tail;
+    }
 }
 
 // ---- read side ----
@@ -446,6 +459,16 @@ export class LevelWriter {
             await fsp.appendFile(this.idxPath, encodeVals([t, e, o, body.length, frameCount, aAvg, aMax]));
         };
         this.tail = this.tail.then(run).catch(err => { console.error(`[storage] L${this.level} writeGop failed:`, (err as Error)?.message); });
+        return this.tail;
+    }
+
+    // No-change (static) thinned GOP: index record only (l=0 sentinel, o=refT), no video bytes.
+    writeNoChange(t: number, e: number, refT: number, frameCount: number): Promise<void> {
+        const run = async (): Promise<void> => {
+            await this.ensure(t);
+            await fsp.appendFile(this.idxPath, encodeVals([t, e, refT, 0, frameCount, 0, 0]));
+        };
+        this.tail = this.tail.then(run).catch(err => { console.error(`[storage] L${this.level} writeNoChange failed:`, (err as Error)?.message); });
         return this.tail;
     }
 }

@@ -16,6 +16,7 @@ import { GopSource } from "./gopSource";
 import { Prebuffer } from "./prebuffer";
 import { Renderer } from "./renderer";
 import { getFrame } from "./frameCache";
+import { clockHMS } from "../format";
 import { pushFsmEntry } from "../playerLog";
 
 const MAX_WAIT_MS = 5000;       // give up on a frame's render after this, show "missing"
@@ -173,6 +174,22 @@ export class DayPlayer {
     private async drawFrameAt(wall: number): Promise<boolean> {
         const gop = await this.source.gopForWall(wall);
         if (!gop) return false;
+        // No-change (static) span: it has no video of its own.
+        if (this.source.isNoChange(gop)) {
+            if (this.gapModeVal === "skip") {
+                const next = await this.source.nextActiveStart(gop.e + 1);
+                if (next != null) this.jump(next);
+                else { this.playing = false; this.log("END"); }
+                return false; // the jump (or pause) supersedes this render
+            }
+            // blank: repeat the referenced frame, clobbering the clock with the real time.
+            const ref = await this.source.gopForWall(this.source.refOf(gop));
+            if (!ref) return false;
+            const bmp = await getFrame(this.source, ref, ref.n - 1);
+            if (!bmp) return false;
+            this.renderer.drawImage(bmp, `no activity · ${clockHMS(wall)}`);
+            return true;
+        }
         const walls = this.source.frameWalls(gop, gop.n);
         let fi = 0;
         for (let i = 0; i < walls.length; i++) {

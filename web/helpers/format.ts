@@ -43,8 +43,12 @@ export function formatStats(s: Stats): string {
     const sy = s.system;
     // Recording FPS (15s avg) first — drops below ~30 if capture falls behind.
     const fps = s.encoder ? `rec ${s.encoder.fps}fps${s.encoder.fps < 29 ? " ⚠️" : ""}` : "rec —";
+    const e = s.encoder;
+    const ms = (v?: number) => v != null ? Math.round(v) + "ms" : "—";
+    const stages = e && (e.jpegDecodeMs != null || e.activityMs != null || e.encodeMs != null)
+        ? ` · decode ${ms(e.jpegDecodeMs)} · activity ${ms(e.activityMs)} · encode ${ms(e.encodeMs)}` : "";
     const temp = sy.tempC != null ? ` · ${sy.tempC.toFixed(1)}°C${sy.tempC >= 75 ? " 🔥" : ""}` : "";
-    return `${fps} · CPU ${sy.cpuPct}%${temp} · RAM ${gb(sy.ramUsedBytes)}/${gb(sy.ramTotalBytes)} GB · Disk ${gb(sy.diskUsedBytes)}/${gb(sy.diskTotalBytes)} GB · net ↓${bps(sy.netRxBps)} ↑${bps(sy.netTxBps)}`;
+    return `${fps}${stages} · CPU ${sy.cpuPct}%${temp} · RAM ${gb(sy.ramUsedBytes)}/${gb(sy.ramTotalBytes)} GB · Disk ${gb(sy.diskUsedBytes)}/${gb(sy.diskTotalBytes)} GB · net ↓${bps(sy.netRxBps)} ↑${bps(sy.netTxBps)}`;
 }
 
 export function statusLabel(s: PlayStatus): string {

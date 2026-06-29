@@ -26,12 +26,11 @@ export class Prebuffer {
         let gops: GopEntry[] = [];
         try { gops = await this.source.gopsFrom(playWall, BYTES_AHEAD_GOPS); }
         catch { return; }
-        for (let i = 0; i < gops.length; i++) {
-            if (i < DECODE_AHEAD_GOPS) {
-                try { await getFrame(this.source, gops[i], 0); } catch { /* */ }
-            } else if (!this.source.hasBytes(gops[i])) {
-                void this.source.getBytes(gops[i], false).catch(() => { /* */ });
-            }
+        let decoded = 0;
+        for (const g of gops) {
+            if (this.source.isNoChange(g)) continue; // static span: no bytes to fetch/decode
+            if (decoded < DECODE_AHEAD_GOPS) { try { await getFrame(this.source, g, 0); decoded++; } catch { /* */ } }
+            else if (!this.source.hasBytes(g)) void this.source.getBytes(g, false).catch(() => { /* */ });
         }
     }
 }

@@ -46,6 +46,23 @@ export class GopSource {
         return best;
     }
 
+    // No-change (static) GOPs carry no video bytes: l === 0, and the `o` field is the ref —
+    // the start time of the GOP whose last frame this span repeats.
+    isNoChange(g: GopEntry): boolean { return g.l === 0; }
+    refOf(g: GopEntry): number { return g.o; }
+    // First active (has-video) GOP start at or after `fromWall` — used to skip no-change spans.
+    async nextActiveStart(fromWall: number): Promise<number | null> {
+        if (this.level > 0) {
+            await this.ensureLevelLoaded();
+            for (const g of this.levelGops) if (g.t >= fromWall && g.l > 0) return g.t;
+            return null;
+        }
+        for (let hn = this.hourNumOf(fromWall); hn <= 23; hn++) {
+            for (const g of await this.ensureHour(hn)) if (g.t >= fromWall && g.l > 0) return g.t;
+        }
+        return null;
+    }
+
     // ---- geometry ----
     private hourNumOf(wall: number): number { return Math.floor((wall - this.dayStartMs) / 3600_000); }
     gopDurMs(g: GopEntry): number { return this.level > 0 ? Math.max(1, g.e - g.t) : Math.round((g.n / FPS) * 1000); }

@@ -46,7 +46,7 @@ export const state = observable({
     // zoom) so zooming in reveals per-GOP detail instead of period-wide buckets.
     viewActivity: null as { fromMs: number; toMs: number; activity: number[] } | null,
     activityExp: 0.4,                // gamma for the activity chart (<1 emphasizes small activity); restored from ?ac
-    gapMode: "blank" as "blank" | "skip", // how playback crosses a footage gap: blank+timestamp, or skip ahead; restored from ?gap
+    gapMode: "skip" as "blank" | "skip", // how playback crosses a footage/no-activity gap: skip ahead (default), or blank+timestamp; restored from ?gap
     // ---- activity regions + looping ----
     activityThreshold: 0.0001,       // aMax >= this counts as activity for region detection; restored from ?at
     activityPanelOpen: false,        // is the activity-region panel expanded; restored from ?ar

@@ -22,7 +22,7 @@ export type Stats = {
         netRxBps: number; netTxBps: number;
         tempC: number | null;
     };
-    encoder: { fps: number; cpuPct: number; updatedMs: number } | null;
+    encoder: { fps: number; cpuPct: number; updatedMs: number; jpegDecodeMs?: number; activityMs?: number; encodeMs?: number } | null;
 };
 
 export class CameraApi {

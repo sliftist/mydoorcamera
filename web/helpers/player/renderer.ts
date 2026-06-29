@@ -16,10 +16,24 @@ export class Renderer {
         this.c2d = canvas.getContext("2d");
     }
 
-    drawImage(source: Drawable): void {
+    drawImage(source: Drawable, label?: string): void {
         if (!this.c2d) return;
         if (!this.sized) { this.canvas.width = source.width; this.canvas.height = source.height; this.sized = true; }
         try { this.c2d.drawImage(source as any, 0, 0, this.canvas.width, this.canvas.height); } catch { /* */ }
+        if (label) this.drawLabel(label);
+    }
+
+    // Overlay text across the top (clobbering the burned-in clock) — used for no-activity spans
+    // to show the real time instead of the stale repeated frame's clock.
+    private drawLabel(text: string): void {
+        const ctx = this.c2d!, w = this.canvas.width, h = this.canvas.height;
+        ctx.fillStyle = "rgba(0,0,0,0.6)";
+        ctx.fillRect(0, 0, w, Math.round(h * 0.12));
+        ctx.fillStyle = "rgba(255,255,255,0.95)";
+        ctx.textAlign = "left";
+        ctx.textBaseline = "middle";
+        ctx.font = `${Math.round(h * 0.06)}px monospace`;
+        ctx.fillText(text, Math.round(w * 0.02), Math.round(h * 0.06));
     }
 
     drawMissing(wall: number): void {

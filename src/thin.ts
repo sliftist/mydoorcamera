@@ -20,7 +20,8 @@ const START_CODE = Buffer.from([0, 0, 0, 1]);
 
 const writers: LevelWriter[] = [];
 const cursor: (number | null)[] = []; // next window-start (epoch ms) per level
-for (let l = 0; l <= THIN_LEVELS; l++) { writers.push(new LevelWriter(l)); cursor.push(null); }
+const lastEncoded: (number | undefined)[] = []; // start time of the last encoded GOP per level (no-change ref)
+for (let l = 0; l <= THIN_LEVELS; l++) { writers.push(new LevelWriter(l)); cursor.push(null); lastEncoded.push(undefined); }
 
 // SPS+PPS+IDR of a source GOP as an Annex-B access unit (one decodable frame).
 async function keyframeAU(srcLevel: number, g: GopEntry): Promise<Buffer> {
@@ -96,18 +97,29 @@ async function buildLevel(level: number): Promise<boolean> {
         const we = ws + span;
         const win: GopEntry[] = [];
         while (i < srcAll.length && srcAll[i].t < we) { if (srcAll[i].t >= ws) win.push(srcAll[i]); i++; }
-        if (win.length) {
-            const annexb = Buffer.concat(await Promise.all(win.map(g => keyframeAU(srcLevel, g))));
+        if (!win.length) { cursor[level] = we; continue; }
+        // Only active (has-video, l>0) source GOPs contribute keyframes; no-change source
+        // GOPs carry no bytes.
+        const active = win.filter(g => g.l > 0);
+        if (active.length) {
+            const annexb = Buffer.concat(await Promise.all(active.map(g => keyframeAU(srcLevel, g))));
             const gop = annexb.length ? await reencode(annexb) : [];
             const frameCount = gop.filter(n => { const t = n[0] & 0x1f; return t === 5 || t === 1; }).length;
             if (frameCount > 0) {
-                const avgs = win.map(g => g.a).filter(a => a >= 0);
-                const maxs = win.map(g => Math.max(g.a, g.aMax)).filter(a => a >= 0);
+                const avgs = active.map(g => g.a).filter(a => a >= 0);
+                const maxs = active.map(g => Math.max(g.a, g.aMax)).filter(a => a >= 0);
                 const aAvg = avgs.length ? avgs.reduce((s, x) => s + x, 0) / avgs.length : -1;
                 const aMax = maxs.length ? Math.max(...maxs) : -1;
                 await writers[level].writeGop(gop, win[0].t, we, frameCount, aAvg, aMax);
+                lastEncoded[level] = win[0].t;
                 did = true;
             }
+        } else if (lastEncoded[level] !== undefined) {
+            // The whole window is static: propagate a no-change record referencing the last
+            // encoded thinned GOP (skipped if we have no reference yet).
+            const n = win.reduce((s, g) => s + g.n, 0);
+            await writers[level].writeNoChange(win[0].t, we, lastEncoded[level]!, n);
+            did = true;
         }
         cursor[level] = we;
     }

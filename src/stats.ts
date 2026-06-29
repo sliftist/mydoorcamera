@@ -18,7 +18,12 @@ export type SystemStats = {
     tempC: number | null;    // SoC temperature in °C (null if unreadable)
 };
 
-export type EncoderStats = { fps: number; cpuPct: number; updatedMs: number };
+export type EncoderStats = {
+    fps: number; cpuPct: number; updatedMs: number;
+    jpegDecodeMs?: number;   // avg ms to decode one JPEG (capture -> gray) over the last window
+    activityMs?: number;     // avg ms to run the activity check on one frame
+    encodeMs?: number;       // avg ms to H.264-encode one (active) GOP
+};
 
 const STATS_FILE = "/var/lib/mydoorcamera/encoder-stats.json";
 

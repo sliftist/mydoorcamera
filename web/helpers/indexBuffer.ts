@@ -3,7 +3,9 @@
 // and frame counts. The on-disk framing is [u32 len][f64 fields][u32 len] with
 // fields [t, e, o, l, n, a(, aMax)] (see src/storage.ts).
 
-export type IndexGop = { t: number; e: number; n: number; aMax: number };
+// noChange: a static GOP with no video bytes (l === 0); `ref` is the start time of the GOP
+// whose last frame it repeats (carried in the `o` field). aMax is 0 for these.
+export type IndexGop = { t: number; e: number; n: number; aMax: number; noChange: boolean; ref: number };
 
 export function decodeIndex(u8: Uint8Array): IndexGop[] {
     const dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
@@ -16,10 +18,13 @@ export function decodeIndex(u8: Uint8Array): IndexGop[] {
         const k = len / 8;
         const t = dv.getFloat64(p + 4, true);
         const e = dv.getFloat64(p + 12, true);
+        const o = dv.getFloat64(p + 20, true);              // field 2 (offset, or refT when no-change)
+        const l = dv.getFloat64(p + 28, true);              // field 3 (length; 0 => no-change)
         const n = dv.getFloat64(p + 36, true);              // field 4
         const a = k > 5 ? dv.getFloat64(p + 44, true) : -1; // field 5
         const aMax = k > 6 ? dv.getFloat64(p + 52, true) : a; // field 6 (thinned avg+max)
-        out.push({ t, e, n, aMax });
+        const noChange = l === 0;
+        out.push({ t, e, n, aMax: noChange ? 0 : aMax, noChange, ref: noChange ? o : 0 });
         p += 4 + len + 4;
     }
     out.sort((x, y) => x.t - y.t);
