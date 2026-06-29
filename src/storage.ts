@@ -284,7 +284,14 @@ export async function getRawIndex(level: number, fromMs: number, toMs: number): 
         if (r.end <= fromMs || r.start >= toMs) continue;
         const absDir = path.join(root, ...b.dir);
         for (const f of (await readdirSafe(absDir)).filter(x => x.startsWith(b.stem + ".") && x.endsWith(".idx")).sort()) {
-            try { parts.push(await fsp.readFile(path.join(absDir, f))); } catch { /* */ }
+            try {
+                const buf = await fsp.readFile(path.join(absDir, f));
+                // Trim any partial/corrupt trailing record (e.g. a session killed mid-append). The
+                // client parses the concatenation in one pass, so one bad record would otherwise
+                // hide every later session's data. `consumed` is the length of valid records.
+                const { consumed } = decodeRecords(buf, f);
+                parts.push(consumed === buf.length ? buf : buf.subarray(0, consumed));
+            } catch { /* */ }
         }
     }
     return Buffer.concat(parts);
