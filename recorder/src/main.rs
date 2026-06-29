@@ -342,7 +342,109 @@ fn select_top(col: &[(Vec<u8>, f32, i64)], k: usize) -> (Vec<Vec<u8>>, Vec<u16>)
     (idx.iter().map(|&i| col[i].0.clone()).collect(), idx.iter().map(|&i| act_to_u16(col[i].1)).collect())
 }
 
+// Per-frame pipeline state, shared by the real (V4L2) and the test (synthetic) input sources so
+// both exercise the exact same path: activity -> GOP -> ladder/drop -> encode + thin.
+struct CapState {
+    model: ActivityModel,
+    col: Vec<(Vec<u8>, f32, i64)>,
+    have_encoded: bool,
+    last_hour_key: Option<i64>,
+    raw_i: u64,
+    last_drop: Instant,
+}
+impl CapState {
+    fn new() -> Self {
+        CapState { model: ActivityModel::new(), col: Vec::new(), have_encoded: false, last_hour_key: None, raw_i: 0, last_drop: Instant::now() }
+    }
+
+    fn handle(&mut self, jpeg: Vec<u8>, gop_tx: &mpsc::SyncSender<GopMsg>, thin_tx: &mpsc::SyncSender<thin::Frame>) {
+        FRAMES.fetch_add(1, Ordering::Relaxed);
+        self.raw_i += 1;
+        let rung = RUNG.load(Ordering::Relaxed);
+        let (stride, decode_target, enc_budget) = rung_params(rung);
+        if stride > 1 && self.raw_i % stride as u64 != 0 { return; } // skip non-stride frames
+
+        let t = now_ms();
+        let d0 = Instant::now();
+        let gray = decode_gray(&jpeg);
+        DEC_SUM_US.fetch_add(d0.elapsed().as_micros() as u64, Ordering::Relaxed);
+        DEC_CNT.fetch_add(1, Ordering::Relaxed);
+        let act = match gray {
+            Some(g) => {
+                let a0 = Instant::now();
+                let a = self.model.compute(&g);
+                ACT_SUM_US.fetch_add(a0.elapsed().as_micros() as u64, Ordering::Relaxed);
+                ACT_CNT.fetch_add(1, Ordering::Relaxed);
+                a
+            }
+            None => 0.0,
+        };
+        let _ = thin_tx.try_send((jpeg.clone(), act, t)); // best-effort: drop if behind, never stall
+        self.col.push((jpeg, act, t));
+        if self.col.len() < decode_target { return; }
+
+        // ---- finalize this GOP ----
+        let gop_t = self.col[0].2;
+        let mut mx = 0f32;
+        for c in &self.col { if c.1 > mx { mx = c.1; } }
+        let hour_key = file_hour_key(gop_t);
+        let new_file = self.last_hour_key != Some(hour_key);
+        self.last_hour_key = Some(hour_key);
+        let active = (mx as f64) >= ACTIVITY_THRESHOLD || !self.have_encoded || new_file || encode_all();
+        let frames = std::mem::take(&mut self.col);
+
+        if active {
+            self.have_encoded = true;
+            let (jpegs, acts) = select_top(&frames, enc_budget);
+            match gop_tx.try_send(GopMsg::Active { t: gop_t, acts, jpegs }) {
+                Ok(()) => {}
+                Err(mpsc::TrySendError::Full(_)) => {
+                    // Encoder is behind — drop this GOP and climb a rung (do less next time).
+                    DROPS.fetch_add(1, Ordering::Relaxed);
+                    self.last_drop = Instant::now();
+                    if rung < MAX_RUNG { RUNG.store(rung + 1, Ordering::Relaxed); }
+                }
+                Err(mpsc::TrySendError::Disconnected(_)) => {}
+            }
+        } else {
+            let acts: Vec<u16> = frames.iter().map(|c| act_to_u16(c.1)).collect();
+            let _ = gop_tx.try_send(GopMsg::Static { t: gop_t, acts });
+        }
+
+        if rung > 0 && self.last_drop.elapsed() >= Duration::from_secs(RECOVER_SECS) {
+            RUNG.store(rung - 1, Ordering::Relaxed); // descend after a calm stretch
+            self.last_drop = Instant::now();
+        }
+    }
+}
+
+// MJPEG byte-stream -> individual JPEG frames (for the synthetic test input).
+struct JpegSplitter { buf: Vec<u8> }
+impl JpegSplitter {
+    fn new() -> Self { JpegSplitter { buf: Vec::new() } }
+    fn find2(&self, a: u8, b: u8, from: usize) -> Option<usize> {
+        let s = &self.buf;
+        let mut i = from;
+        while i + 1 < s.len() { if s[i] == a && s[i + 1] == b { return Some(i); } i += 1; }
+        None
+    }
+    fn push(&mut self, chunk: &[u8]) -> Vec<Vec<u8>> {
+        self.buf.extend_from_slice(chunk);
+        let mut out = Vec::new();
+        loop {
+            let soi = match self.find2(0xFF, 0xD8, 0) { Some(i) => i, None => { if self.buf.len() > 1 { let k = self.buf.len() - 1; self.buf.drain(0..k); } break; } };
+            if soi > 0 { self.buf.drain(0..soi); }
+            let eoi = match self.find2(0xFF, 0xD9, 2) { Some(i) => i, None => break };
+            out.push(self.buf[0..eoi + 2].to_vec());
+            self.buf.drain(0..eoi + 2);
+        }
+        out
+    }
+}
+
 fn capture_loop(gop_tx: mpsc::SyncSender<GopMsg>, thin_tx: mpsc::SyncSender<thin::Frame>) -> std::io::Result<()> {
+    if std::env::var("MYDOORCAMERA_TEST").is_ok() { return test_loop(gop_tx, thin_tx); }
+
     let dev = Device::with_path(VIDEO_DEVICE)?;
     let mut fmt: Format = Capture::format(&dev)?;
     fmt.width = WIDTH;
@@ -351,14 +453,8 @@ fn capture_loop(gop_tx: mpsc::SyncSender<GopMsg>, thin_tx: mpsc::SyncSender<thin
     Capture::set_format(&dev, &fmt)?;
     let mut stream = MmapStream::with_buffers(&dev, Type::VideoCapture, 8)?;
 
-    let mut model = ActivityModel::new();
-    let mut col: Vec<(Vec<u8>, f32, i64)> = Vec::new(); // decoded frames of the current GOP
-    let mut have_encoded = false;
-    let mut last_hour_key: Option<i64> = None;
-    let mut raw_i: u64 = 0;
+    let mut st = CapState::new();
     let mut errs = 0u32;
-    let mut last_drop = Instant::now();
-
     loop {
         let (buf, _meta) = match stream.next() {
             Ok(v) => { errs = 0; v }
@@ -370,71 +466,38 @@ fn capture_loop(gop_tx: mpsc::SyncSender<GopMsg>, thin_tx: mpsc::SyncSender<thin
                 continue;
             }
         };
-        FRAMES.fetch_add(1, Ordering::Relaxed);
-        raw_i += 1;
-
-        let rung = RUNG.load(Ordering::Relaxed);
-        let (stride, decode_target, enc_budget) = rung_params(rung);
-
-        // Skip decoding for non-stride frames (cheap path — just consume the camera frame).
-        if stride > 1 && raw_i % stride as u64 != 0 { continue; }
-
-        let t = now_ms();
-        let jpeg = buf.to_vec();
-        let d0 = Instant::now();
-        let gray = decode_gray(&jpeg);
-        DEC_SUM_US.fetch_add(d0.elapsed().as_micros() as u64, Ordering::Relaxed);
-        DEC_CNT.fetch_add(1, Ordering::Relaxed);
-        let act = match gray {
-            Some(g) => {
-                let a0 = Instant::now();
-                let a = model.compute(&g);
-                ACT_SUM_US.fetch_add(a0.elapsed().as_micros() as u64, Ordering::Relaxed);
-                ACT_CNT.fetch_add(1, Ordering::Relaxed);
-                a
-            }
-            None => 0.0,
-        };
-        // Feed the thinner (best-effort: drop if it's behind — never stall capture).
-        let _ = thin_tx.try_send((jpeg.clone(), act, t));
-        col.push((jpeg, act, t));
-
-        if col.len() < decode_target { continue; }
-
-        // ---- finalize this GOP ----
-        let gop_t = col[0].2;
-        let mut mx = 0f32;
-        for c in &col { if c.1 > mx { mx = c.1; } }
-        let hour_key = file_hour_key(gop_t);
-        let new_file = last_hour_key != Some(hour_key); // first GOP of a new hour file -> must encode
-        last_hour_key = Some(hour_key);
-        let active = (mx as f64) >= ACTIVITY_THRESHOLD || !have_encoded || new_file || encode_all();
-        let frames = std::mem::take(&mut col);
-
-        if active {
-            have_encoded = true;
-            let (jpegs, acts) = select_top(&frames, enc_budget);
-            match gop_tx.try_send(GopMsg::Active { t: gop_t, acts, jpegs }) {
-                Ok(()) => {}
-                Err(mpsc::TrySendError::Full(_)) => {
-                    // Encoder is behind — drop this GOP and climb a rung (do less next time).
-                    DROPS.fetch_add(1, Ordering::Relaxed);
-                    last_drop = Instant::now();
-                    if rung < MAX_RUNG { RUNG.store(rung + 1, Ordering::Relaxed); }
-                }
-                Err(mpsc::TrySendError::Disconnected(_)) => return Ok(()),
-            }
-        } else {
-            let acts: Vec<u16> = frames.iter().map(|c| act_to_u16(c.1)).collect();
-            let _ = gop_tx.try_send(GopMsg::Static { t: gop_t, acts });
-        }
-
-        // Descend a rung after a calm stretch with no drops.
-        if rung > 0 && last_drop.elapsed() >= Duration::from_secs(RECOVER_SECS) {
-            RUNG.store(rung - 1, Ordering::Relaxed);
-            last_drop = Instant::now();
-        }
+        st.handle(buf.to_vec(), &gop_tx, &thin_tx);
     }
+}
+
+// TEST INPUT: synthetic high-activity flood (moving pattern + per-frame noise = high activity and
+// large encoded GOPs), generated faster than realtime to push the encoder behind and exercise the
+// bounded channel / drop / ladder / memory-guard. Enable with MYDOORCAMERA_TEST=1.
+fn test_loop(gop_tx: mpsc::SyncSender<GopMsg>, thin_tx: mpsc::SyncSender<thin::Frame>) -> std::io::Result<()> {
+    // Tunable via env so we can stress different bottlenecks without rebuilding:
+    //   MYDOORCAMERA_TEST_RATE   - synthetic fps (default 30; raise to outpace the encoder)
+    //   MYDOORCAMERA_TEST_FILTER - -vf chain (default heavy noise; lighter = faster decode)
+    let rate = std::env::var("MYDOORCAMERA_TEST_RATE").unwrap_or_else(|_| "30".into());
+    let filter = std::env::var("MYDOORCAMERA_TEST_FILTER").unwrap_or_else(|_| "noise=alls=48:allf=t".into());
+    eprintln!("[recorder] *** TEST MODE: synthetic flood (rate={} filter={}) ***", rate, filter);
+    let mut child = Command::new("ffmpeg")
+        .args([
+            "-hide_banner", "-loglevel", "error",
+            "-f", "lavfi", "-i", &format!("testsrc2=size={}x{}:rate={}", WIDTH, HEIGHT, rate),
+            "-vf", &filter,
+            "-c:v", "mjpeg", "-q:v", "5", "-f", "mjpeg", "pipe:1",
+        ])
+        .stdout(Stdio::piped()).stderr(Stdio::inherit()).spawn()?;
+    let mut out = child.stdout.take().unwrap();
+    let mut split = JpegSplitter::new();
+    let mut st = CapState::new();
+    let mut buf = [0u8; 1 << 16];
+    loop {
+        let n = match out.read(&mut buf) { Ok(0) | Err(_) => break, Ok(n) => n };
+        for jpeg in split.push(&buf[..n]) { st.handle(jpeg, &gop_tx, &thin_tx); }
+    }
+    let _ = child.wait();
+    Ok(())
 }
 
 // --- stats: fps (capture), combined recorder+ffmpeg CPU, stage timings, drops, rung ---
