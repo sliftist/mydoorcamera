@@ -173,6 +173,7 @@ export function addLoopAtView(): void {
 // Drag a loop handle ("start" | "end"); the marker's onMouseDown calls this and must stopPropagation.
 let loopDrag: "start" | "end" | null = null;
 export function startLoopDrag(which: "start" | "end", e: any): void {
+    if (e.button !== 0) return; // left-button only
     e.preventDefault(); e.stopPropagation();
     loopDrag = which;
     window.addEventListener("mousemove", onLoopDrag);

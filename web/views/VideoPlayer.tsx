@@ -28,11 +28,11 @@ export class VideoPlayer extends preact.Component {
                             // (decoder can't keep up), else yellow while a seek target hasn't rendered yet
                             outline: state.dropping ? "3px solid hsl(0,90%,55%)" : state.seeking ? "3px solid hsl(45,100%,60%)" : "none", outlineOffset: "-3px",
                         }}
-                        onMouseDown={(e: any) => { e.preventDefault(); if (!state.live) { player?.togglePlay(); saveUrlPosition(state.playWall); } }} />
+                        onMouseDown={(e: any) => { if (e.button !== 0) return; e.preventDefault(); if (!state.live) { player?.togglePlay(); saveUrlPosition(state.playWall); } }} />
                     {state.live
                         ? <div className={css.hbox(14).alignItems("center").width("100%")}>
                             <span className={css.color("hsl(0,85%,62%)").fontSize(15)}>● LIVE</span>
-                            <button className={playBtnCss} onMouseDown={(e: any) => { e.preventDefault(); void exitLive(); }}>Exit Live</button>
+                            <button className={playBtnCss} onMouseDown={(e: any) => { if (e.button !== 0) return; e.preventDefault(); void exitLive(); }}>Exit Live</button>
                             <span className={css.flexGrow(1)} />
                         </div>
                         : state.coverage

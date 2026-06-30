@@ -53,7 +53,7 @@ export class Trackbar extends preact.Component {
                             <div style={flank} />
                             <div className={css.relative.flexGrow(1).minWidth(0)} style={{ height: "6px" }}>
                                 {merged.map((m, i) => (
-                                    <div key={i} title="Zoom in and loop this activity" onMouseDown={(e: any) => { e.stopPropagation(); goToActivity(m.s, m.e, m.pk); }}
+                                    <div key={i} title="Zoom in and loop this activity" onMouseDown={(e: any) => { if (e.button !== 0) return; e.stopPropagation(); goToActivity(m.s, m.e, m.pk); }}
                                         style={{ position: "absolute", top: 0, bottom: 0, left: m.x0.toFixed(1) + "px", width: Math.max(2, m.x1 - m.x0 - 3).toFixed(1) + "px", background: "hsl(40,100%,55%)", cursor: "pointer" }} />
                                 ))}
                             </div>

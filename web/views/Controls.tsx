@@ -15,7 +15,7 @@ export class Controls extends preact.Component {
         return (
             <div className={css.hbox(12).alignItems("center").width("100%")}>
                 <button className={playBtnCss} title="Play/Pause (space)"
-                    onMouseDown={(e: any) => { e.preventDefault(); player?.togglePlay(); }}>
+                    onMouseDown={(e: any) => { if (e.button !== 0) return; e.preventDefault(); player?.togglePlay(); }}>
                     {playing ? "❚❚" : "►"}
                 </button>
                 <span className={css.fontSize(13).width(110)} style={{ color: statusColor(state.playStatus) }}>{statusLabel(state.playStatus)}</span>
@@ -25,7 +25,7 @@ export class Controls extends preact.Component {
                     onChange={(e: any) => { const s = Number(e.target.value); runInAction(() => { state.speed = s; }); player?.setSpeed(s); saveUrlPosition(state.playWall); }}>
                     {SPEEDS.map(s => <option key={s} value={String(s)}>{speedLabel(s)}×</option>)}
                 </select>
-                <button className={liveBtnCss} title="Jump to live" onMouseDown={(e: any) => { e.preventDefault(); void enterLive(); }}>● Live</button>
+                <button className={liveBtnCss} title="Jump to live" onMouseDown={(e: any) => { if (e.button !== 0) return; e.preventDefault(); void enterLive(); }}>● Live</button>
             </div>
         );
     }

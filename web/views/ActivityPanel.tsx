@@ -35,25 +35,28 @@ export class ActivityPanel extends preact.Component<{}, { scrollTop: number; vie
         if (!state.coverage || !state.index) return <div />;
         const headerCss = css.hbox(10).width("100%").alignItems("center").pad2(6, 8).hsl(220, 15, 14).border("1px solid hsl(220,15%,28%)");
 
-        // Collapsed: NO region computation, no counts — just the label.
+        // Region detection is cheap (a single pass over the index), so compute it
+        // whether collapsed or expanded — the count is shown in both states.
+        const regions = computeRegions(state.index, state.activityThreshold, state.coverage.dayStartMs, state.coverage.dayEndMs);
+        const summary = `${regions.length} section${regions.length === 1 ? "" : "s"} · ${fmtDur(regions.reduce((s, r) => s + (r.endWall - r.startWall) / 1000, 0))} (${regionsGopCount(regions).toLocaleString()} GOPs)`;
+
+        // Collapsed: show the label + section count, no thumbnails/grid.
         if (!state.activityPanelOpen) {
             return (
                 <div className={css.width("100%").maxWidth(1200)}>
                     <div className={headerCss} style={{ cursor: "pointer", boxSizing: "border-box" }} onClick={() => this.toggle()}>
                         <span style={{ fontSize: "13px" }}>▸ Activity</span>
+                        <span className={css.fontSize(12).opacity(0.7)}>{summary}</span>
                         <span className={css.flexGrow(1)} />
                         <span className={css.fontSize(11).opacity(0.45)}>click to expand</span>
                     </div>
                 </div>
             );
         }
-
-        // Expanded: compute regions across the WHOLE bucket (not just the trackbar zoom).
-        const regions = computeRegions(state.index, state.activityThreshold, state.coverage.dayStartMs, state.coverage.dayEndMs);
         const header = (
             <div className={headerCss} style={{ cursor: "pointer", boxSizing: "border-box" }} onClick={() => this.toggle()}>
                 <span style={{ fontSize: "13px" }}>▾ Activity</span>
-                <span className={css.fontSize(12).opacity(0.7)}>{regions.length} section{regions.length === 1 ? "" : "s"} · {fmtDur(regions.reduce((s, r) => s + (r.endWall - r.startWall) / 1000, 0))} ({regionsGopCount(regions).toLocaleString()} GOPs)</span>
+                <span className={css.fontSize(12).opacity(0.7)}>{summary}</span>
                 <span className={css.flexGrow(1)} />
                 <span className={css.hbox(4).alignItems("center").opacity(0.7).fontSize(11)} onClick={(e: any) => e.stopPropagation()} title="Activity threshold — a GOP counts as activity when its value is at least this">
                     threshold
@@ -100,7 +103,7 @@ export class ActivityPanel extends preact.Component<{}, { scrollTop: number; vie
         const url = getThumbUrl({ level: state.level, t: r.peak.t }); // undefined while loading, "" on failure
         const looped = state.loopStart === r.startWall && state.loopEnd === r.endWall;
         return (
-            <div key={r.peak.t} onMouseDown={() => goToActivity(r.startWall, r.endWall, r.peakWall)} title="Click to zoom in and loop this activity region"
+            <div key={r.peak.t} onMouseDown={(e: any) => { if (e.button !== 0) return; goToActivity(r.startWall, r.endWall, r.peakWall); }} title="Click to zoom in and loop this activity region"
                 className={css.vbox(3)} style={{ position: "absolute", top: (row * cardH) + "px", left: (col * colW) + "%", width: colW + "%", height: cardH + "px", padding: CARD_PAD + "px", boxSizing: "border-box", cursor: "pointer" }}>
                 <div className={css.hsl(220, 15, 6).relative} style={{ width: "100%", height: thumbH + "px", flexShrink: 0, overflow: "hidden", outline: looped ? "2px solid hsl(40,80%,55%)" : "1px solid hsl(220,15%,22%)", outlineOffset: "-1px" }}>
                     {url ? <img src={url} style={{ width: "100%", height: "100%", objectFit: "contain", display: "block" }} />
