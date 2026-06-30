@@ -17,6 +17,8 @@ const MMAP: u32 = 1; // V4L2_MEMORY_MMAP
 const FIELD_NONE: u32 = 1;
 const CID_GOP_SIZE: u32 = 10029515;
 const CID_BITRATE: u32 = 10029519;
+const CID_REPEAT_SEQ_HEADER: u32 = 10029538; // 0x009909e2: repeat SPS/PPS before every IDR
+const CID_H264_I_PERIOD: u32 = 10029670; // 0x00990a66: IDR interval in frames (governs keyframe spacing)
 
 fn fourcc(s: &[u8; 4]) -> u32 { (s[0] as u32) | (s[1] as u32) << 8 | (s[2] as u32) << 16 | (s[3] as u32) << 24 }
 fn ioc(dir: u32, nr: u32, size: usize) -> c_ulong { (((dir << 30) | ((size as u32) << 16) | (0x56 << 8) | nr)) as c_ulong }
@@ -89,12 +91,14 @@ impl Codec {
         }
     }
 
-    fn open(dev: &str, out_fmt: [u8; 4], cap_fmt: [u8; 4], w: u32, h: u32, out_sizeimage: u32, ncap: u32) -> std::io::Result<Codec> {
+    fn open(dev: &str, out_fmt: [u8; 4], cap_fmt: [u8; 4], w: u32, h: u32, out_sizeimage: u32, ncap: u32, ctrls: &[(u32, i32)]) -> std::io::Result<Codec> {
         let path = std::ffi::CString::new(dev).unwrap();
         let fd = unsafe { libc::open(path.as_ptr(), libc::O_RDWR | libc::O_NONBLOCK) };
         if fd < 0 { return Err(std::io::Error::last_os_error()); }
         Self::s_fmt(fd, OUT, w, h, fourcc(&out_fmt), out_sizeimage)?;
         let cnp = Self::s_fmt(fd, CAP, w, h, fourcc(&cap_fmt), 0)?;
+        // Encoder controls must be set before STREAMON (post-stream changes are ignored by bcm2835).
+        for &(id, value) in ctrls { Self::set_ctrl(fd, id, value); }
         let out = Self::reqbufs_mmap(fd, OUT, 4, 1)?;
         let cap = Self::reqbufs_mmap(fd, CAP, ncap, cnp)?;
         let c = Codec { fd, out, out_free: (0..4).collect(), cap, cnp };
@@ -105,13 +109,14 @@ impl Codec {
     }
 
     pub fn decoder(w: u32, h: u32) -> std::io::Result<Codec> {
-        Codec::open("/dev/video10", *b"MJPG", *b"NV12", w, h, 1 << 21, 6)
+        Codec::open("/dev/video10", *b"MJPG", *b"NV12", w, h, 1 << 21, 6, &[])
     }
     pub fn encoder(w: u32, h: u32, bitrate: i32, gop: i32) -> std::io::Result<Codec> {
-        let c = Codec::open("/dev/video11", *b"NV12", *b"H264", w, h, 0, 6)?;
-        Self::set_ctrl(c.fd, CID_GOP_SIZE, gop);
-        Self::set_ctrl(c.fd, CID_BITRATE, bitrate);
-        Ok(c)
+        // REPEAT_SEQ_HEADER=1 makes every IDR carry SPS/PPS, so each GOP decodes standalone
+        // (the player decodes one GOP at a time). Without it the encoder emits parameter sets
+        // only once at stream start and every later GOP fails to decode (0 frames).
+        Codec::open("/dev/video11", *b"NV12", *b"H264", w, h, 0, 6,
+            &[(CID_GOP_SIZE, gop), (CID_H264_I_PERIOD, gop), (CID_BITRATE, bitrate), (CID_REPEAT_SEQ_HEADER, 1)])
     }
 
     // Non-blocking dequeue from a queue. Returns (index, bytesused) or None (EAGAIN/nothing ready).
