@@ -393,7 +393,9 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "jpeg-decoder",
+ "libc",
  "v4l",
+ "v4l2-sys-mit",
 ]
 
 [[package]]
