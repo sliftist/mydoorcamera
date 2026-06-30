@@ -123,6 +123,7 @@ export class Trackbar extends preact.Component {
                         const bucketMs = (to - from) / act.length;
                         const pts: string[] = [];
                         for (let i = 0; i < act.length; i++) {
+                            if (act[i] < 0) continue; // no data point here — don't draw a dip, just connect real samples
                             const xf = (from + i * bucketMs - vs) / span;
                             if (xf < -0.02 || xf > 1.02) continue;
                             pts.push(`${(xf * 1000).toFixed(1)},${(100 - Math.pow(Math.min(1, act[i] / scale), state.activityExp) * 100).toFixed(1)}`);

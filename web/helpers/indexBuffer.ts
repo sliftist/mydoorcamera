@@ -57,20 +57,21 @@ export function deriveRanges(gops: IndexGop[], joinMs: number): { start: number;
 }
 
 // Max activity per bucket across [from, to), using PER-FRAME activity so events shorter than
-// a GOP show. Each frame contributes its activity to the bucket its wall time lands in.
+// a GOP show. Each frame contributes its activity to the bucket its wall time lands in. Buckets
+// with NO frame stay -1 ("no data") rather than 0 — when zoomed in past the frame rate the curve
+// should connect actual samples, not stab down to zero between them (there's just no poll there).
+// Frames with zero activity DO count (they're real data: activity 0), so static spans read as 0.
 export function bucketActivity(gops: IndexGop[], from: number, to: number, n = 1440): number[] {
-    const out = new Array(n).fill(0);
+    const out = new Array(n).fill(-1);
     const span = Math.max(1, to - from);
     for (const g of gops) {
         if (g.e <= from || g.t >= to || !g.acts.length) continue;
         for (let i = 0; i < g.acts.length; i++) {
-            const v = g.acts[i];
-            if (!v) continue;
             const w = frameWallOf(g, i);
             if (w < from || w >= to) continue;
-            const a = v / ACT_SCALE;
+            const a = g.acts[i] / ACT_SCALE;
             const b = Math.min(n - 1, Math.max(0, Math.floor((w - from) / span * n)));
-            if (a > out[b]) out[b] = a;
+            if (a > out[b]) out[b] = a; // out[b] starts at -1, so any frame (even a=0) marks it as data
         }
     }
     return out;
