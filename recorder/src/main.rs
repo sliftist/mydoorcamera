@@ -13,6 +13,7 @@
 // (memory can't run away), and a memory guard kills the encoder if RAM still gets critical.
 
 mod activity;
+mod hwcodec;
 mod storage;
 mod thin;
 
@@ -231,6 +232,7 @@ fn mem_available_kb() -> u64 {
 }
 
 fn main() {
+    if std::env::var("MYDOORCAMERA_HWCHAIN").is_ok() { hwchain_selftest(); return; }
     println!("[recorder] starting activity-gated recorder {}x{} (Rust, adaptive)", WIDTH, HEIGHT);
     let session = now_ms() as u64;
 
@@ -264,6 +266,28 @@ fn mem_guard() {
             }
         }
     }
+}
+
+// All-hardware decode->encode chain self-test (no ffmpeg). Feeds a JPEG repeatedly through the HW
+// decoder and HW encoder, verifying the full pipeline. Gated by MYDOORCAMERA_HWCHAIN.
+fn hwchain_selftest() {
+    use std::io::Write;
+    let inp = std::env::var("HWCHAIN_IN").unwrap_or_else(|_| "/tmp/real.mjpg".into());
+    let outp = std::env::var("HWCHAIN_OUT").unwrap_or_else(|_| "/tmp/chain.h264".into());
+    let jpeg = std::fs::read(&inp).expect("read jpeg");
+    println!("[hwchain] in={} ({} bytes) out={}", inp, jpeg.len(), outp);
+    let mut dec = hwcodec::Codec::decoder(WIDTH, HEIGHT).expect("decoder");
+    let mut enc = hwcodec::Codec::encoder(WIDTH, 1088, 5_000_000, 30).expect("encoder");
+    let mut f = std::fs::File::create(&outp).unwrap();
+    let (mut nframes, mut npackets) = (0u32, 0u32);
+    for _ in 0..120 {
+        for nv12 in dec.process(&jpeg) {
+            nframes += 1;
+            for h264 in enc.process(&nv12) { f.write_all(&h264).unwrap(); npackets += 1; }
+        }
+        std::thread::sleep(Duration::from_millis(8));
+    }
+    println!("[hwchain] decoded {} NV12 frames, encoded {} H264 packets -> {}", nframes, npackets, outp);
 }
 
 fn manager_loop(session: u64, gop_rx: mpsc::Receiver<GopMsg>) {
