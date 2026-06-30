@@ -10,8 +10,6 @@
 // encode contexts, so this coexists with the L0 recorder's encoder.
 
 use crate::storage::Writer;
-use std::io::{Read, Write};
-use std::process::{Command, Stdio};
 use std::sync::mpsc::Receiver;
 
 const SLOTS: usize = 30;            // frames per thinned GOP
@@ -82,64 +80,54 @@ fn flush_gop(lv: &mut Level) {
     let acts: Vec<u16> = gop.iter().map(|f| crate::act_to_u16(f.1)).collect();
     // Exact per-frame timing: each picked frame's ms offset from the GOP start (clamped to u16).
     let dts: Vec<u16> = gop.iter().map(|f| (f.2 - t).clamp(0, 65535) as u16).collect();
-    if (mx as f64) < THRESH {
+    if (mx as f64) < THRESH && !crate::encode_all() {
         if let Some(rt) = lv.last_t {
             let _ = lv.writer.write_no_change(t, e, rt, &acts, &dts);
         }
         return;
     }
+    let want = gop.len();
     let jpegs: Vec<Vec<u8>> = gop.into_iter().map(|f| f.0).collect();
-    if let Some((nals, fc)) = encode(jpegs) {
-        if fc > 0 {
+    match encode(jpegs) {
+        Some((nals, fc)) if fc > 0 => {
+            if fc < want { eprintln!("[thin] L? GOP short: encoded {}/{} frames", fc, want); }
             if let Err(err) = lv.writer.write_gop(&nals, t, e, fc, &acts, &dts) { eprintln!("[thin] write_gop: {}", err); }
             lv.last_t = Some(t as f64);
         }
+        _ => eprintln!("[thin] flush: encode produced no frames (codec open failed?)"),
     }
 }
 
-// Encode the picked JPEGs into one H.264 GOP on the hardware codec (h264_v4l2m2m).
+// Encode the picked JPEGs into one H.264 GOP entirely in HARDWARE (no ffmpeg): decode each JPEG on
+// /dev/video10 and encode the NV12 on /dev/video11 (fresh per-GOP contexts — thinned GOPs are
+// infrequent). Returns the GOP's NALs (SPS/PPS + slices) and the frame count.
 fn encode(jpegs: Vec<Vec<u8>>) -> Option<(Vec<Vec<u8>>, usize)> {
-    let mut child = Command::new("ffmpeg").args([
-        "-hide_banner", "-loglevel", "error", "-f", "mjpeg", "-i", "pipe:0",
-        "-vf", "format=yuv420p", "-c:v", "h264_v4l2m2m",
-        "-b:v", &THIN_BITRATE.to_string(), "-g", &SLOTS.to_string(), "-f", "h264", "pipe:1",
-    ]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::inherit()).spawn().ok()?;
-    let mut stdin = child.stdin.take()?;
-    let mut stdout = child.stdout.take()?;
-    // Feed on a thread so a full stdout pipe can't deadlock the writer.
-    let feeder = std::thread::spawn(move || { for j in jpegs { if stdin.write_all(&j).is_err() { break; } } let _ = stdin.flush(); });
-    let mut out = Vec::new();
-    let _ = stdout.read_to_end(&mut out);
-    let _ = feeder.join();
-    let _ = child.wait();
-
-    let mut sps: Option<Vec<u8>> = None;
-    let mut pps: Option<Vec<u8>> = None;
-    let mut slices: Vec<Vec<u8>> = Vec::new();
-    for nal in split_annexb(&out) {
-        match nal[0] & 0x1f { 7 => sps = Some(nal), 8 => pps = Some(nal), 5 | 1 => slices.push(nal), _ => {} }
+    let want = jpegs.len();
+    let mut dec = crate::hwcodec::Codec::decoder(1920, 1080).ok()?;
+    let mut enc = crate::hwcodec::Codec::encoder(1920, 1088, THIN_BITRATE as i32, SLOTS as i32).ok()?;
+    // Each thinned GOP is an isolated encode session, so the decode+encode pipelines must be fully
+    // drained: feed every picked JPEG, then keep feeding copies of the last frame until all `want`
+    // frames have emerged (both codecs have ~2-3 frames of latency, chained). Bounded flush count
+    // guards against a stuck pipeline.
+    let last = jpegs.last().cloned();
+    let mut nals: Vec<Vec<u8>> = Vec::new();
+    let mut fc = 0usize;
+    let mut flushes = 0usize;
+    let mut iter = jpegs.into_iter();
+    loop {
+        let j = match iter.next() {
+            Some(j) => j,
+            None => match &last {
+                Some(l) if flushes < 32 => { flushes += 1; l.clone() }
+                _ => break,
+            },
+        };
+        for nv12 in dec.process(&j) {
+            for h in enc.process(&nv12) {
+                if fc < want { for nl in crate::split_nals(&h) { nals.push(nl); } fc += 1; }
+            }
+        }
+        if fc >= want { break; }
     }
-    let mut nals = Vec::with_capacity(slices.len() + 2);
-    if let Some(s) = sps { nals.push(s); }
-    if let Some(p) = pps { nals.push(p); }
-    let fc = slices.len();
-    nals.extend(slices);
     Some((nals, fc))
-}
-
-// Split a complete Annex-B buffer into NAL payloads (start codes stripped).
-fn split_annexb(buf: &[u8]) -> Vec<Vec<u8>> {
-    let mut starts = Vec::new();
-    let mut i = 0usize;
-    while i + 2 < buf.len() {
-        if buf[i] == 0 && buf[i + 1] == 0 && buf[i + 2] == 1 { starts.push(i); i += 3; } else { i += 1; }
-    }
-    let mut out = Vec::new();
-    for s in 0..starts.len() {
-        let ps = starts[s] + 3;
-        let mut pe = if s + 1 < starts.len() { starts[s + 1] } else { buf.len() };
-        while pe > ps && buf[pe - 1] == 0 { pe -= 1; }
-        if pe > ps { out.push(buf[ps..pe].to_vec()); }
-    }
-    out
 }
