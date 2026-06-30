@@ -42,26 +42,17 @@ const CONTROL_FILE: &str = "/var/lib/mydoorcamera/control.json";
 const ACTIVITY_THRESHOLD: f64 = 0.0001; // GOP max activity below this -> no encode
 
 const CHAN_CAP: usize = 3;              // bounded GOP channel: at most this many GOPs (~MBs) buffered
-const MAX_RUNG: usize = 7;
+const GOP_FRAMES: usize = 30;          // a GOP always holds this many kept frames (regardless of fps)
+const MAX_RUNG: usize = 5;
 const RECOVER_SECS: u64 = 8;           // descend a rung after this long with no drops
 const MEM_CRIT_KB: u64 = 350_000;      // < this much MemAvailable -> kill the encoder, max degrade
 
-// Ladder rung -> (decode_stride, decode_target, encode_budget).
-//   decode_stride  : process activity on every Nth captured frame (others skipped).
-//   decode_target  : finalize a GOP after this many DECODED frames (sets the GOP's wall span).
-//   encode_budget  : how many of the decoded frames to actually encode (the highest-activity ones).
-// encode_budget <= decode_target always, so each GOP feeds the encoder exactly encode_budget frames.
-fn rung_params(r: usize) -> (usize, usize, usize) {
-    match r {
-        0 => (1, 30, 30),  // decode 30, encode 30   (~1s GOP)
-        1 => (1, 30, 22),  // decode 30, encode 22
-        2 => (1, 30, 15),  // decode 30, encode 15 (most active)
-        3 => (2, 15, 15),  // decode 15, encode 15
-        4 => (3, 10, 10),  // decode 10, encode 10
-        5 => (6, 5, 5),    // decode 5,  encode 5    (~1s GOP)
-        6 => (15, 5, 5),   // decode 2fps -> 5 frames over ~2.5s
-        _ => (30, 5, 5),   // decode 1fps -> 5 frames over ~5s (floor)
-    }
+// Reducing the frame rate means a LONGER GOP period, NOT fewer frames per GOP: we keep GOP_FRAMES
+// frames and just decode every Nth captured frame (dropping the rest entirely — never decoded), so
+// each kept frame is held longer on playback. rung -> stride (and thus fps = 30/stride):
+//   0:30fps(1s)  1:15fps(2s)  2:10fps(3s)  3:5fps(6s)  4:2fps(15s)  5:1fps(30s)
+fn rung_stride(r: usize) -> usize {
+    match r { 0 => 1, 1 => 2, 2 => 3, 3 => 6, 4 => 15, _ => 30 }
 }
 
 fn now_ms() -> i64 { SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as i64 }
@@ -86,8 +77,8 @@ static DROPS: AtomicU64 = AtomicU64::new(0);    // GOPs dropped because the enco
 static RUNG: AtomicUsize = AtomicUsize::new(0); // current ladder rung
 
 enum GopMsg {
-    Active { t: i64, acts: Vec<u16>, jpegs: Vec<Vec<u8>> },
-    Static { t: i64, acts: Vec<u16> },
+    Active { t: i64, e: i64, acts: Vec<u16>, jpegs: Vec<Vec<u8>> },
+    Static { t: i64, e: i64, acts: Vec<u16> },
 }
 
 // MJPEG frame -> GW×GH grayscale for the activity detector (1/8-scale DCT decode, then box-down).
@@ -280,13 +271,12 @@ fn manager_loop(session: u64, gop_rx: mpsc::Receiver<GopMsg>) {
     let mut last_encoded_t: Option<f64> = None;
     let mut enc: Option<Encoder> = None;
     let mut cur_period: usize = 0;
-    let mut pending: VecDeque<(i64, Vec<u16>, Instant)> = VecDeque::new();
+    let mut pending: VecDeque<(i64, i64, Vec<u16>, Instant)> = VecDeque::new();
 
-    let write_gops = |writer: &mut Writer, last: &mut Option<f64>, pending: &mut VecDeque<(i64, Vec<u16>, Instant)>, gops: Vec<(Vec<Vec<u8>>, usize)>| {
+    let write_gops = |writer: &mut Writer, last: &mut Option<f64>, pending: &mut VecDeque<(i64, i64, Vec<u16>, Instant)>, gops: Vec<(Vec<Vec<u8>>, usize)>| {
         for (nals, fc) in gops {
-            if let Some((pt, pacts, created)) = pending.pop_front() {
-                let e = pt + ((fc as f64 / 30.0) * 1000.0).round() as i64;
-                if let Err(err) = writer.write_gop(&nals, pt, e, fc, &pacts) { eprintln!("[recorder] write_gop: {}", err); }
+            if let Some((pt, pe, pacts, created)) = pending.pop_front() {
+                if let Err(err) = writer.write_gop(&nals, pt, pe, fc, &pacts) { eprintln!("[recorder] write_gop: {}", err); }
                 *last = Some(pt as f64);
                 ENC_SUM_MS.fetch_add(created.elapsed().as_millis() as u64, Ordering::Relaxed);
                 ENC_CNT.fetch_add(1, Ordering::Relaxed);
@@ -296,7 +286,7 @@ fn manager_loop(session: u64, gop_rx: mpsc::Receiver<GopMsg>) {
 
     for msg in gop_rx {
         match msg {
-            GopMsg::Active { t, acts, jpegs } => {
+            GopMsg::Active { t, e: gop_e, acts, jpegs } => {
                 let period = jpegs.len();
                 if period == 0 { continue; }
                 let need_respawn = match &enc { None => true, Some(_) => cur_period != period };
@@ -310,7 +300,7 @@ fn manager_loop(session: u64, gop_rx: mpsc::Receiver<GopMsg>) {
                     (ok, if ok { e.drain_available() } else { Vec::new() })
                 };
                 if fed_ok {
-                    pending.push_back((t, acts, Instant::now()));
+                    pending.push_back((t, gop_e, acts, Instant::now()));
                     write_gops(&mut writer, &mut last_encoded_t, &mut pending, ready);
                 } else {
                     // encoder died (e.g. mem guard killed it) -> drain + respawn next time
@@ -318,28 +308,14 @@ fn manager_loop(session: u64, gop_rx: mpsc::Receiver<GopMsg>) {
                     pending.clear();
                 }
             }
-            GopMsg::Static { t, acts } => {
+            GopMsg::Static { t, e: gop_e, acts } => {
                 if let Some(e) = enc.take() { let rest = e.close(); write_gops(&mut writer, &mut last_encoded_t, &mut pending, rest); pending.clear(); }
                 if let Some(rt) = last_encoded_t {
-                    let e = t + ((acts.len() as f64 / 30.0) * 1000.0).round() as i64;
-                    if let Err(err) = writer.write_no_change(t, e, rt, &acts) { eprintln!("[recorder] write_no_change: {}", err); }
+                    if let Err(err) = writer.write_no_change(t, gop_e, rt, &acts) { eprintln!("[recorder] write_no_change: {}", err); }
                 }
             }
         }
     }
-}
-
-// Pick the `k` highest-activity frames from a temporally-ordered collection, returned in temporal
-// order (jpegs + acts). If there are <= k, returns them all.
-fn select_top(col: &[(Vec<u8>, f32, i64)], k: usize) -> (Vec<Vec<u8>>, Vec<u16>) {
-    if col.len() <= k {
-        return (col.iter().map(|c| c.0.clone()).collect(), col.iter().map(|c| act_to_u16(c.1)).collect());
-    }
-    let mut idx: Vec<usize> = (0..col.len()).collect();
-    idx.sort_by(|&a, &b| col[b].1.partial_cmp(&col[a].1).unwrap_or(std::cmp::Ordering::Equal));
-    idx.truncate(k);
-    idx.sort_unstable();
-    (idx.iter().map(|&i| col[i].0.clone()).collect(), idx.iter().map(|&i| act_to_u16(col[i].1)).collect())
 }
 
 // Per-frame pipeline state, shared by the real (V4L2) and the test (synthetic) input sources so
@@ -361,8 +337,9 @@ impl CapState {
         FRAMES.fetch_add(1, Ordering::Relaxed);
         self.raw_i += 1;
         let rung = RUNG.load(Ordering::Relaxed);
-        let (stride, decode_target, enc_budget) = rung_params(rung);
-        if stride > 1 && self.raw_i % stride as u64 != 0 { return; } // skip non-stride frames
+        let stride = rung_stride(rung);
+        // Drop non-stride frames ENTIRELY (never decoded) — this is what lowers the frame rate.
+        if self.raw_i % stride as u64 != 0 { return; }
 
         let t = now_ms();
         let d0 = Instant::now();
@@ -381,10 +358,14 @@ impl CapState {
         };
         let _ = thin_tx.try_send((jpeg.clone(), act, t)); // best-effort: drop if behind, never stall
         self.col.push((jpeg, act, t));
-        if self.col.len() < decode_target { return; }
+        if self.col.len() < GOP_FRAMES { return; }
 
-        // ---- finalize this GOP ----
+        // ---- finalize this GOP (always GOP_FRAMES kept frames, spanning their real wall time) ----
+        let n = self.col.len();
         let gop_t = self.col[0].2;
+        let last_t = self.col[n - 1].2;
+        let interval = if n > 1 { (last_t - gop_t) / (n as i64 - 1) } else { 1000 / 30 };
+        let gop_e = last_t + interval; // real end time -> playback holds each frame the right duration
         let mut mx = 0f32;
         for c in &self.col { if c.1 > mx { mx = c.1; } }
         let hour_key = file_hour_key(gop_t);
@@ -392,14 +373,15 @@ impl CapState {
         self.last_hour_key = Some(hour_key);
         let active = (mx as f64) >= ACTIVITY_THRESHOLD || !self.have_encoded || new_file || encode_all();
         let frames = std::mem::take(&mut self.col);
+        let acts: Vec<u16> = frames.iter().map(|c| act_to_u16(c.1)).collect();
 
         if active {
             self.have_encoded = true;
-            let (jpegs, acts) = select_top(&frames, enc_budget);
-            match gop_tx.try_send(GopMsg::Active { t: gop_t, acts, jpegs }) {
+            let jpegs: Vec<Vec<u8>> = frames.into_iter().map(|c| c.0).collect();
+            match gop_tx.try_send(GopMsg::Active { t: gop_t, e: gop_e, acts, jpegs }) {
                 Ok(()) => {}
                 Err(mpsc::TrySendError::Full(_)) => {
-                    // Encoder is behind — drop this GOP and climb a rung (do less next time).
+                    // Encoder is behind — drop this GOP and climb a rung (longer period, fewer fps).
                     DROPS.fetch_add(1, Ordering::Relaxed);
                     self.last_drop = Instant::now();
                     if rung < MAX_RUNG { RUNG.store(rung + 1, Ordering::Relaxed); }
@@ -407,8 +389,7 @@ impl CapState {
                 Err(mpsc::TrySendError::Disconnected(_)) => {}
             }
         } else {
-            let acts: Vec<u16> = frames.iter().map(|c| act_to_u16(c.1)).collect();
-            let _ = gop_tx.try_send(GopMsg::Static { t: gop_t, acts });
+            let _ = gop_tx.try_send(GopMsg::Static { t: gop_t, e: gop_e, acts });
         }
 
         if rung > 0 && self.last_drop.elapsed() >= Duration::from_secs(RECOVER_SECS) {

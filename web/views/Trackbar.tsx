@@ -142,13 +142,14 @@ export class Trackbar extends preact.Component {
                     <div style={{ position: "absolute", top: 0, height: "28%", left: pct(state.desiredWall), width: "2px", background: "hsl(265,90%,66%)" }} title="intended playback position" />
                     <div style={{ position: "absolute", top: 0, height: "28%", left: pct(state.playWall), width: "2px", background: "hsl(210,100%,66%)" }} title="actual playback position" />
                     {state.hoverWall != null && inView(state.hoverWall, state.hoverWall) && (() => {
-                        // Activity fraction at the hovered point = the aMax of the GOP there.
-                        let act = -1;
-                        if (state.index) for (const g of state.index) { if (g.t <= state.hoverWall! && state.hoverWall! < g.e) { act = g.aMax; break; } }
+                        // Activity + the GOP's effective frame rate at the hovered point (its frames
+                        // span [t,e], so fps = n / (e-t) — reveals where the ladder lowered the rate).
+                        let act = -1, fps = -1;
+                        if (state.index) for (const g of state.index) { if (g.t <= state.hoverWall! && state.hoverWall! < g.e) { act = g.aMax; const dur = g.e - g.t; if (dur > 0 && g.n > 0) fps = (g.n * 1000) / dur; break; } }
                         return (
                             <div style={{ position: "absolute", top: 0, bottom: 0, left: pct(state.hoverWall), width: "1px", background: "rgba(255,255,255,0.6)" }}>
                                 <div style={{ position: "absolute", bottom: "2px", transform: "translateX(-50%)", background: "#000", padding: "2px 6px", fontSize: "11px", whiteSpace: "nowrap", border: "1px solid hsl(220,15%,35%)" }}>
-                                    {clockHMS(state.hoverWall)}{act >= 0 ? ` · act ${act.toFixed(4)}` : ""}
+                                    {clockHMS(state.hoverWall)}{act >= 0 ? ` · act ${act.toFixed(4)}` : ""}{fps >= 0 ? ` · ${fps.toFixed(fps >= 10 ? 0 : 1)}fps` : ""}
                                 </div>
                             </div>
                         );

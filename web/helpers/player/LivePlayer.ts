@@ -20,7 +20,8 @@ export class LivePlayer {
     private decoding = false;
     private stopped = false;
     private rafId: number | undefined;
-    private lastRenderAt = 0;
+    private lastRenderPerf = 0;
+    private lastRenderWall = 0;
     private rendered = 0;
     private dropped = 0;
 
@@ -77,16 +78,24 @@ export class LivePlayer {
         }
     }
 
-    // Render at most one queued frame per cadence tick (smooth ~FPS playout).
+    // Play each frame after the REAL gap since the previous one (frame.wall delta), so a reduced-fps
+    // GOP (e.g. 30 frames over 6s) plays smoothly at that rate instead of bursting. A gap larger than
+    // MAX_GAP_MS (a static stretch) is collapsed so we jump to the live edge rather than stalling.
+    private static readonly MAX_GAP_MS = 2000;
     private tick = (): void => {
         if (this.stopped) return;
         const now = typeof performance !== "undefined" ? performance.now() : Date.now();
-        if (this.queue.length && now - this.lastRenderAt >= CADENCE_MS) {
-            const f = this.queue.shift()!;
-            this.renderer.drawImage(f.bmp, f.wall);
-            try { f.bmp.close(); } catch { /* */ }
-            this.lastRenderAt = now;
-            this.rendered++;
+        if (this.queue.length) {
+            const f = this.queue[0];
+            const gap = this.lastRenderWall ? Math.min(LivePlayer.MAX_GAP_MS, Math.max(0, f.wall - this.lastRenderWall)) : 0;
+            if (now - this.lastRenderPerf >= gap) {
+                this.queue.shift();
+                this.renderer.drawImage(f.bmp, f.wall);
+                try { f.bmp.close(); } catch { /* */ }
+                this.lastRenderPerf = now;
+                this.lastRenderWall = f.wall;
+                this.rendered++;
+            }
         }
         this.rafId = requestAnimationFrame(this.tick);
     };
