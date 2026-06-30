@@ -32,7 +32,8 @@ export type Range = { start: number; end: number };
 // Per-frame activity is stored as uint16 (act/65535). a/aMax are the derived max over the
 // frames (kept for existing consumers). noChange (l===0) => no video bytes; ref = the GOP whose
 // last frame the static span repeats (carried in the o field).
-export type GopEntry = { t: number; e: number; f: string; o: number; l: number; n: number; a: number; aMax: number; acts: Uint16Array; noChange: boolean; ref: number };
+// dts = per-frame ms offset from t (exact frame timing; dts[i] => frame i wall = t + dts[i]).
+export type GopEntry = { t: number; e: number; f: string; o: number; l: number; n: number; a: number; aMax: number; acts: Uint16Array; dts: Uint16Array; noChange: boolean; ref: number };
 export const ACT_SCALE = 65535;
 export const actToU16 = (a: number): number => Math.max(0, Math.min(ACT_SCALE, Math.round((a > 0 ? a : 0) * ACT_SCALE)));
 export type HourIndex = { gops: GopEntry[]; badRanges: Range[] };
@@ -93,17 +94,27 @@ async function listLevelBuckets(level: number): Promise<{ dir: string[]; stem: s
     return out;
 }
 
-// Framed record: [u32 len][f64 t,e,o,l,n][u16 act_0..act_{n-1}][u32 len], len = 40 + 2*n.
-// Per-frame activity is uint16 (act*65535). l===0 marks a no-change GOP (no video bytes), with
-// the o field carrying refT (the GOP whose last frame the static span repeats).
-function encodeRecord(t: number, e: number, o: number, l: number, n: number, acts: Uint16Array): Buffer {
-    const body = 40 + acts.length * 2;
+// Framed record: [u32 len][f64 t,e,o,l,n][u16 act×n][u16 dt×n][u32 len], len = 40 + 4*n.
+// act = per-frame activity (uint16, act*65535); dt = per-frame ms offset from t (exact timing).
+// l===0 marks a no-change GOP (no video bytes), with the o field carrying refT.
+function encodeRecord(t: number, e: number, o: number, l: number, n: number, acts: Uint16Array, dts: Uint16Array): Buffer {
+    const cnt = acts.length;
+    const body = 40 + cnt * 4;
     const buf = Buffer.allocUnsafe(4 + body + 4);
     buf.writeUInt32LE(body, 0);
     buf.writeDoubleLE(t, 4); buf.writeDoubleLE(e, 12); buf.writeDoubleLE(o, 20); buf.writeDoubleLE(l, 28); buf.writeDoubleLE(n, 36);
-    for (let i = 0; i < acts.length; i++) buf.writeUInt16LE(acts[i], 44 + i * 2);
+    for (let i = 0; i < cnt; i++) buf.writeUInt16LE(acts[i], 44 + i * 2);
+    for (let i = 0; i < cnt; i++) buf.writeUInt16LE(dts[i] || 0, 44 + cnt * 2 + i * 2);
     buf.writeUInt32LE(body, 4 + body);
     return buf;
+}
+
+// Even-spread per-frame offsets (fallback for the legacy TS writers, which the Rust recorder has
+// superseded — the recorder writes exact dt). dt[i] = round(spanMs * i / n).
+function evenDts(n: number, spanMs: number): Uint16Array {
+    const d = new Uint16Array(n);
+    for (let i = 0; i < n; i++) d[i] = Math.min(65535, Math.max(0, Math.round((spanMs * i) / Math.max(1, n))));
+    return d;
 }
 
 // Parse framed records from `buf`. Returns each record's GopEntry, the byte offset of each
@@ -114,15 +125,17 @@ function decodeRecords(buf: Buffer, dataFile: string): { gops: GopEntry[]; start
     let p = 0;
     while (p + 4 <= buf.length) {
         const len = buf.readUInt32LE(p);
-        if (len < 40 || (len - 40) % 2 !== 0 || p + 4 + len + 4 > buf.length) break; // partial / not yet fully written
+        if (len < 40 || (len - 40) % 4 !== 0 || p + 4 + len + 4 > buf.length) break; // partial / not yet fully written
         if (buf.readUInt32LE(p + 4 + len) !== len) break;                            // corruption: prefix != suffix -> stop
         const t = buf.readDoubleLE(p + 4), e = buf.readDoubleLE(p + 12), o = buf.readDoubleLE(p + 20), l = buf.readDoubleLE(p + 28), n = buf.readDoubleLE(p + 36);
-        const na = (len - 40) / 2;
+        const na = (len - 40) / 4;
         const acts = new Uint16Array(na);
+        const dts = new Uint16Array(na);
         let mx = 0;
         for (let i = 0; i < na; i++) { const v = buf.readUInt16LE(p + 44 + i * 2); acts[i] = v; if (v > mx) mx = v; }
+        for (let i = 0; i < na; i++) dts[i] = buf.readUInt16LE(p + 44 + na * 2 + i * 2);
         const aMax = mx / ACT_SCALE;
-        gops.push({ t, e, f: dataFile, o, l, n, a: aMax, aMax, acts, noChange: l === 0, ref: l === 0 ? o : 0 });
+        gops.push({ t, e, f: dataFile, o, l, n, a: aMax, aMax, acts, dts, noChange: l === 0, ref: l === 0 ? o : 0 });
         starts.push(p);
         p += 4 + len + 4;
     }
@@ -175,7 +188,7 @@ export class StorageWriter {
             const e = timeMs + Math.round((frameCount / 30) * 1000);
             const a = acts && acts.length === frameCount ? acts : new Uint16Array(frameCount);
             const idxPath = path.join(DATA_DIR, ...dayPartsOf(timeMs), `${hourOf(timeMs)}.${SESSION}.idx`);
-            await fsp.appendFile(idxPath, encodeRecord(timeMs, e, o, body.length, frameCount, a));
+            await fsp.appendFile(idxPath, encodeRecord(timeMs, e, o, body.length, frameCount, a, evenDts(frameCount, e - timeMs)));
         };
         this.tail = this.tail.then(run).catch(err => { console.error("[storage] writeGop failed:", (err as Error)?.message); });
         return this.tail;
@@ -188,7 +201,7 @@ export class StorageWriter {
             const n = acts.length;
             const e = timeMs + Math.round((n / 30) * 1000);
             const idxPath = path.join(DATA_DIR, ...dayPartsOf(timeMs), `${hourOf(timeMs)}.${SESSION}.idx`);
-            await fsp.appendFile(idxPath, encodeRecord(timeMs, e, refT, 0, n, acts));
+            await fsp.appendFile(idxPath, encodeRecord(timeMs, e, refT, 0, n, acts, evenDts(n, e - timeMs)));
         };
         this.tail = this.tail.then(run).catch(err => { console.error("[storage] writeNoChange failed:", (err as Error)?.message); });
         return this.tail;
@@ -443,7 +456,7 @@ export class LevelWriter {
             await fsp.appendFile(this.dataPath, body);
             const o = this.offset; this.offset += body.length;
             const a = acts && acts.length === frameCount ? acts : new Uint16Array(frameCount);
-            await fsp.appendFile(this.idxPath, encodeRecord(t, e, o, body.length, frameCount, a));
+            await fsp.appendFile(this.idxPath, encodeRecord(t, e, o, body.length, frameCount, a, evenDts(frameCount, e - t)));
         };
         this.tail = this.tail.then(run).catch(err => { console.error(`[storage] L${this.level} writeGop failed:`, (err as Error)?.message); });
         return this.tail;
@@ -453,7 +466,7 @@ export class LevelWriter {
     writeNoChange(t: number, e: number, refT: number, acts: Uint16Array): Promise<void> {
         const run = async (): Promise<void> => {
             await this.ensure(t);
-            await fsp.appendFile(this.idxPath, encodeRecord(t, e, refT, 0, acts.length, acts));
+            await fsp.appendFile(this.idxPath, encodeRecord(t, e, refT, 0, acts.length, acts, evenDts(acts.length, e - t)));
         };
         this.tail = this.tail.then(run).catch(err => { console.error(`[storage] L${this.level} writeNoChange failed:`, (err as Error)?.message); });
         return this.tail;

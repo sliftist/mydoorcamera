@@ -7,37 +7,41 @@
 // max. noChange (l === 0) = a static GOP with no video bytes; `ref` (the o field) is the start
 // time of the GOP whose last frame it repeats.
 export const ACT_SCALE = 65535;
-export type IndexGop = { t: number; e: number; n: number; acts: Uint16Array; aMax: number; noChange: boolean; ref: number };
+// dts[i] = ms offset of frame i from t (exact per-frame timing; dts[i] => frame i wall = t + dts[i]).
+export type IndexGop = { t: number; e: number; n: number; acts: Uint16Array; dts: Uint16Array; aMax: number; noChange: boolean; ref: number };
 
-// Record: [u32 len][f64 t,e,o,l,n][u16 acts...][u32 len], len = 40 + 2*n. (see src/storage.ts)
+// Record: [u32 len][f64 t,e,o,l,n][u16 act×n][u16 dt×n][u32 len], len = 40 + 4*n. (see src/storage.ts)
 export function decodeIndex(u8: Uint8Array): IndexGop[] {
     const dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
     const out: IndexGop[] = [];
     let p = 0;
     while (p + 4 <= u8.byteLength) {
         const len = dv.getUint32(p, true);
-        if (len < 40 || (len - 40) % 2 !== 0 || p + 4 + len + 4 > u8.byteLength) break;
+        if (len < 40 || (len - 40) % 4 !== 0 || p + 4 + len + 4 > u8.byteLength) break;
         if (dv.getUint32(p + 4 + len, true) !== len) break;
         const t = dv.getFloat64(p + 4, true);
         const e = dv.getFloat64(p + 12, true);
         const o = dv.getFloat64(p + 20, true); // offset, or refT when no-change
         const l = dv.getFloat64(p + 28, true); // length; 0 => no-change
         const n = dv.getFloat64(p + 36, true);
-        const na = (len - 40) / 2;
+        const na = (len - 40) / 4;
         const acts = new Uint16Array(na);
+        const dts = new Uint16Array(na);
         let mx = 0;
         for (let i = 0; i < na; i++) { const v = dv.getUint16(p + 44 + i * 2, true); acts[i] = v; if (v > mx) mx = v; }
+        for (let i = 0; i < na; i++) dts[i] = dv.getUint16(p + 44 + na * 2 + i * 2, true);
         const noChange = l === 0;
-        out.push({ t, e, n, acts, aMax: mx / ACT_SCALE, noChange, ref: noChange ? o : 0 });
+        out.push({ t, e, n, acts, dts, aMax: mx / ACT_SCALE, noChange, ref: noChange ? o : 0 });
         p += 4 + len + 4;
     }
     out.sort((x, y) => x.t - y.t);
     return out;
 }
 
-// Per-frame wall time of frame i within a GOP (frames spread evenly across [t, e]).
+// Per-frame wall time of frame i within a GOP — EXACT, from the stored per-frame offset.
 export function frameWallOf(g: IndexGop, i: number): number {
-    const span = g.e - g.t;
+    if (g.dts && i < g.dts.length) return g.t + g.dts[i];
+    const span = g.e - g.t; // fallback (shouldn't happen): even spread
     const n = Math.max(1, g.acts.length || g.n);
     return g.t + (span * i) / n;
 }

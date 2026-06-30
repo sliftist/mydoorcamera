@@ -1,6 +1,7 @@
 // On-disk store — byte-compatible with src/storage.ts (read by the Node server/player).
 //   data file: per GOP, concatenated [u32 BE len][nal bytes] (frameNal).
-//   idx  file: per GOP, [u32 LE body][f64 LE t,e,o,l,n][u16 LE acts...][u32 LE body], body = 40+2n.
+//   idx  file: per GOP, [u32 LE body][f64 LE t,e,o,l,n][u16 LE act×n][u16 LE dt×n][u32 LE body],
+//             body = 40 + 4n. dt[i] = ms offset of frame i from t (exact per-frame timing; dt[0]=0).
 //             l===0 => no-change (no video bytes), o carries refT.
 // Level-bucketed paths (mirror of storage.ts bucketOf): L0 under DATA_DIR (folder=day, file=hour);
 // thinned levels under THIN_DIR/L<n> (L1 folder=month file=day; L2+ folder=year file=month).
@@ -13,12 +14,13 @@ use std::path::PathBuf;
 const DATA_DIR: &str = "/var/lib/mydoorcamera/video";
 const THIN_DIR: &str = "/var/lib/mydoorcamera/thin";
 
-fn encode_record(t: f64, e: f64, o: f64, l: f64, n: f64, acts: &[u16]) -> Vec<u8> {
-    let body = 40 + acts.len() * 2;
+fn encode_record(t: f64, e: f64, o: f64, l: f64, n: f64, acts: &[u16], dts: &[u16]) -> Vec<u8> {
+    let body = 40 + acts.len() * 2 + dts.len() * 2;
     let mut buf = Vec::with_capacity(4 + body + 4);
     buf.extend_from_slice(&(body as u32).to_le_bytes());
     for v in [t, e, o, l, n] { buf.extend_from_slice(&v.to_le_bytes()); }
     for &a in acts { buf.extend_from_slice(&a.to_le_bytes()); }
+    for &d in dts { buf.extend_from_slice(&d.to_le_bytes()); }
     buf.extend_from_slice(&(body as u32).to_le_bytes());
     buf
 }
@@ -74,7 +76,7 @@ impl Writer {
 
     /// Write an encoded GOP: data bytes first (so the idx never points past the data), then idx.
     /// `e_ms` is the GOP's real end time (L0: ~t+1s; thinned: t + the window span it represents).
-    pub fn write_gop(&mut self, nals: &[Vec<u8>], t_ms: i64, e_ms: i64, frame_count: usize, acts: &[u16]) -> std::io::Result<()> {
+    pub fn write_gop(&mut self, nals: &[Vec<u8>], t_ms: i64, e_ms: i64, frame_count: usize, acts: &[u16], dts: &[u16]) -> std::io::Result<()> {
         self.ensure(t_ms)?;
         let mut body = Vec::new();
         for n in nals {
@@ -85,15 +87,18 @@ impl Writer {
         let o = self.offset;
         self.offset += body.len() as u64;
         let a: Vec<u16> = (0..frame_count).map(|i| acts.get(i).copied().unwrap_or(0)).collect();
-        let rec = encode_record(t_ms as f64, e_ms as f64, o as f64, body.len() as f64, frame_count as f64, &a);
+        let d: Vec<u16> = (0..frame_count).map(|i| dts.get(i).copied().unwrap_or(0)).collect();
+        let rec = encode_record(t_ms as f64, e_ms as f64, o as f64, body.len() as f64, frame_count as f64, &a, &d);
         Self::append(&self.idx_path, &rec)?;
         Ok(())
     }
 
     /// Write a no-change (static) record: idx only, l=0, o=refT.
-    pub fn write_no_change(&mut self, t_ms: i64, e_ms: i64, ref_t: f64, acts: &[u16]) -> std::io::Result<()> {
+    pub fn write_no_change(&mut self, t_ms: i64, e_ms: i64, ref_t: f64, acts: &[u16], dts: &[u16]) -> std::io::Result<()> {
         self.ensure(t_ms)?;
-        let rec = encode_record(t_ms as f64, e_ms as f64, ref_t, 0.0, acts.len() as f64, acts);
+        let n = acts.len();
+        let d: Vec<u16> = (0..n).map(|i| dts.get(i).copied().unwrap_or(0)).collect();
+        let rec = encode_record(t_ms as f64, e_ms as f64, ref_t, 0.0, n as f64, acts, &d);
         Self::append(&self.idx_path, &rec)?;
         Ok(())
     }

@@ -5,7 +5,7 @@
 import { createRpc, browserWsChannel, Rpc } from "../../src/rpc";
 
 export type Range = { start: number; end: number };
-export type GopEntry = { t: number; e: number; f: string; o: number; l: number; n: number; a: number; aMax: number };
+export type GopEntry = { t: number; e: number; f: string; o: number; l: number; n: number; a: number; aMax: number; dts?: Uint16Array };
 export type HourIndex = { gops: GopEntry[]; badRanges: Range[] };
 export type DayCoverage = { dayStartMs: number; dayEndMs: number; ranges: Range[]; badRanges: Range[]; activity: number[] };
 export type LevelCoverage = { fromMs: number; toMs: number; ranges: Range[]; badRanges: Range[]; activity: number[] };

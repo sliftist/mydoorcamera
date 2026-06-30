@@ -9,7 +9,7 @@ import { FPS } from "../../../src/config";
 import { Renderer } from "./renderer";
 import { decodeGop } from "./frameCache";
 
-type LiveGop = { meta: { t: number; e: number; n: number }; bytes: Uint8Array };
+type LiveGop = { meta: { t: number; e: number; n: number; dts?: number[] }; bytes: Uint8Array };
 
 const CADENCE_MS = 1000 / FPS;     // target gap between rendered frames
 const MAX_QUEUE = Math.round(FPS * 1.5); // ~1.5s of playout buffer; beyond this we're behind -> drop oldest
@@ -59,9 +59,11 @@ export class LivePlayer {
             while (this.pending && !this.stopped) {
                 const { meta, bytes } = this.pending;
                 this.pending = null;
+                // Exact per-frame timing from the stored offsets when present; else even-spread.
+                const dts: number[] | undefined = meta.dts;
                 const span = meta.n > 0 ? (meta.e - meta.t) / meta.n : CADENCE_MS;
                 const walls: number[] = [];
-                for (let i = 0; i < Math.max(meta.n, 1); i++) walls.push(meta.t + i * (span > 0 ? span : CADENCE_MS));
+                for (let i = 0; i < Math.max(meta.n, 1); i++) walls.push(dts && i < dts.length ? meta.t + dts[i] : meta.t + i * (span > 0 ? span : CADENCE_MS));
                 let bitmaps: ImageBitmap[];
                 try { bitmaps = await decodeGop(Buffer.from(bytes), walls); }
                 catch { continue; }

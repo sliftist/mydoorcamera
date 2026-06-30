@@ -117,7 +117,7 @@ async function start(): Promise<void> {
                     if (r.l === 0) { stream.offset = ends[i]; continue; } // no-change: no video bytes — just advance past it
                     if (!(await dataReady(stream.parts, r.f, r.o, r.l))) break; // not flushed yet — retry next tick
                     const bytes = await readGopBytes(stream.parts, r.f, r.o, r.l);
-                    rpc.call("onStreamData", { t: r.t, e: r.e, n: r.n }, bytes).catch(() => { /* */ });
+                    rpc.call("onStreamData", { t: r.t, e: r.e, n: r.n, dts: Array.from(r.dts) }, bytes).catch(() => { /* */ });
                     stream.offset = ends[i];
                 }
             } finally { streamPolling = false; }
@@ -174,7 +174,7 @@ async function start(): Promise<void> {
                 // Start at the live edge: skip the existing backlog of the current file.
                 const live = await latestIdxFile(parts);
                 let offset = 0;
-                let initial: { r: { t: number; e: number; n: number; f: string; o: number; l: number } } | undefined;
+                let initial: { r: { t: number; e: number; n: number; f: string; o: number; l: number; dts: Uint16Array } } | undefined;
                 if (live) {
                     try {
                         const { records } = await readIdxIncremental(parts, live, 0);
@@ -189,7 +189,7 @@ async function start(): Promise<void> {
                 if (!streaming) { streaming = true; liveCount++; syncLive(); }
                 if (initial) {
                     const r = initial.r;
-                    try { if (await dataReady(parts, r.f, r.o, r.l)) { const bytes = await readGopBytes(parts, r.f, r.o, r.l); rpc.call("onStreamData", { t: r.t, e: r.e, n: r.n }, bytes).catch(() => { /* */ }); } } catch { /* */ }
+                    try { if (await dataReady(parts, r.f, r.o, r.l)) { const bytes = await readGopBytes(parts, r.f, r.o, r.l); rpc.call("onStreamData", { t: r.t, e: r.e, n: r.n, dts: Array.from(r.dts) }, bytes).catch(() => { /* */ }); } } catch { /* */ }
                 }
                 return { ok: true };
             },

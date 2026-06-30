@@ -80,16 +80,18 @@ fn flush_gop(lv: &mut Level) {
     let mut mx = 0f32;
     for f in &gop { if f.1 > mx { mx = f.1; } }
     let acts: Vec<u16> = gop.iter().map(|f| crate::act_to_u16(f.1)).collect();
+    // Exact per-frame timing: each picked frame's ms offset from the GOP start (clamped to u16).
+    let dts: Vec<u16> = gop.iter().map(|f| (f.2 - t).clamp(0, 65535) as u16).collect();
     if (mx as f64) < THRESH {
         if let Some(rt) = lv.last_t {
-            let _ = lv.writer.write_no_change(t, e, rt, &acts);
+            let _ = lv.writer.write_no_change(t, e, rt, &acts, &dts);
         }
         return;
     }
     let jpegs: Vec<Vec<u8>> = gop.into_iter().map(|f| f.0).collect();
     if let Some((nals, fc)) = encode(jpegs) {
         if fc > 0 {
-            if let Err(err) = lv.writer.write_gop(&nals, t, e, fc, &acts) { eprintln!("[thin] write_gop: {}", err); }
+            if let Err(err) = lv.writer.write_gop(&nals, t, e, fc, &acts, &dts) { eprintln!("[thin] write_gop: {}", err); }
             lv.last_t = Some(t as f64);
         }
     }

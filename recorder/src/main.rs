@@ -77,8 +77,8 @@ static DROPS: AtomicU64 = AtomicU64::new(0);    // GOPs dropped because the enco
 static RUNG: AtomicUsize = AtomicUsize::new(0); // current ladder rung
 
 enum GopMsg {
-    Active { t: i64, e: i64, acts: Vec<u16>, jpegs: Vec<Vec<u8>> },
-    Static { t: i64, e: i64, acts: Vec<u16> },
+    Active { t: i64, e: i64, acts: Vec<u16>, dts: Vec<u16>, jpegs: Vec<Vec<u8>> },
+    Static { t: i64, e: i64, acts: Vec<u16>, dts: Vec<u16> },
 }
 
 // MJPEG frame -> GW×GH grayscale for the activity detector (1/8-scale DCT decode, then box-down).
@@ -271,12 +271,12 @@ fn manager_loop(session: u64, gop_rx: mpsc::Receiver<GopMsg>) {
     let mut last_encoded_t: Option<f64> = None;
     let mut enc: Option<Encoder> = None;
     let mut cur_period: usize = 0;
-    let mut pending: VecDeque<(i64, i64, Vec<u16>, Instant)> = VecDeque::new();
+    let mut pending: VecDeque<(i64, i64, Vec<u16>, Vec<u16>, Instant)> = VecDeque::new();
 
-    let write_gops = |writer: &mut Writer, last: &mut Option<f64>, pending: &mut VecDeque<(i64, i64, Vec<u16>, Instant)>, gops: Vec<(Vec<Vec<u8>>, usize)>| {
+    let write_gops = |writer: &mut Writer, last: &mut Option<f64>, pending: &mut VecDeque<(i64, i64, Vec<u16>, Vec<u16>, Instant)>, gops: Vec<(Vec<Vec<u8>>, usize)>| {
         for (nals, fc) in gops {
-            if let Some((pt, pe, pacts, created)) = pending.pop_front() {
-                if let Err(err) = writer.write_gop(&nals, pt, pe, fc, &pacts) { eprintln!("[recorder] write_gop: {}", err); }
+            if let Some((pt, pe, pacts, pdts, created)) = pending.pop_front() {
+                if let Err(err) = writer.write_gop(&nals, pt, pe, fc, &pacts, &pdts) { eprintln!("[recorder] write_gop: {}", err); }
                 *last = Some(pt as f64);
                 ENC_SUM_MS.fetch_add(created.elapsed().as_millis() as u64, Ordering::Relaxed);
                 ENC_CNT.fetch_add(1, Ordering::Relaxed);
@@ -286,7 +286,7 @@ fn manager_loop(session: u64, gop_rx: mpsc::Receiver<GopMsg>) {
 
     for msg in gop_rx {
         match msg {
-            GopMsg::Active { t, e: gop_e, acts, jpegs } => {
+            GopMsg::Active { t, e: gop_e, acts, dts, jpegs } => {
                 let period = jpegs.len();
                 if period == 0 { continue; }
                 let need_respawn = match &enc { None => true, Some(_) => cur_period != period };
@@ -300,7 +300,7 @@ fn manager_loop(session: u64, gop_rx: mpsc::Receiver<GopMsg>) {
                     (ok, if ok { e.drain_available() } else { Vec::new() })
                 };
                 if fed_ok {
-                    pending.push_back((t, gop_e, acts, Instant::now()));
+                    pending.push_back((t, gop_e, acts, dts, Instant::now()));
                     write_gops(&mut writer, &mut last_encoded_t, &mut pending, ready);
                 } else {
                     // encoder died (e.g. mem guard killed it) -> drain + respawn next time
@@ -308,10 +308,10 @@ fn manager_loop(session: u64, gop_rx: mpsc::Receiver<GopMsg>) {
                     pending.clear();
                 }
             }
-            GopMsg::Static { t, e: gop_e, acts } => {
+            GopMsg::Static { t, e: gop_e, acts, dts } => {
                 if let Some(e) = enc.take() { let rest = e.close(); write_gops(&mut writer, &mut last_encoded_t, &mut pending, rest); pending.clear(); }
                 if let Some(rt) = last_encoded_t {
-                    if let Err(err) = writer.write_no_change(t, gop_e, rt, &acts) { eprintln!("[recorder] write_no_change: {}", err); }
+                    if let Err(err) = writer.write_no_change(t, gop_e, rt, &acts, &dts) { eprintln!("[recorder] write_no_change: {}", err); }
                 }
             }
         }
@@ -374,11 +374,13 @@ impl CapState {
         let active = (mx as f64) >= ACTIVITY_THRESHOLD || !self.have_encoded || new_file || encode_all();
         let frames = std::mem::take(&mut self.col);
         let acts: Vec<u16> = frames.iter().map(|c| act_to_u16(c.1)).collect();
+        // Exact per-frame timing: ms offset of each kept frame from the GOP start (clamped to u16).
+        let dts: Vec<u16> = frames.iter().map(|c| (c.2 - gop_t).clamp(0, 65535) as u16).collect();
 
         if active {
             self.have_encoded = true;
             let jpegs: Vec<Vec<u8>> = frames.into_iter().map(|c| c.0).collect();
-            match gop_tx.try_send(GopMsg::Active { t: gop_t, e: gop_e, acts, jpegs }) {
+            match gop_tx.try_send(GopMsg::Active { t: gop_t, e: gop_e, acts, dts, jpegs }) {
                 Ok(()) => {}
                 Err(mpsc::TrySendError::Full(_)) => {
                     // Encoder is behind — drop this GOP and climb a rung (longer period, fewer fps).
@@ -389,7 +391,7 @@ impl CapState {
                 Err(mpsc::TrySendError::Disconnected(_)) => {}
             }
         } else {
-            let _ = gop_tx.try_send(GopMsg::Static { t: gop_t, e: gop_e, acts });
+            let _ = gop_tx.try_send(GopMsg::Static { t: gop_t, e: gop_e, acts, dts });
         }
 
         if rung > 0 && self.last_drop.elapsed() >= Duration::from_secs(RECOVER_SECS) {

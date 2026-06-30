@@ -72,8 +72,11 @@ export class GopSource {
         for (let h = this.hourNumOf(g.t); h <= 23; h++) { const gops = this.hourCache.get(pad2(h)); if (!gops) continue; for (const x of gops) if (x.t > g.t) return x.t; }
         return null;
     }
-    // Per-frame wall times inside a GOP, spread over its real span (no stretch over a gap).
+    // Per-frame wall times inside a GOP. Prefer the EXACT stored per-frame offsets (dts); fall back
+    // to an even spread over the real span only if dts is absent.
     frameWalls(g: GopEntry, n: number): number[] {
+        const dts = g.dts;
+        if (dts && dts.length >= n) { const out: number[] = []; for (let i = 0; i < n; i++) out.push(g.t + dts[i]); return out; }
         const nominal = (g.n / FPS) * 1000 * this.comp;
         const next = this.nextStartWall(g);
         let span = next != null ? next - g.t : nominal;
