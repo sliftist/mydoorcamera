@@ -25,11 +25,6 @@ export class Controls extends preact.Component {
                     onChange={(e: any) => { const s = Number(e.target.value); runInAction(() => { state.speed = s; }); player?.setSpeed(s); saveUrlPosition(state.playWall); }}>
                     {SPEEDS.map(s => <option key={s} value={String(s)}>{speedLabel(s)}×</option>)}
                 </select>
-                <select className={selectCss} value={state.gapMode} title="How playback crosses a gap with no recorded footage"
-                    onChange={(e: any) => { const m = e.target.value === "skip" ? "skip" : "blank"; runInAction(() => { state.gapMode = m; }); player?.setGapMode(m); saveUrlPosition(state.playWall); }}>
-                    <option value="blank">gaps: blank</option>
-                    <option value="skip">gaps: skip</option>
-                </select>
                 <button className={liveBtnCss} title="Jump to live" onMouseDown={(e: any) => { e.preventDefault(); void enterLive(); }}>● Live</button>
             </div>
         );
