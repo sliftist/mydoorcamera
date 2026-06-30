@@ -94,6 +94,9 @@ export function maybeStartDayPlayer(): void {
     if (!api || !renderer || !state.coverage || !state.day || state.live) return;
     const key = `${state.day}#${state.level}`;
     if (player && playerKey === key) return;
+    // Rebuilding the player (level/day switch) otherwise leaves us paused on the new
+    // player while the UI still says "playing". Remember the intent and resume below.
+    const wasPlaying = !!player && (player.playStatus === "playing" || player.playStatus === "waiting"); // "waiting" = playing but mid-seek/buffer
     teardownPlayer();
     playerKey = key;
     player = new DayPlayer(renderer, api, state.day.split("/"), state.coverage.dayStartMs, state.coverage.ranges, state.level, state.coverage.dayEndMs);
@@ -112,7 +115,8 @@ export function maybeStartDayPlayer(): void {
     player.onSeeking = (s) => runInAction(() => { state.seeking = s; });
     player.onDropping = (d) => runInAction(() => { state.dropping = d; });
     player.onPending = () => runInAction(() => { if (player) { state.pendingGops = player.pendingGopTimes; state.bufferedRanges = player.bufferedWallRanges(); } }); // promptly reflect in-flight + loaded GOPs on the markers
-    player.seekTo(state.desiredWall); // show the initial / resumed frame (paused), set by selectDay
+    player.seekTo(state.desiredWall); // show the initial / resumed frame, set by selectDay
+    if (wasPlaying) player.play(); // keep playing from the same spot across a level/day switch
 }
 
 export function teardownPlayer(): void { if (player) { player.teardown(); player = undefined; } playerKey = ""; }
