@@ -11,7 +11,6 @@ path = "src/main.rs"
 v4l = "0.14"
 v4l2-sys-mit = "0.3"
 libc = "0.2"
-jpeg-decoder = "0.3"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 
 [profile.release]
