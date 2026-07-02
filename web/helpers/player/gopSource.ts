@@ -65,7 +65,10 @@ export class GopSource {
 
     // ---- geometry ----
     private hourNumOf(wall: number): number { return Math.floor((wall - this.dayStartMs) / 3600_000); }
-    gopDurMs(g: GopEntry): number { return this.level > 0 ? Math.max(1, g.e - g.t) : Math.round((g.n / FPS) * 1000); }
+    // Use the GOP's EXACT recorded span (g.e - g.t). At L0 this matters: a frame-dropped or
+    // degraded GOP can really span several seconds while holding 30 frames, and the old nominal
+    // (n/FPS)*1000 = 1000ms under-counted it — skewing prefetch selection and the buffered band.
+    gopDurMs(g: GopEntry): number { const span = g.e - g.t; return span > 0 ? span : Math.round((g.n / FPS) * 1000 * this.comp); }
     // Wall time of the GOP after `g`, if its index is loaded (sync; null if unknown).
     nextStartWall(g: GopEntry): number | null {
         if (this.level > 0) { for (const x of this.levelGops) if (x.t > g.t) return x.t; return null; }
