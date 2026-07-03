@@ -141,7 +141,7 @@ function main() {
         // Copy only the artifacts we want served (not stray dev files from build-web/).
         fs.copyFileSync(path.join(BUILD_DIR, "index.html"), path.join(worktreeDir, "index.html"));
         for (const file of fs.readdirSync(BUILD_DIR)) {
-            if (file.endsWith(".js")) {
+            if (file.endsWith(".js") || file.endsWith(".svg")) {
                 fs.copyFileSync(path.join(BUILD_DIR, file), path.join(worktreeDir, file));
             }
         }
