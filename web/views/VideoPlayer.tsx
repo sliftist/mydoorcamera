@@ -17,7 +17,8 @@ export class VideoPlayer extends preact.Component {
         const noFootage = state.coverage && state.coverage.ranges.length === 0;
         return (
             <div className={css.vbox(14).width("100%").alignItems("center")}>
-                {/* Player fills the first viewport; the date picker is below the fold. */}
+                {/* Activity events at the very top (expanded by default), then the player. */}
+                {!state.live && <ActivityPanel />}
                 <div className={css.vbox(10).width("100%").alignItems("center")}
                     style={{ minHeight: "100vh", justifyContent: "center", padding: "8px 12px", boxSizing: "border-box" }}>
                     {/* Largest 16:9 box that fits the viewport: width fills the screen, but is capped by
@@ -44,7 +45,6 @@ export class VideoPlayer extends preact.Component {
                 {!state.live && <div className={css.fontSize(13).opacity(0.75)}>
                     {state.day ? state.day.replace(/\//g, "-") : "No period selected"}{noFootage ? " · no footage in this period" : ""}
                 </div>}
-                {!state.live && <ActivityPanel />}
                 {!state.live && <DatePicker />}
                 <div style={{ height: "48px" }} />
             </div>

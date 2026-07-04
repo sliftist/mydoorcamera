@@ -9,7 +9,7 @@ import { state, lsSet } from "./appState";
 import {
     selectPeriod, refreshLevels, saveUrlPosition, rewatchDay, reloadIndex, applyUrlZoom,
     periodStartFromKey, todayStart,
-    getUrlSpeed, getUrlLevel, getUrlActivityExp, getUrlGapMode, getUrlPanelOpen, getUrlThreshold, applyUrlLoop, getUrlDay, getUrlLive, setUrlLive,
+    getUrlSpeed, getUrlLevel, getUrlActivityExp, getUrlGapMode, getUrlPanelOpen, getUrlActivitySort, getUrlThreshold, applyUrlLoop, getUrlDay, getUrlT, getUrlLive, setUrlLive,
 } from "./navigation";
 
 export let api: CameraApi | undefined;
@@ -44,10 +44,12 @@ export async function connect(): Promise<void> {
         }, 1000);
         if (!posTimer) posTimer = setInterval(() => { if (state.day && state.coverage) saveUrlPosition(state.playWall); void refreshLevels(); }, 30000);
         void refreshLevels();
-        runInAction(() => { state.speed = getUrlSpeed(); state.level = getUrlLevel(); state.activityExp = getUrlActivityExp(); state.gapMode = getUrlGapMode(); state.activityPanelOpen = getUrlPanelOpen(); state.activityThreshold = getUrlThreshold(); }); // restore settings before the player is created
+        runInAction(() => { state.speed = getUrlSpeed(); state.level = getUrlLevel(); state.activityExp = getUrlActivityExp(); state.gapMode = getUrlGapMode(); state.activityPanelOpen = getUrlPanelOpen(); state.activitySort = getUrlActivitySort(); state.activityThreshold = getUrlThreshold(); }); // restore settings before the player is created
         const urlDay = getUrlDay();
         const anchor = urlDay ? periodStartFromKey(urlDay) : (days.length ? periodStartFromKey(days[days.length - 1]) : 0);
-        if (anchor) { await selectPeriod(anchor, false); applyUrlZoom(); applyUrlLoop(); }
+        // Default the playhead to the current time in the current bucket, unless the URL pins a ?t=.
+        const initPos = getUrlT() != null ? undefined : Date.now();
+        if (anchor) { await selectPeriod(anchor, false, initPos); applyUrlZoom(); applyUrlLoop(); }
         else runInAction(() => { state.pickerAnchorMs = Date.now(); });
         if (getUrlLive()) void enterLive(); // resume live mode across refresh
     } catch (e: any) {

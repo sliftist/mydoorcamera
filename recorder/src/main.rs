@@ -55,7 +55,20 @@ static ACT_CNT: AtomicU64 = AtomicU64::new(0);
 static ENC_SUM_MS: AtomicU64 = AtomicU64::new(0);
 static ENC_CNT: AtomicU64 = AtomicU64::new(0);
 static DROPS: AtomicU64 = AtomicU64::new(0);
+static DUPS: AtomicU64 = AtomicU64::new(0);     // decoded frames identical to the previous (dropped, not encoded)
+static SEQGAPS: AtomicU64 = AtomicU64::new(0);  // camera-sequence gaps (frames the driver dropped before we got them)
 static RUNG: AtomicUsize = AtomicUsize::new(0);
+
+// Cheap content fingerprint of a decoded NV12: FNV over a contiguous 64 KiB window in the middle
+// of the Y plane (where motion usually is), so it's cache-friendly. Two genuinely-distinct camera
+// frames always differ (sensor noise), so an exact match here means a duplicate frame reached us.
+fn nv12_fingerprint(nv12: &[u8]) -> u64 {
+    let mid = nv12.len() / 2;
+    let end = (mid + 65536).min(nv12.len());
+    let mut h: u64 = 0xcbf29ce484222325;
+    for &b in &nv12[mid..end] { h = (h ^ b as u64).wrapping_mul(0x100000001b3); }
+    h
+}
 
 // Encode EVERY GOP regardless of activity when the manual toggle is on or someone is watching live.
 fn encode_all() -> bool {
@@ -178,20 +191,39 @@ fn capture_loop_hw(session: u64, thin_tx: &mpsc::SyncSender<thin::Frame>) -> std
     let mut raw_i: u64 = 0;
     let mut last_drop = Instant::now();
     let mut luma = [0u8; FRAME];
+    let mut prev_luma = [0u8; FRAME];
+    let mut have_prev_luma = false;
+    let mut ts_anchor: Option<(i64, i64)> = None; // (wall_ms, camera_mono_ms) — accurate per-frame timing
+    let mut prev_seq: i64 = -1;
+    let mut prev_fp: u64 = 0;
+    let mut gop_dec_motion: f32 = 0.0; // max consecutive DECODED-luma diff within the current GOP
 
     loop {
-        let (buf, _meta) = stream.next()?;
+        let (buf, meta) = stream.next()?;
         FRAMES.fetch_add(1, Ordering::Relaxed);
+        // Frames the driver dropped before we read them show up as gaps in the camera sequence.
+        let seq = meta.sequence as i64;
+        if prev_seq >= 0 && seq > prev_seq + 1 { SEQGAPS.fetch_add((seq - prev_seq - 1) as u64, Ordering::Relaxed); }
+        prev_seq = seq;
         raw_i += 1;
         let rung = RUNG.load(Ordering::Relaxed);
         let stride = rung_stride(rung);
         if raw_i % stride as u64 != 0 { continue; } // drop whole frames -> lower fps / longer GOP
 
-        let t = now_ms();
+        // Use the camera's hardware capture timestamp (monotonic), anchored once to wall-clock, so
+        // every frame gets its TRUE capture time — not the bursty now_ms() at read time. Resync if
+        // it drifts (NTP step) or fall back to now_ms() if the driver gives no timestamp.
+        let mono = meta.timestamp.sec as i64 * 1000 + meta.timestamp.usec as i64 / 1000;
+        let wall = now_ms();
+        let t = if mono > 0 {
+            let (aw, am) = *ts_anchor.get_or_insert((wall, mono));
+            let est = aw + (mono - am);
+            if (wall - est).abs() > 2000 { ts_anchor = Some((wall, mono)); wall } else { est }
+        } else { wall };
+
         let jpeg = buf.to_vec();
         jpeg_fifo.push_back((jpeg, t));
-        let (jp_ref, _) = jpeg_fifo.back().unwrap();
-        let jp_for_decode = jp_ref.clone();
+        let jp_for_decode = jpeg_fifo.back().unwrap().0.clone();
 
         // HW JPEG decode (drains any ready NV12 frames — pipeline depth ~2-3).
         let d0 = Instant::now();
@@ -201,12 +233,26 @@ fn capture_loop_hw(session: u64, thin_tx: &mpsc::SyncSender<thin::Frame>) -> std
 
         for nv12 in nv12s {
             let (jpeg_owned, ct) = jpeg_fifo.pop_front().unwrap_or((Vec::new(), t));
+            // Never encode the same frame twice: a byte-identical decoded frame means the pipeline
+            // handed us a duplicate — drop it (genuinely distinct camera frames always differ).
+            let fp = nv12_fingerprint(&nv12);
+            if fp == prev_fp { DUPS.fetch_add(1, Ordering::Relaxed); continue; }
+            prev_fp = fp;
             // activity from the decoded luma (no software JPEG decode).
             let a0 = Instant::now();
             downsample_luma(&nv12, WIDTH as usize, CAP_H as usize, &mut luma);
             let act = model.compute(&luma);
             ACT_SUM_US.fetch_add(a0.elapsed().as_micros() as u64, Ordering::Relaxed);
             ACT_CNT.fetch_add(1, Ordering::Relaxed);
+            // Real DECODED motion (independent of the encoder): compare consecutive decoded lumas.
+            if have_prev_luma {
+                let mut s = 0u32;
+                for i in 0..FRAME { s += (luma[i] as i32 - prev_luma[i] as i32).unsigned_abs(); }
+                let dmv = s as f32 / FRAME as f32;
+                if dmv > gop_dec_motion { gop_dec_motion = dmv; }
+            }
+            prev_luma.copy_from_slice(&luma);
+            have_prev_luma = true;
             // feed the thinner (best-effort).
             let _ = thin_tx.try_send((jpeg_owned, act, ct));
             // HW H.264 encode.
@@ -217,6 +263,14 @@ fn capture_loop_hw(session: u64, thin_tx: &mpsc::SyncSender<thin::Frame>) -> std
                 ENC_CNT.fetch_add(1, Ordering::Relaxed);
                 gop.push(EncFrame { nals: split_nals(&h264), t: ft, act: fa });
                 if gop.len() >= GOP_FRAMES {
+                    // Diagnostic: if an ACTIVE gop (a subject is present) shows near-zero DECODED
+                    // motion, the frames reaching the encoder were already frozen (camera/decoder),
+                    // not an encoder fault.
+                    let mx = gop.iter().fold(0f32, |m, f| m.max(f.act));
+                    if (mx as f64) >= ACTIVITY_THRESHOLD {
+                        eprintln!("[gop] active mx_act={:.5} decoded_motion={:.2}", mx, gop_dec_motion);
+                    }
+                    gop_dec_motion = 0.0;
                     finalize_gop(&mut writer, &mut gop, &mut last_encoded_t, &mut last_active_t, &mut last_hour_key, &mut have_encoded);
                 }
             }
@@ -303,14 +357,16 @@ fn stats_loop() {
         let dc = DEC_CNT.swap(0, Ordering::Relaxed); let dsum = DEC_SUM_US.swap(0, Ordering::Relaxed);
         let ac = ACT_CNT.swap(0, Ordering::Relaxed); let asum = ACT_SUM_US.swap(0, Ordering::Relaxed);
         let ec = ENC_CNT.swap(0, Ordering::Relaxed); let esum = ENC_SUM_MS.swap(0, Ordering::Relaxed);
+        let dups = DUPS.swap(0, Ordering::Relaxed);
+        let seqgaps = SEQGAPS.swap(0, Ordering::Relaxed);
         let decode_ms = if dc > 0 { dsum as f64 / dc as f64 / 1000.0 } else { 0.0 };
         let activity_ms = if ac > 0 { asum as f64 / ac as f64 / 1000.0 } else { 0.0 };
         let encode_ms = if ec > 0 { esum as f64 / ec as f64 } else { 0.0 };
 
         let json = format!(
-            "{{\"fps\":{:.1},\"cpuPct\":{},\"updatedMs\":{},\"jpegDecodeMs\":{:.2},\"activityMs\":{:.2},\"encodeMs\":{:.1},\"droppedFps\":{:.1},\"rung\":{}}}",
+            "{{\"fps\":{:.1},\"cpuPct\":{},\"updatedMs\":{},\"jpegDecodeMs\":{:.2},\"activityMs\":{:.2},\"encodeMs\":{:.1},\"droppedFps\":{:.1},\"dupFps\":{:.1},\"seqGaps\":{},\"rung\":{}}}",
             (fps * 10.0).round() / 10.0, cpu.round() as i64, now, decode_ms, activity_ms, encode_ms,
-            (dropped_fps * 10.0).round() / 10.0, RUNG.load(Ordering::Relaxed)
+            (dropped_fps * 10.0).round() / 10.0, (dups as f64 / dt * 10.0).round() / 10.0, seqgaps, RUNG.load(Ordering::Relaxed)
         );
         let _ = std::fs::write(STATS_FILE, json);
     }

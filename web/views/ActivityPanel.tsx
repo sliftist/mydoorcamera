@@ -39,6 +39,8 @@ export class ActivityPanel extends preact.Component<{}, { scrollTop: number; vie
         // whether collapsed or expanded — the count is shown in both states.
         const regions = computeRegions(state.index, state.activityThreshold, state.coverage.dayStartMs, state.coverage.dayEndMs);
         const summary = `${regions.length} section${regions.length === 1 ? "" : "s"} · ${fmtDur(regions.reduce((s, r) => s + (r.endWall - r.startWall) / 1000, 0))} (${regionsGopCount(regions).toLocaleString()} GOPs)`;
+        // computeRegions returns chronological order; re-sort by peak activity when requested (default).
+        if (state.activitySort === "peak") regions.sort((a, b) => b.peak.aMax - a.peak.aMax);
 
         // Collapsed: show the label + section count, no thumbnails/grid.
         if (!state.activityPanelOpen) {
@@ -58,6 +60,11 @@ export class ActivityPanel extends preact.Component<{}, { scrollTop: number; vie
                 <span style={{ fontSize: "13px" }}>▾ Activity</span>
                 <span className={css.fontSize(12).opacity(0.7)}>{summary}</span>
                 <span className={css.flexGrow(1)} />
+                <button onClick={(e: any) => { e.stopPropagation(); runInAction(() => { state.activitySort = state.activitySort === "peak" ? "time" : "peak"; }); saveUrlPosition(state.playWall); }}
+                    title="Order activity events by highest peak or by time"
+                    style={{ pointerEvents: "auto", cursor: "pointer", font: "inherit", fontSize: "11px", color: "inherit", background: "hsl(220,15%,18%)", border: "1px solid hsl(220,15%,32%)", padding: "2px 8px" }}>
+                    {state.activitySort === "peak" ? "↓ peak" : "↓ time"}
+                </button>
                 <span className={css.hbox(4).alignItems("center").opacity(0.7).fontSize(11)} onClick={(e: any) => e.stopPropagation()} title="Activity threshold — a GOP counts as activity when its value is at least this">
                     threshold
                     <input type="number" step="0.0001" min="0" max="1" value={state.activityThreshold}

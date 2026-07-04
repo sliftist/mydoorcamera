@@ -49,7 +49,8 @@ export const state = observable({
     gapMode: "blank" as "blank" | "skip", // how playback crosses a footage/no-activity gap: blank+timestamp (default), or skip ahead; restored from ?gap
     // ---- activity regions + looping ----
     activityThreshold: 0.0001,       // aMax >= this counts as activity for region detection; restored from ?at
-    activityPanelOpen: false,        // is the activity-region panel expanded; restored from ?ar
+    activityPanelOpen: true,         // is the activity-region panel expanded (default open); restored from ?ar
+    activitySort: "peak" as "peak" | "time", // order activity events by highest peak (default) or chronological; restored from ?as
     loopStart: 0,                    // loop region start (wall ms); 0 = no loop
     loopEnd: 0,                      // loop region end (wall ms); 0 = no loop
 }, undefined, { deep: false });

@@ -24,9 +24,10 @@ const THUMB_W = 256, THUMB_H = 144;
 type ThumbRow = { key: string; jpeg: Uint8Array };
 const thumbDb = new BulkDatabase2<ThumbRow>("activityThumbs") as unknown as IBulkDatabase2<ThumbRow>;
 
-// Decode every frame of a GOP and return a small JPEG of the most-active one (the frame
-// whose pixels differ most from the previous frame). Each VideoFrame is drawn then closed
-// immediately, so the hardware decoder's surface pool never fills.
+// Decode just the GOP's KEYFRAME to a small JPEG. Thumbnails are for the region's peak GOP,
+// so the keyframe already shows the subject — and decoding one frame instead of all 30 makes
+// previews load ~30× faster (and, since each getThumbUrl runs independently, effectively in
+// parallel). The VideoFrame is drawn then closed immediately, so the decoder pool never fills.
 function decodePeakFrame(bytes: Uint8Array): Promise<Uint8Array> {
     const W: any = window as any;
     if (typeof W.VideoDecoder !== "function") return Promise.reject(new Error("no WebCodecs"));
@@ -35,17 +36,12 @@ function decodePeakFrame(bytes: Uint8Array): Promise<Uint8Array> {
     const codec = codecFromSps(nals);
     return new Promise<Uint8Array>((resolve, reject) => {
         const canvas = new OffscreenCanvas(THUMB_W, THUMB_H);
-        const ctx = canvas.getContext("2d", { willReadFrequently: true })!;
-        let prev: Uint8ClampedArray | null = null;
-        let best: ImageData | null = null;
-        let bestDiff = -1;
-        let processed = 0;
+        const ctx = canvas.getContext("2d")!;
         let done = false;
-        const finish = (e?: any) => {
+        const finish = (e?: any, drew?: boolean) => {
             if (done) return; done = true;
             try { dec.close(); } catch { /* */ }
-            if (e || !best) { reject(e || new Error("no frame")); return; }
-            ctx.putImageData(best, 0, 0);
+            if (e || !drew) { reject(e || new Error("no frame")); return; }
             canvas.convertToBlob({ type: "image/jpeg", quality: 0.72 })
                 .then((b: Blob) => b.arrayBuffer())
                 .then((ab: ArrayBuffer) => resolve(new Uint8Array(ab)))
@@ -54,24 +50,15 @@ function decodePeakFrame(bytes: Uint8Array): Promise<Uint8Array> {
         const dec = new W.VideoDecoder({
             output: (frame: any) => {
                 if (done) { try { frame.close(); } catch { /* */ } return; }
-                try {
-                    ctx.drawImage(frame, 0, 0, THUMB_W, THUMB_H);
-                    frame.close();
-                    const img = ctx.getImageData(0, 0, THUMB_W, THUMB_H);
-                    const cur = img.data;
-                    let diff = 0;
-                    if (prev) for (let i = 0; i < cur.length; i += 4) diff += Math.abs(cur[i] - prev[i]) + Math.abs(cur[i + 1] - prev[i + 1]) + Math.abs(cur[i + 2] - prev[i + 2]);
-                    if (diff > bestDiff) { bestDiff = diff; best = img; } // first frame (diff 0) is the fallback
-                    prev = cur;
-                    if (++processed >= units.length) finish();
-                } catch (err) { finish(err); }
+                try { ctx.drawImage(frame, 0, 0, THUMB_W, THUMB_H); frame.close(); finish(undefined, true); }
+                catch (err) { finish(err); }
             },
             error: (e: any) => finish(e),
         });
         try {
             dec.configure({ codec, optimizeForLatency: true });
-            for (let i = 0; i < units.length; i++) dec.decode(new W.EncodedVideoChunk({ type: units[i].key ? "key" : "delta", timestamp: i, data: units[i].data }));
-            dec.flush().then(() => finish()).catch(() => finish());
+            dec.decode(new W.EncodedVideoChunk({ type: "key", timestamp: 0, data: units[0].data })); // keyframe only
+            dec.flush().catch(() => { /* the first output resolves us */ });
         } catch (e) { finish(e); }
         setTimeout(() => finish(new Error("decode timeout")), 8000);
     });
