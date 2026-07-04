@@ -18,11 +18,13 @@ export class VideoPlayer extends preact.Component {
         return (
             <div className={css.vbox(14).width("100%").alignItems("center")}>
                 {/* Player fills the first viewport; the date picker is below the fold. */}
-                <div className={css.vbox(10).width("100%").maxWidth(1200).alignItems("center")}
+                <div className={css.vbox(10).width("100%").alignItems("center")}
                     style={{ minHeight: "100vh", justifyContent: "center", padding: "8px 12px", boxSizing: "border-box" }}>
+                    {/* Largest 16:9 box that fits the viewport: width fills the screen, but is capped by
+                        the available height so it never overflows — no artificial 1200px limit. */}
                     <canvas ref={(el: any) => setCanvasEl(el)}
                         style={{
-                            width: "100%", maxWidth: "1200px", maxHeight: "calc(100vh - 150px)", aspectRatio: "16 / 9",
+                            width: "100%", maxWidth: "calc((100vh - 150px) * 16 / 9)", maxHeight: "calc(100vh - 150px)", aspectRatio: "16 / 9",
                             background: "#000", objectFit: "contain", cursor: "pointer",
                             // outline (not border) so it never shifts layout: red while dropping frames
                             // (decoder can't keep up), else yellow while a seek target hasn't rendered yet
@@ -30,14 +32,14 @@ export class VideoPlayer extends preact.Component {
                         }}
                         onMouseDown={(e: any) => { if (e.button !== 0) return; e.preventDefault(); if (!state.live) { player?.togglePlay(); saveUrlPosition(state.playWall); } }} />
                     {state.live
-                        ? <div className={css.hbox(14).alignItems("center").width("100%")}>
+                        ? <div className={css.hbox(14).alignItems("center").width("100%").maxWidth(1200)}>
                             <span className={css.color("hsl(0,85%,62%)").fontSize(15)}>● LIVE</span>
                             <button className={playBtnCss} onMouseDown={(e: any) => { if (e.button !== 0) return; e.preventDefault(); void exitLive(); }}>Exit Live</button>
                             <span className={css.flexGrow(1)} />
                         </div>
                         : state.coverage
-                            ? <div className={css.vbox(8).width("100%")}><LevelSelector /><Trackbar /><Controls /></div>
-                            : <LevelSelector />}
+                            ? <div className={css.vbox(8).width("100%").maxWidth(1200)}><LevelSelector /><Trackbar /><Controls /></div>
+                            : <div className={css.width("100%").maxWidth(1200)}><LevelSelector /></div>}
                 </div>
                 {!state.live && <div className={css.fontSize(13).opacity(0.75)}>
                     {state.day ? state.day.replace(/\//g, "-") : "No period selected"}{noFootage ? " · no footage in this period" : ""}
