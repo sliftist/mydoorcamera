@@ -32,6 +32,7 @@ const GOP_FRAMES: usize = 30;
 const STATS_FILE: &str = "/var/lib/mydoorcamera/encoder-stats.json";
 const CONTROL_FILE: &str = "/var/lib/mydoorcamera/control.json";
 const ACTIVITY_THRESHOLD: f64 = 0.0001;
+const MOTION_COOLDOWN_MS: i64 = 12_000; // keep recording this long after the last above-threshold GOP (hysteresis)
 const MAX_RUNG: usize = 5;
 const RECOVER_SECS: u64 = 8;
 const MEM_CRIT_KB: u64 = 250_000;
@@ -171,6 +172,7 @@ fn capture_loop_hw(session: u64, thin_tx: &mpsc::SyncSender<thin::Frame>) -> std
     let mut enc_fifo: VecDeque<(i64, f32, Instant)> = VecDeque::new(); // fed to encoder, awaiting H264 (FIFO)
     let mut gop: Vec<EncFrame> = Vec::new();
     let mut last_encoded_t: Option<f64> = None;
+    let mut last_active_t: Option<i64> = None; // wall ms of the last above-threshold GOP (motion cooldown)
     let mut last_hour_key: Option<i64> = None;
     let mut have_encoded = false;
     let mut raw_i: u64 = 0;
@@ -215,7 +217,7 @@ fn capture_loop_hw(session: u64, thin_tx: &mpsc::SyncSender<thin::Frame>) -> std
                 ENC_CNT.fetch_add(1, Ordering::Relaxed);
                 gop.push(EncFrame { nals: split_nals(&h264), t: ft, act: fa });
                 if gop.len() >= GOP_FRAMES {
-                    finalize_gop(&mut writer, &mut gop, &mut last_encoded_t, &mut last_hour_key, &mut have_encoded);
+                    finalize_gop(&mut writer, &mut gop, &mut last_encoded_t, &mut last_active_t, &mut last_hour_key, &mut have_encoded);
                 }
             }
         }
@@ -227,7 +229,7 @@ fn capture_loop_hw(session: u64, thin_tx: &mpsc::SyncSender<thin::Frame>) -> std
     }
 }
 
-fn finalize_gop(writer: &mut Writer, gop: &mut Vec<EncFrame>, last_encoded_t: &mut Option<f64>, last_hour_key: &mut Option<i64>, have_encoded: &mut bool) {
+fn finalize_gop(writer: &mut Writer, gop: &mut Vec<EncFrame>, last_encoded_t: &mut Option<f64>, last_active_t: &mut Option<i64>, last_hour_key: &mut Option<i64>, have_encoded: &mut bool) {
     if gop.is_empty() { return; }
     let frames = std::mem::take(gop);
     let n = frames.len();
@@ -240,7 +242,16 @@ fn finalize_gop(writer: &mut Writer, gop: &mut Vec<EncFrame>, last_encoded_t: &m
     let hour_key = file_hour_key(t);
     let new_file = *last_hour_key != Some(hour_key);
     *last_hour_key = Some(hour_key);
-    let active = (mx as f64) >= ACTIVITY_THRESHOLD || !*have_encoded || new_file || encode_all();
+    // Motion hysteresis: a distant subject's activity hovers near the gate and briefly dips below
+    // it mid-event; without a cooldown those GOPs become no-change and playback FREEZES on the
+    // reference frame while the subject is still moving. So once we see real activity, keep
+    // encoding for MOTION_COOLDOWN_MS after the last above-threshold GOP — a continuous event is
+    // never broken into frozen gaps. Only real (raw) activity extends the window, so a truly
+    // static scene still collapses to no-change once the cooldown elapses.
+    let raw_active = (mx as f64) >= ACTIVITY_THRESHOLD;
+    if raw_active { *last_active_t = Some(last_t); }
+    let in_cooldown = last_active_t.map_or(false, |la| t >= la && t - la <= MOTION_COOLDOWN_MS);
+    let active = raw_active || in_cooldown || !*have_encoded || new_file || encode_all();
     let acts: Vec<u16> = frames.iter().map(|f| act_to_u16(f.act)).collect();
     let dts: Vec<u16> = frames.iter().map(|f| (f.t - t).clamp(0, 65535) as u16).collect();
 
