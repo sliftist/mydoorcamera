@@ -50,7 +50,7 @@ export const state = observable({
     // ---- activity regions + looping ----
     activityThreshold: 0.03,         // UI display filter: peak (aMax) >= this shows as an activity event; restored from ?at
     activityPanelOpen: true,         // is the activity-region panel expanded (default open); restored from ?ar
-    activitySort: "peak" as "peak" | "time", // order activity events by highest peak (default) or chronological; restored from ?as
+    activitySort: "time" as "peak" | "time", // order activity events chronologically (default) or by highest peak; restored from ?as
     loopStart: 0,                    // loop region start (wall ms); 0 = no loop
     loopEnd: 0,                      // loop region end (wall ms); 0 = no loop
 }, undefined, { deep: false });

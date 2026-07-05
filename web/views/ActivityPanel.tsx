@@ -40,7 +40,8 @@ export class ActivityPanel extends preact.Component<{}, { scrollTop: number; vie
         // Region detection is cheap (a single pass over the index), so compute it
         // whether collapsed or expanded — the count is shown in both states.
         const regions = computeRegions(state.index, state.activityThreshold, state.coverage.dayStartMs, state.coverage.dayEndMs);
-        regions.sort((a, b) => b.peak.aMax - a.peak.aMax); // highest peak first
+        // computeRegions returns chronological order; re-sort by peak only when that mode is chosen.
+        if (state.activitySort === "peak") regions.sort((a, b) => b.peak.aMax - a.peak.aMax);
         // "Total" = all recorded activity (threshold ~0); the summary shows filtered / total.
         const totalRegions = computeRegions(state.index, TOTAL_THRESHOLD, state.coverage.dayStartMs, state.coverage.dayEndMs);
         const durOf = (rs: ActivityRegion[]) => rs.reduce((s, r) => s + (r.endWall - r.startWall) / 1000, 0);
@@ -64,6 +65,17 @@ export class ActivityPanel extends preact.Component<{}, { scrollTop: number; vie
                 <span style={{ fontSize: "13px" }}>▾ Activity</span>
                 <span className={css.fontSize(12).opacity(0.7)}>{summary}</span>
                 <span className={css.flexGrow(1)} />
+                {/* Sort toggle — shows both states, highlights the active one. */}
+                <div className={css.hbox(0)} onClick={(e: any) => e.stopPropagation()} style={{ border: "1px solid hsl(220,15%,32%)" }} title="Order activity events">
+                    {(["time", "peak"] as const).map(m => (
+                        <button key={m} onClick={() => { runInAction(() => { state.activitySort = m; }); saveUrlPosition(state.playWall); }}
+                            style={{ pointerEvents: "auto", cursor: "pointer", font: "inherit", fontSize: "11px", padding: "2px 9px", border: "none",
+                                color: state.activitySort === m ? "#fff" : "hsl(0,0%,58%)",
+                                background: state.activitySort === m ? "hsl(210,55%,32%)" : "transparent" }}>
+                            {m === "time" ? "chronological" : "peak"}
+                        </button>
+                    ))}
+                </div>
                 <span className={css.hbox(4).alignItems("center").opacity(0.7).fontSize(11)} onClick={(e: any) => e.stopPropagation()} title="Peak-activity threshold — an event shows when its peak is at least this">
                     threshold
                     <input type="number" step="0.01" min="0" max="1" value={state.activityThreshold}

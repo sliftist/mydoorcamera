@@ -161,8 +161,8 @@ function zoomSuffix(): string {
 function acSuffix(): string { return state.activityExp !== 0.4 ? `&ac=${state.activityExp}` : ""; }
 function gapSuffix(): string { return state.gapMode === "skip" ? `&gap=skip` : ""; }
 function arSuffix(): string { return state.activityPanelOpen ? "" : `&ar=0`; } // default open; mark only when closed
-function asSuffix(): string { return state.activitySort !== "peak" ? `&as=${state.activitySort}` : ""; }
-export function getUrlActivitySort(): "peak" | "time" { try { return new URLSearchParams(location.search).get("as") === "time" ? "time" : "peak"; } catch { return "peak"; } }
+function asSuffix(): string { return state.activitySort === "peak" ? `&as=peak` : ""; } // default time
+export function getUrlActivitySort(): "peak" | "time" { try { return new URLSearchParams(location.search).get("as") === "peak" ? "peak" : "time"; } catch { return "time"; } }
 function atSuffix(): string { return state.activityThreshold !== 0.03 ? `&at=${state.activityThreshold}` : ""; }
 // Loop region as absolute wall-clock ms: &loop=start-end (omitted when no loop).
 function loopSuffix(): string { return (state.loopStart && state.loopEnd && state.loopEnd > state.loopStart) ? `&loop=${state.loopStart}-${state.loopEnd}` : ""; }
