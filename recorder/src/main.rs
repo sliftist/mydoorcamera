@@ -55,20 +55,8 @@ static ACT_CNT: AtomicU64 = AtomicU64::new(0);
 static ENC_SUM_MS: AtomicU64 = AtomicU64::new(0);
 static ENC_CNT: AtomicU64 = AtomicU64::new(0);
 static DROPS: AtomicU64 = AtomicU64::new(0);
-static DUPS: AtomicU64 = AtomicU64::new(0);     // decoded frames identical to the previous (dropped, not encoded)
 static SEQGAPS: AtomicU64 = AtomicU64::new(0);  // camera-sequence gaps (frames the driver dropped before we got them)
 static RUNG: AtomicUsize = AtomicUsize::new(0);
-
-// Cheap content fingerprint of a decoded NV12: FNV over a contiguous 64 KiB window in the middle
-// of the Y plane (where motion usually is), so it's cache-friendly. Two genuinely-distinct camera
-// frames always differ (sensor noise), so an exact match here means a duplicate frame reached us.
-fn nv12_fingerprint(nv12: &[u8]) -> u64 {
-    let mid = nv12.len() / 2;
-    let end = (mid + 65536).min(nv12.len());
-    let mut h: u64 = 0xcbf29ce484222325;
-    for &b in &nv12[mid..end] { h = (h ^ b as u64).wrapping_mul(0x100000001b3); }
-    h
-}
 
 // Encode EVERY GOP regardless of activity when the manual toggle is on or someone is watching live.
 fn encode_all() -> bool {
@@ -195,7 +183,6 @@ fn capture_loop_hw(session: u64, thin_tx: &mpsc::SyncSender<thin::Frame>) -> std
     let mut have_prev_luma = false;
     let mut ts_anchor: Option<(i64, i64)> = None; // (wall_ms, camera_mono_ms) — accurate per-frame timing
     let mut prev_seq: i64 = -1;
-    let mut prev_fp: u64 = 0;
     let mut gop_dec_motion: f32 = 0.0; // max consecutive DECODED-luma diff within the current GOP
 
     loop {
@@ -233,11 +220,6 @@ fn capture_loop_hw(session: u64, thin_tx: &mpsc::SyncSender<thin::Frame>) -> std
 
         for nv12 in nv12s {
             let (jpeg_owned, ct) = jpeg_fifo.pop_front().unwrap_or((Vec::new(), t));
-            // Never encode the same frame twice: a byte-identical decoded frame means the pipeline
-            // handed us a duplicate — drop it (genuinely distinct camera frames always differ).
-            let fp = nv12_fingerprint(&nv12);
-            if fp == prev_fp { DUPS.fetch_add(1, Ordering::Relaxed); continue; }
-            prev_fp = fp;
             // activity from the decoded luma (no software JPEG decode).
             let a0 = Instant::now();
             downsample_luma(&nv12, WIDTH as usize, CAP_H as usize, &mut luma);
@@ -357,16 +339,15 @@ fn stats_loop() {
         let dc = DEC_CNT.swap(0, Ordering::Relaxed); let dsum = DEC_SUM_US.swap(0, Ordering::Relaxed);
         let ac = ACT_CNT.swap(0, Ordering::Relaxed); let asum = ACT_SUM_US.swap(0, Ordering::Relaxed);
         let ec = ENC_CNT.swap(0, Ordering::Relaxed); let esum = ENC_SUM_MS.swap(0, Ordering::Relaxed);
-        let dups = DUPS.swap(0, Ordering::Relaxed);
         let seqgaps = SEQGAPS.swap(0, Ordering::Relaxed);
         let decode_ms = if dc > 0 { dsum as f64 / dc as f64 / 1000.0 } else { 0.0 };
         let activity_ms = if ac > 0 { asum as f64 / ac as f64 / 1000.0 } else { 0.0 };
         let encode_ms = if ec > 0 { esum as f64 / ec as f64 } else { 0.0 };
 
         let json = format!(
-            "{{\"fps\":{:.1},\"cpuPct\":{},\"updatedMs\":{},\"jpegDecodeMs\":{:.2},\"activityMs\":{:.2},\"encodeMs\":{:.1},\"droppedFps\":{:.1},\"dupFps\":{:.1},\"seqGaps\":{},\"rung\":{}}}",
+            "{{\"fps\":{:.1},\"cpuPct\":{},\"updatedMs\":{},\"jpegDecodeMs\":{:.2},\"activityMs\":{:.2},\"encodeMs\":{:.1},\"droppedFps\":{:.1},\"seqGaps\":{},\"rung\":{}}}",
             (fps * 10.0).round() / 10.0, cpu.round() as i64, now, decode_ms, activity_ms, encode_ms,
-            (dropped_fps * 10.0).round() / 10.0, (dups as f64 / dt * 10.0).round() / 10.0, seqgaps, RUNG.load(Ordering::Relaxed)
+            (dropped_fps * 10.0).round() / 10.0, seqgaps, RUNG.load(Ordering::Relaxed)
         );
         let _ = std::fs::write(STATS_FILE, json);
     }
