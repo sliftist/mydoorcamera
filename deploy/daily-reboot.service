@@ -1,0 +1,5 @@
+[Unit]
+Description=Daily 04:00 proactive reboot (keeps the Pi in a known-good state)
+[Service]
+Type=oneshot
+ExecStart=/root/mydoorcamera/deploy/daily-reboot.sh

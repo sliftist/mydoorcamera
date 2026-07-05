@@ -1,0 +1,12 @@
+[Unit]
+Description=Wi-Fi SDIO error-storm watchdog (resets brcmfmac before it can freeze the system)
+After=multi-user.target NetworkManager.service
+
+[Service]
+Type=simple
+ExecStart=/root/mydoorcamera/deploy/wifi-watchdog.sh
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
