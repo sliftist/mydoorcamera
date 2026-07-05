@@ -163,12 +163,12 @@ function gapSuffix(): string { return state.gapMode === "skip" ? `&gap=skip` : "
 function arSuffix(): string { return state.activityPanelOpen ? "" : `&ar=0`; } // default open; mark only when closed
 function asSuffix(): string { return state.activitySort !== "peak" ? `&as=${state.activitySort}` : ""; }
 export function getUrlActivitySort(): "peak" | "time" { try { return new URLSearchParams(location.search).get("as") === "time" ? "time" : "peak"; } catch { return "peak"; } }
-function atSuffix(): string { return state.activityThreshold !== 0.0001 ? `&at=${state.activityThreshold}` : ""; }
+function atSuffix(): string { return state.activityThreshold !== 0.03 ? `&at=${state.activityThreshold}` : ""; }
 // Loop region as absolute wall-clock ms: &loop=start-end (omitted when no loop).
 function loopSuffix(): string { return (state.loopStart && state.loopEnd && state.loopEnd > state.loopStart) ? `&loop=${state.loopStart}-${state.loopEnd}` : ""; }
 function extraSuffix(): string { return lvlSuffix() + speedSuffix() + zoomSuffix() + acSuffix() + gapSuffix() + arSuffix() + asSuffix() + atSuffix() + loopSuffix(); }
 export function getUrlPanelOpen(): boolean { try { return new URLSearchParams(location.search).get("ar") !== "0"; } catch { return true; } } // default open
-export function getUrlThreshold(): number { try { const n = Number(new URLSearchParams(location.search).get("at")); return n > 0 && n <= 1 ? n : 0.0001; } catch { return 0.0001; } }
+export function getUrlThreshold(): number { try { const v = new URLSearchParams(location.search).get("at"); if (v == null) return 0.03; const n = Number(v); return n >= 0 && n <= 1 ? n : 0.03; } catch { return 0.03; } }
 export function getUrlLoop(): { start: number; end: number } | null {
     try { const v = new URLSearchParams(location.search).get("loop"); if (!v) return null; const [a, b] = v.split("-").map(Number); return isFinite(a) && isFinite(b) && b > a ? { start: a, end: b } : null; } catch { return null; }
 }

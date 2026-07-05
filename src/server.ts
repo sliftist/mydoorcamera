@@ -20,7 +20,7 @@ function firstLanIp(): string {
     return "127.0.0.1";
 }
 import { createRpc, Channel, Rpc } from "./rpc";
-import { listChildren, combineHour, readGopBytes, getAvailableDays, getDayCoverage, latestIdxFile, readIdxIncremental, dataReady, daySignature, getLevelsInfo, getLevelCoverage, readLevelGops, readLevelGopData, getGopBytesAt, getRawIndex } from "./storage";
+import { listChildren, combineHour, readGopBytes, getAvailableDays, getDayCoverage, latestIdxFile, readIdxIncremental, dataReady, daySignature, getLevelsInfo, getLevelCoverage, readLevelGops, readLevelGopData, getGopBytesAt, getRawIndex, listThumbs, readThumb } from "./storage";
 import { getPassword, checkPassword, isBlacklisted, recordFailedAttempt } from "./auth";
 import { getSystemStats, readEncoderStats } from "./stats";
 import { readControl, writeControl } from "./control";
@@ -161,6 +161,8 @@ async function start(): Promise<void> {
             async getLevelGopData(level: number, t: number, file: string, off: number, len: number) { requireAuth(); return readLevelGopData(level, t, file, off, len); },
             async getGopBytesAt(level: number, t: number) { requireAuth(); return getGopBytesAt(level, t); }, // GOP bytes by (level,t) — for client thumbnail decoding
             async getRawIndex(level: number, fromMs: number, toMs: number) { requireAuth(); return getRawIndex(level, fromMs, toMs); },
+            async listThumbs(fromMs: number, toMs: number) { requireAuth(); return listThumbs(fromMs, toMs); }, // pre-rendered activity thumbnails
+            async getThumb(t: number, a: number) { requireAuth(); return readThumb(t, a); },
 
             async serverInfo() { requireAuth(); return { ip, port: SERVER_PORT }; },
             async getStats() { requireAuth(); return { system: await getSystemStats(DATA_DIR), encoder: await readEncoderStats(), control: await readControl() }; },

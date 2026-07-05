@@ -17,6 +17,8 @@ export class VideoPlayer extends preact.Component {
         const noFootage = state.coverage && state.coverage.ranges.length === 0;
         return (
             <div className={css.vbox(14).width("100%").alignItems("center")}>
+                {/* Gap so the fixed top-right info overlay doesn't cover the activity panel below it. */}
+                {!state.live && <div style={{ height: "96px", flexShrink: 0 }} />}
                 {/* Activity events at the very top (expanded by default), then the player. */}
                 {!state.live && <ActivityPanel />}
                 <div className={css.vbox(10).width("100%").alignItems("center")}

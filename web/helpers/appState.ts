@@ -48,7 +48,7 @@ export const state = observable({
     activityExp: 0.4,                // gamma for the activity chart (<1 emphasizes small activity); restored from ?ac
     gapMode: "blank" as "blank" | "skip", // how playback crosses a footage/no-activity gap: blank+timestamp (default), or skip ahead; restored from ?gap
     // ---- activity regions + looping ----
-    activityThreshold: 0.0001,       // aMax >= this counts as activity for region detection; restored from ?at
+    activityThreshold: 0.03,         // UI display filter: peak (aMax) >= this shows as an activity event; restored from ?at
     activityPanelOpen: true,         // is the activity-region panel expanded (default open); restored from ?ar
     activitySort: "peak" as "peak" | "time", // order activity events by highest peak (default) or chronological; restored from ?as
     loopStart: 0,                    // loop region start (wall ms); 0 = no loop

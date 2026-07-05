@@ -193,6 +193,13 @@ export class CameraApi {
     getRawIndex(level: number, fromMs: number, toMs: number): Promise<Uint8Array> {
         return this.call("getRawIndex", level, fromMs, toMs);
     }
+    // Pre-rendered activity thumbnails (written by the recorder in-pipeline).
+    listThumbs(fromMs: number, toMs: number): Promise<{ t: number; a: number }[]> {
+        return this.call("listThumbs", fromMs, toMs);
+    }
+    getThumb(t: number, a: number): Promise<Uint8Array | null> {
+        return this.call<Uint8Array | null>("getThumb", t, a);
+    }
 
     // ---- live streaming ----
     async startStream(day: string, cb: (meta: any, bytes: Uint8Array) => void): Promise<void> {

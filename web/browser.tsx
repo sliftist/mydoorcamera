@@ -18,6 +18,9 @@ import { selectPeriod, periodStartFromKey, getUrlDay, applyUrlZoom } from "./hel
 // Arrow keys seek (step scaled by the level's time density, routed through the
 // player's throttled seek-pump); space toggles play.
 function onKeyDown(e: KeyboardEvent): void {
+    // If an input is focused, keys are the user typing — not hotkeys.
+    const el = document.activeElement as HTMLElement | null;
+    if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.tagName === "SELECT" || el.isContentEditable)) return;
     if (state.view !== "browse" || !player || !state.coverage) return;
     if (e.key === "ArrowRight" || e.key === "ArrowLeft") {
         e.preventDefault();

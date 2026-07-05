@@ -33,6 +33,8 @@ const STATS_FILE: &str = "/var/lib/mydoorcamera/encoder-stats.json";
 const CONTROL_FILE: &str = "/var/lib/mydoorcamera/control.json";
 const ACTIVITY_THRESHOLD: f64 = 0.0001;
 const MOTION_COOLDOWN_MS: i64 = 12_000; // keep recording this long after the last above-threshold GOP (hysteresis)
+const THUMB_DIR: &str = "/var/lib/mydoorcamera/thumbs";
+const THUMB_SECTION_GAP_MS: i64 = 3_000; // no activity for this long ends a thumbnail section
 const MAX_RUNG: usize = 5;
 const RECOVER_SECS: u64 = 8;
 const MEM_CRIT_KB: u64 = 250_000;
@@ -46,6 +48,16 @@ fn file_hour_key(ms: i64) -> i64 {
     dt.year() as i64 * 1_000_000 + dt.ordinal() as i64 * 100 + dt.hour() as i64
 }
 fn act_to_u16(a: f32) -> u16 { (a.max(0.0).min(1.0) * 65535.0).round() as u16 }
+
+// Write an activity-section thumbnail: the raw camera JPEG of the section's peak-activity frame,
+// keyed by wall time + peak activity under a day bucket. The client loads it directly (no decode).
+fn write_thumbnail(t: i64, act: f32, jpeg: &[u8]) {
+    if jpeg.is_empty() { return; }
+    let dt = match Local.timestamp_millis_opt(t).single() { Some(d) => d, None => return };
+    let dir = format!("{}/{:04}/{:02}/{:02}", THUMB_DIR, dt.year(), dt.month(), dt.day());
+    if std::fs::create_dir_all(&dir).is_err() { return; }
+    let _ = std::fs::write(format!("{}/{}_{}.jpg", dir, t, act_to_u16(act)), jpeg);
+}
 
 static FRAMES: AtomicU64 = AtomicU64::new(0);
 static DEC_SUM_US: AtomicU64 = AtomicU64::new(0);
@@ -179,11 +191,17 @@ fn capture_loop_hw(session: u64, thin_tx: &mpsc::SyncSender<thin::Frame>) -> std
     let mut raw_i: u64 = 0;
     let mut last_drop = Instant::now();
     let mut luma = [0u8; FRAME];
-    let mut prev_luma = [0u8; FRAME];
-    let mut have_prev_luma = false;
     let mut ts_anchor: Option<(i64, i64)> = None; // (wall_ms, camera_mono_ms) — accurate per-frame timing
     let mut prev_seq: i64 = -1;
-    let mut gop_dec_motion: f32 = 0.0; // max consecutive DECODED-luma diff within the current GOP
+    // Activity-thumbnail section: while a subject is present, keep the peak-activity frame's raw
+    // camera JPEG (which we already have, pre-encode) in memory, replacing it whenever a
+    // higher-activity frame arrives; when the section ends, write that JPEG straight to disk. No
+    // re-decoding an encoded GOP, no re-encoding — the thumbnail IS the raw camera frame.
+    let mut sec_active = false;
+    let mut sec_peak_act = 0f32;
+    let mut sec_peak_t = 0i64;
+    let mut sec_peak_jpeg: Vec<u8> = Vec::new();
+    let mut sec_last_active = 0i64;
 
     loop {
         let (buf, meta) = stream.next()?;
@@ -226,15 +244,18 @@ fn capture_loop_hw(session: u64, thin_tx: &mpsc::SyncSender<thin::Frame>) -> std
             let act = model.compute(&luma);
             ACT_SUM_US.fetch_add(a0.elapsed().as_micros() as u64, Ordering::Relaxed);
             ACT_CNT.fetch_add(1, Ordering::Relaxed);
-            // Real DECODED motion (independent of the encoder): compare consecutive decoded lumas.
-            if have_prev_luma {
-                let mut s = 0u32;
-                for i in 0..FRAME { s += (luma[i] as i32 - prev_luma[i] as i32).unsigned_abs(); }
-                let dmv = s as f32 / FRAME as f32;
-                if dmv > gop_dec_motion { gop_dec_motion = dmv; }
+            // Activity-thumbnail section tracking (in-pipeline, from the raw camera JPEG).
+            if (act as f64) >= ACTIVITY_THRESHOLD {
+                if !sec_active { sec_active = true; sec_peak_act = 0.0; }
+                sec_last_active = ct;
+                if act >= sec_peak_act && !jpeg_owned.is_empty() {
+                    sec_peak_act = act; sec_peak_t = ct;
+                    sec_peak_jpeg.clear(); sec_peak_jpeg.extend_from_slice(&jpeg_owned);
+                }
+            } else if sec_active && ct - sec_last_active > THUMB_SECTION_GAP_MS {
+                write_thumbnail(sec_peak_t, sec_peak_act, &sec_peak_jpeg);
+                sec_active = false; sec_peak_jpeg = Vec::new();
             }
-            prev_luma.copy_from_slice(&luma);
-            have_prev_luma = true;
             // feed the thinner (best-effort).
             let _ = thin_tx.try_send((jpeg_owned, act, ct));
             // HW H.264 encode.
@@ -245,14 +266,6 @@ fn capture_loop_hw(session: u64, thin_tx: &mpsc::SyncSender<thin::Frame>) -> std
                 ENC_CNT.fetch_add(1, Ordering::Relaxed);
                 gop.push(EncFrame { nals: split_nals(&h264), t: ft, act: fa });
                 if gop.len() >= GOP_FRAMES {
-                    // Diagnostic: if an ACTIVE gop (a subject is present) shows near-zero DECODED
-                    // motion, the frames reaching the encoder were already frozen (camera/decoder),
-                    // not an encoder fault.
-                    let mx = gop.iter().fold(0f32, |m, f| m.max(f.act));
-                    if (mx as f64) >= ACTIVITY_THRESHOLD {
-                        eprintln!("[gop] active mx_act={:.5} decoded_motion={:.2}", mx, gop_dec_motion);
-                    }
-                    gop_dec_motion = 0.0;
                     finalize_gop(&mut writer, &mut gop, &mut last_encoded_t, &mut last_active_t, &mut last_hour_key, &mut have_encoded);
                 }
             }
