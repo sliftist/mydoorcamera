@@ -6,7 +6,7 @@ import { formatDateTime } from "socket-function/src/formatting/format";
 import { state } from "../helpers/appState";
 import { saveUrlPosition } from "../helpers/navigation";
 import { goToActivity } from "../helpers/trackbarHelpers";
-import { computeRegions, regionsGopCount, ActivityRegion } from "../helpers/activityRegions";
+import { computeRegions, ActivityRegion } from "../helpers/activityRegions";
 import { getThumbUrl, getThumbList } from "../helpers/thumbnails";
 import { fmtDur } from "../helpers/format";
 
@@ -41,9 +41,10 @@ export class ActivityPanel extends preact.Component<{}, { scrollTop: number; vie
         // whether collapsed or expanded — the count is shown in both states.
         const regions = computeRegions(state.index, state.activityThreshold, state.coverage.dayStartMs, state.coverage.dayEndMs);
         regions.sort((a, b) => b.peak.aMax - a.peak.aMax); // highest peak first
-        const summary = `${regions.length} section${regions.length === 1 ? "" : "s"} · ${fmtDur(regions.reduce((s, r) => s + (r.endWall - r.startWall) / 1000, 0))} (${regionsGopCount(regions).toLocaleString()} GOPs)`;
-        // "Total" = all recorded activity (threshold ~0), shown in parens for context.
-        const totalCount = computeRegions(state.index, TOTAL_THRESHOLD, state.coverage.dayStartMs, state.coverage.dayEndMs).length;
+        // "Total" = all recorded activity (threshold ~0); the summary shows filtered / total.
+        const totalRegions = computeRegions(state.index, TOTAL_THRESHOLD, state.coverage.dayStartMs, state.coverage.dayEndMs);
+        const durOf = (rs: ActivityRegion[]) => rs.reduce((s, r) => s + (r.endWall - r.startWall) / 1000, 0);
+        const summary = `${regions.length} / ${totalRegions.length} sections | ${fmtDur(durOf(regions))} / ${fmtDur(durOf(totalRegions))}`;
 
         // Collapsed: show the label + section count, no thumbnails/grid.
         if (!state.activityPanelOpen) {
@@ -63,7 +64,6 @@ export class ActivityPanel extends preact.Component<{}, { scrollTop: number; vie
                 <span style={{ fontSize: "13px" }}>▾ Activity</span>
                 <span className={css.fontSize(12).opacity(0.7)}>{summary}</span>
                 <span className={css.flexGrow(1)} />
-                <span className={css.fontSize(11).opacity(0.5)} title="Total activity recorded (peak threshold ~0)">({totalCount} total)</span>
                 <span className={css.hbox(4).alignItems("center").opacity(0.7).fontSize(11)} onClick={(e: any) => e.stopPropagation()} title="Peak-activity threshold — an event shows when its peak is at least this">
                     threshold
                     <input type="number" step="0.01" min="0" max="1" value={state.activityThreshold}
