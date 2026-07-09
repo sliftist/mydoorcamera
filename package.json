@@ -10,7 +10,9 @@
         "watch": "yarn watch-web",
         "build": "yarn build-web",
         "deploy": "node scripts/deploy.js",
-        "ship": "bash scripts/ship.sh"
+        "ship": "bash scripts/ship.sh",
+        "poll-pi": "bash scripts/poll-pi.sh",
+        "break-reboot-loop": "bash scripts/break-reboot-loop.sh"
     },
     "dependencies": {
         "@types/ws": "^8.18.1",

@@ -43,3 +43,8 @@ Thumbs.db
 yarn-error.log
 npm-debug.log*
 /recorder/target
+
+# --- Pi diagnostic poll artifacts (scripts/poll-pi.sh) ---
+pi-poll-*
+boot-watch-*
+boot-freeze-*
