@@ -293,7 +293,11 @@ fn capture_loop_hw(session: u64, thin_tx: &mpsc::SyncSender<thin::Frame>) -> std
             if (wall - est).abs() > 2000 { ts_anchor = Some((wall, mono)); wall } else { est }
         } else { wall };
 
-        let jpeg = buf.to_vec();
+        // The V4L2 buffer is allocated at the MJPG max (~4 MB); only `bytesused` bytes are the
+        // actual JPEG. Copy just that — otherwise every frame (decode feed, thinner, thumbnails)
+        // drags ~3.8 MB of trailing padding.
+        let used = (meta.bytesused as usize).min(buf.len());
+        let jpeg = buf[..used].to_vec();
         jpeg_fifo.push_back((jpeg, t));
         let jp_for_decode = jpeg_fifo.back().unwrap().0.clone();
 
