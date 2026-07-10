@@ -49,14 +49,80 @@ fn file_hour_key(ms: i64) -> i64 {
 }
 fn act_to_u16(a: f32) -> u16 { (a.max(0.0).min(1.0) * 65535.0).round() as u16 }
 
-// Write an activity-section thumbnail: the raw camera JPEG of the section's peak-activity frame,
-// keyed by wall time + peak activity under a day bucket. The client loads it directly (no decode).
-fn write_thumbnail(t: i64, act: f32, jpeg: &[u8]) {
-    if jpeg.is_empty() { return; }
+// Thumbnail resolutions (px wide, 16:9) stored per activity section, plus "full" (the raw camera
+// JPEG). The UI grid loads a small one so the activity view is near-instant.
+const THUMB_SIZES: [(usize, usize); 4] = [(480, 270), (240, 135), (120, 68), (60, 34)];
+
+// Box-downscale an NV12 frame to a small RGB image (also does YUV->RGB, BT.601). Reads luma over
+// WIDTH x HEIGHT (ignoring the decoder's pad rows up to CAP_H).
+fn nv12_to_rgb(nv12: &[u8], tw: usize, th: usize) -> Vec<u8> {
+    let sw = WIDTH as usize; let sh = HEIGHT as usize;
+    let uv_off = sw * CAP_H as usize;
+    if nv12.len() < uv_off + uv_off / 2 { return Vec::new(); }
+    let mut out = vec![0u8; tw * th * 3];
+    for oy in 0..th {
+        let y0 = oy * sh / th; let y1 = (((oy + 1) * sh / th).max(y0 + 1)).min(sh);
+        for ox in 0..tw {
+            let x0 = ox * sw / tw; let x1 = (((ox + 1) * sw / tw).max(x0 + 1)).min(sw);
+            let (mut ys, mut us, mut vs, mut cy, mut cc) = (0u32, 0u32, 0u32, 0u32, 0u32);
+            for yy in y0..y1 { for xx in x0..x1 {
+                ys += nv12[yy * sw + xx] as u32; cy += 1;
+                let ci = uv_off + (yy / 2) * sw + (xx / 2) * 2;
+                us += nv12[ci] as u32; vs += nv12[ci + 1] as u32; cc += 1;
+            } }
+            let y = (ys / cy.max(1)) as f32;
+            let u = (us / cc.max(1)) as f32 - 128.0;
+            let v = (vs / cc.max(1)) as f32 - 128.0;
+            let o = (oy * tw + ox) * 3;
+            out[o] = (y + 1.402 * v).clamp(0.0, 255.0) as u8;
+            out[o + 1] = (y - 0.344 * u - 0.714 * v).clamp(0.0, 255.0) as u8;
+            out[o + 2] = (y + 1.772 * u).clamp(0.0, 255.0) as u8;
+        }
+    }
+    out
+}
+
+// Box-downscale an RGB image (used to derive the smaller thumbnails from the 480px one — a pyramid).
+fn downscale_rgb(src: &[u8], sw: usize, sh: usize, tw: usize, th: usize) -> Vec<u8> {
+    let mut out = vec![0u8; tw * th * 3];
+    for oy in 0..th {
+        let y0 = oy * sh / th; let y1 = (((oy + 1) * sh / th).max(y0 + 1)).min(sh);
+        for ox in 0..tw {
+            let x0 = ox * sw / tw; let x1 = (((ox + 1) * sw / tw).max(x0 + 1)).min(sw);
+            let (mut r, mut g, mut b, mut c) = (0u32, 0u32, 0u32, 0u32);
+            for yy in y0..y1 { for xx in x0..x1 { let i = (yy * sw + xx) * 3; r += src[i] as u32; g += src[i + 1] as u32; b += src[i + 2] as u32; c += 1; } }
+            let o = (oy * tw + ox) * 3; let c = c.max(1);
+            out[o] = (r / c) as u8; out[o + 1] = (g / c) as u8; out[o + 2] = (b / c) as u8;
+        }
+    }
+    out
+}
+
+fn encode_jpeg(rgb: &[u8], w: usize, h: usize) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let enc = jpeg_encoder::Encoder::new(&mut buf, 80);
+    if enc.encode(rgb, w as u16, h as u16, jpeg_encoder::ColorType::Rgb).is_err() { return Vec::new(); }
+    buf
+}
+
+// Write the section's peak frame at every resolution: `full` = the raw camera JPEG; 480/240/120/60
+// = downscaled JPEGs (derived from the 480px RGB pyramid). Each under thumbs/<res>/YYYY/MM/DD/.
+fn write_thumbnails(t: i64, act: f32, full_jpeg: &[u8], rgb480: &[u8]) {
     let dt = match Local.timestamp_millis_opt(t).single() { Some(d) => d, None => return };
-    let dir = format!("{}/{:04}/{:02}/{:02}", THUMB_DIR, dt.year(), dt.month(), dt.day());
-    if std::fs::create_dir_all(&dir).is_err() { return; }
-    let _ = std::fs::write(format!("{}/{}_{}.jpg", dir, t, act_to_u16(act)), jpeg);
+    let day = format!("{:04}/{:02}/{:02}", dt.year(), dt.month(), dt.day());
+    let name = format!("{}_{}.jpg", t, act_to_u16(act));
+    let put = |res: &str, bytes: &[u8]| {
+        if bytes.is_empty() { return; }
+        let dir = format!("{}/{}/{}", THUMB_DIR, res, day);
+        if std::fs::create_dir_all(&dir).is_ok() { let _ = std::fs::write(format!("{}/{}", dir, name), bytes); }
+    };
+    put("full", full_jpeg);
+    if rgb480.len() == 480 * 270 * 3 {
+        for &(w, h) in &THUMB_SIZES {
+            let rgb = if w == 480 { rgb480.to_vec() } else { downscale_rgb(rgb480, 480, 270, w, h) };
+            put(&w.to_string(), &encode_jpeg(&rgb, w, h));
+        }
+    }
 }
 
 static FRAMES: AtomicU64 = AtomicU64::new(0);
@@ -200,7 +266,8 @@ fn capture_loop_hw(session: u64, thin_tx: &mpsc::SyncSender<thin::Frame>) -> std
     let mut sec_active = false;
     let mut sec_peak_act = 0f32;
     let mut sec_peak_t = 0i64;
-    let mut sec_peak_jpeg: Vec<u8> = Vec::new();
+    let mut sec_peak_jpeg: Vec<u8> = Vec::new(); // raw camera JPEG of the peak frame ("full")
+    let mut sec_peak_rgb: Vec<u8> = Vec::new();  // 480px RGB of the peak frame (for the small sizes)
     let mut sec_last_active = 0i64;
 
     loop {
@@ -249,12 +316,16 @@ fn capture_loop_hw(session: u64, thin_tx: &mpsc::SyncSender<thin::Frame>) -> std
                 if !sec_active { sec_active = true; sec_peak_act = 0.0; }
                 sec_last_active = ct;
                 if act >= sec_peak_act && !jpeg_owned.is_empty() {
-                    sec_peak_act = act; sec_peak_t = ct;
-                    sec_peak_jpeg.clear(); sec_peak_jpeg.extend_from_slice(&jpeg_owned);
+                    let rgb = nv12_to_rgb(&nv12, 480, 270);
+                    if !rgb.is_empty() {
+                        sec_peak_act = act; sec_peak_t = ct;
+                        sec_peak_jpeg.clear(); sec_peak_jpeg.extend_from_slice(&jpeg_owned);
+                        sec_peak_rgb = rgb;
+                    }
                 }
             } else if sec_active && ct - sec_last_active > THUMB_SECTION_GAP_MS {
-                write_thumbnail(sec_peak_t, sec_peak_act, &sec_peak_jpeg);
-                sec_active = false; sec_peak_jpeg = Vec::new();
+                write_thumbnails(sec_peak_t, sec_peak_act, &sec_peak_jpeg, &sec_peak_rgb);
+                sec_active = false; sec_peak_jpeg = Vec::new(); sec_peak_rgb = Vec::new();
             }
             // feed the thinner (best-effort).
             let _ = thin_tx.try_send((jpeg_owned, act, ct));

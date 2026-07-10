@@ -3,7 +3,7 @@
 import { runInAction } from "mobx";
 import { state } from "./appState";
 import { player } from "./session";
-import { saveUrlPosition } from "./navigation";
+import { saveUrlPosition, markVideoStarted } from "./navigation";
 import { bucketActivity } from "./indexBuffer";
 
 let trackEl: HTMLElement | null = null;
@@ -66,6 +66,7 @@ function onTrackWheel(e: WheelEvent): void {
 }
 
 function seekToWall(wall: number): void {
+    markVideoStarted();
     runInAction(() => { state.desiredWall = wall; });
     player?.seekTo(wall);
 }
@@ -151,6 +152,7 @@ export function zoomToRegion(start: number, end: number): void {
 // peak-activity frame when paused (so you see the moment, without starting playback) or to the
 // activity start when playing (so it plays the event on a loop). Never changes play/pause state.
 export function goToActivity(startWall: number, endWall: number, peakWall: number): void {
+    markVideoStarted();
     zoomToRegion(startWall, endWall);
     const playing = !!player && player.wantsPlay;
     const target = playing ? startWall : peakWall;

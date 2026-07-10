@@ -3,7 +3,7 @@ import { observer } from "sliftutils/render-utils/observer";
 import { css } from "typesafecss";
 import { state } from "../helpers/appState";
 import { player, setCanvasEl, exitLive } from "../helpers/session";
-import { saveUrlPosition } from "../helpers/navigation";
+import { saveUrlPosition, markVideoStarted } from "../helpers/navigation";
 import { playBtnCss } from "../helpers/styles";
 import { Trackbar } from "./Trackbar";
 import { Controls } from "./Controls";
@@ -45,7 +45,7 @@ export class VideoPlayer extends preact.Component {
                             background: "#000", objectFit: "contain", cursor: "pointer",
                             outline: state.dropping ? "3px solid hsl(0,90%,55%)" : state.seeking ? "3px solid hsl(45,100%,60%)" : "none", outlineOffset: "-3px",
                         }}
-                        onMouseDown={(e: any) => { if (e.button !== 0) return; e.preventDefault(); if (!state.live) { player?.togglePlay(); saveUrlPosition(state.playWall); } }} />
+                        onMouseDown={(e: any) => { if (e.button !== 0) return; e.preventDefault(); if (!state.live) { markVideoStarted(); player?.togglePlay(); saveUrlPosition(state.playWall); } }} />
                 </div>
                 <div style={{ height: "48px" }} />
             </div>

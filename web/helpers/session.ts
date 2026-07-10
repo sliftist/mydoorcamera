@@ -47,9 +47,10 @@ export async function connect(): Promise<void> {
         runInAction(() => { state.speed = getUrlSpeed(); state.level = getUrlLevel(); state.activityExp = getUrlActivityExp(); state.gapMode = getUrlGapMode(); state.activityPanelOpen = getUrlPanelOpen(); state.activitySort = getUrlActivitySort(); state.activityThreshold = getUrlThreshold(); }); // restore settings before the player is created
         const urlDay = getUrlDay();
         const anchor = urlDay ? periodStartFromKey(urlDay) : (days.length ? periodStartFromKey(days[days.length - 1]) : 0);
-        // Default the playhead to the current time in the current bucket, unless the URL pins a ?t=.
-        const initPos = getUrlT() != null ? undefined : Date.now();
-        if (anchor) { await selectPeriod(anchor, false, initPos); applyUrlZoom(); applyUrlLoop(); }
+        // Only engage the video if the URL pins a position (?t=). A plain default load shows just the
+        // activity list + thumbnails (tiny/fast) and leaves the video unloaded until the user acts.
+        runInAction(() => { state.videoStarted = getUrlT() != null; });
+        if (anchor) { await selectPeriod(anchor, false); applyUrlZoom(); applyUrlLoop(); }
         else runInAction(() => { state.pickerAnchorMs = Date.now(); });
         if (getUrlLive()) void enterLive(); // resume live mode across refresh
     } catch (e: any) {
@@ -117,8 +118,12 @@ export function maybeStartDayPlayer(): void {
     player.onSeeking = (s) => runInAction(() => { state.seeking = s; });
     player.onDropping = (d) => runInAction(() => { state.dropping = d; });
     player.onPending = () => runInAction(() => { if (player) { state.pendingGops = player.pendingGopTimes; state.bufferedRanges = player.bufferedWallRanges(); } }); // promptly reflect in-flight + loaded GOPs on the markers
-    player.seekTo(state.desiredWall); // show the initial / resumed frame, set by selectDay
-    if (wasPlaying) player.play(); // keep playing from the same spot across a level/day switch
+    // Only fetch/seek a GOP once the user has engaged the video — a plain default page load leaves
+    // it unloaded (just activity + thumbnails), which is tiny and instant.
+    if (state.videoStarted) {
+        player.seekTo(state.desiredWall); // show the initial / resumed frame, set by selectDay
+        if (wasPlaying) player.play(); // keep playing from the same spot across a level/day switch
+    }
 }
 
 export function teardownPlayer(): void { if (player) { player.teardown(); player = undefined; } playerKey = ""; }

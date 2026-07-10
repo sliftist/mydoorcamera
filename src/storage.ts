@@ -352,27 +352,34 @@ export async function getGopBytesAt(level: number, t: number): Promise<Buffer> {
     return g ? readLevelGopAt(level, g) : Buffer.alloc(0);
 }
 
-// ---- activity thumbnails (written by the recorder, in-pipeline, as <t>_<actU16>.jpg) ----
+// ---- activity thumbnails (written by the recorder in-pipeline at multiple resolutions:
+// thumbs/{full,480,240,120,60}/YYYY/MM/DD/<t>_<actU16>.jpg). Legacy: thumbs/YYYY/MM/DD/... (full only).
 const THUMB_DIR = path.join(path.dirname(DATA_DIR), "thumbs");
 export type ActivityThumb = { t: number; a: number }; // wall ms, peak activity 0..1
 export async function listThumbs(fromMs: number, toMs: number): Promise<ActivityThumb[]> {
-    const out: ActivityThumb[] = [];
+    const seen = new Map<number, number>();
     for (let d = new Date(fromMs).setHours(0, 0, 0, 0); d <= toMs; d += 86_400_000) {
-        const dir = path.join(THUMB_DIR, ...dayPartsOf(d));
-        for (const f of await readdirSafe(dir)) {
-            const m = /^(\d+)_(\d+)\.jpg$/.exec(f);
-            if (!m) continue;
-            const t = Number(m[1]);
-            if (t >= fromMs && t <= toMs) out.push({ t, a: Number(m[2]) / 65535 });
+        const day = dayPartsOf(d);
+        // new per-resolution layout (any one folder lists all thumbs) + legacy flat layout
+        for (const base of [path.join(THUMB_DIR, "240", ...day), path.join(THUMB_DIR, ...day)]) {
+            for (const f of await readdirSafe(base)) {
+                const m = /^(\d+)_(\d+)\.jpg$/.exec(f);
+                if (!m) continue;
+                const t = Number(m[1]);
+                if (t >= fromMs && t <= toMs && !seen.has(t)) seen.set(t, Number(m[2]) / 65535);
+            }
         }
     }
-    out.sort((a, b) => a.t - b.t);
-    return out;
+    return [...seen.entries()].map(([t, a]) => ({ t, a })).sort((x, y) => x.t - y.t);
 }
-export async function readThumb(t: number, a: number): Promise<Buffer | null> {
+export async function readThumb(t: number, a: number, w = 240): Promise<Buffer | null> {
     const u16 = Math.max(0, Math.min(65535, Math.round(a * 65535)));
-    const p = path.join(THUMB_DIR, ...dayPartsOf(t), `${t}_${u16}.jpg`);
-    try { return await fsp.readFile(p); } catch { return null; }
+    const day = dayPartsOf(t), name = `${t}_${u16}.jpg`;
+    // requested resolution -> full -> legacy flat
+    for (const p of [path.join(THUMB_DIR, String(w), ...day, name), path.join(THUMB_DIR, "full", ...day, name), path.join(THUMB_DIR, ...day, name)]) {
+        try { return await fsp.readFile(p); } catch { /* try next */ }
+    }
+    return null;
 }
 
 export async function getDayCoverage(parts: string[]): Promise<DayCoverage> {

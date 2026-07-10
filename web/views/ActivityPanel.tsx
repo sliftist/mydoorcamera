@@ -12,7 +12,7 @@ import { fmtDur } from "../helpers/format";
 
 const TOTAL_THRESHOLD = 0.0001; // "total activity" = everything we recorded (the recorder's gate)
 
-const CARD_W = 220;     // target card width (px) — column count derives from this
+const CARD_W = 240;     // card width (px) — matches the 240px stored thumbnail resolution
 const CARD_PAD = 6;     // inner padding around each card
 const TEXT_H = 34;      // height reserved for the two text lines under a thumbnail
 const OVERSCAN = 2;     // extra rows rendered beyond the viewport on each side

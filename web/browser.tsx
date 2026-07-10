@@ -13,7 +13,7 @@ import { isNode } from "typesafecss";
 import { state } from "./helpers/appState";
 import { App } from "./views/App";
 import { connect, player } from "./helpers/session";
-import { selectPeriod, periodStartFromKey, getUrlDay, applyUrlZoom } from "./helpers/navigation";
+import { selectPeriod, periodStartFromKey, getUrlDay, applyUrlZoom, markVideoStarted } from "./helpers/navigation";
 
 // Arrow keys seek (step scaled by the level's time density, routed through the
 // player's throttled seek-pump); space toggles play.
@@ -22,6 +22,7 @@ function onKeyDown(e: KeyboardEvent): void {
     const el = document.activeElement as HTMLElement | null;
     if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.tagName === "SELECT" || el.isContentEditable)) return;
     if (state.view !== "browse" || !player || !state.coverage) return;
+    markVideoStarted(); // a playback key means the user wants the video
     if (e.key === "ArrowRight" || e.key === "ArrowLeft") {
         e.preventDefault();
         const base = state.desiredWall || player.currentWall();

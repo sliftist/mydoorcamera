@@ -197,8 +197,8 @@ export class CameraApi {
     listThumbs(fromMs: number, toMs: number): Promise<{ t: number; a: number }[]> {
         return this.call("listThumbs", fromMs, toMs);
     }
-    getThumb(t: number, a: number): Promise<Uint8Array | null> {
-        return this.call<Uint8Array | null>("getThumb", t, a);
+    getThumb(t: number, a: number, w = 240): Promise<Uint8Array | null> {
+        return this.call<Uint8Array | null>("getThumb", t, a, w);
     }
 
     // ---- live streaming ----

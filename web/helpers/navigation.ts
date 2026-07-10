@@ -163,6 +163,9 @@ function gapSuffix(): string { return state.gapMode === "skip" ? `&gap=skip` : "
 function arSuffix(): string { return state.activityPanelOpen ? "" : `&ar=0`; } // default open; mark only when closed
 function asSuffix(): string { return state.activitySort === "peak" ? `&as=peak` : ""; } // default time
 export function getUrlActivitySort(): "peak" | "time" { try { return new URLSearchParams(location.search).get("as") === "peak" ? "peak" : "time"; } catch { return "time"; } }
+// The user has engaged the video (clicked an activity, scrubbed, pressed play/Now/an arrow) — from
+// now on the player may fetch/seek GOPs. Before this, a default page load only shows activity+thumbs.
+export function markVideoStarted(): void { if (!state.videoStarted) runInAction(() => { state.videoStarted = true; }); }
 function atSuffix(): string { return state.activityThreshold !== 0.03 ? `&at=${state.activityThreshold}` : ""; }
 // Loop region as absolute wall-clock ms: &loop=start-end (omitted when no loop).
 function loopSuffix(): string { return (state.loopStart && state.loopEnd && state.loopEnd > state.loopStart) ? `&loop=${state.loopStart}-${state.loopEnd}` : ""; }

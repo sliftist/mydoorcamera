@@ -162,7 +162,7 @@ async function start(): Promise<void> {
             async getGopBytesAt(level: number, t: number) { requireAuth(); return getGopBytesAt(level, t); }, // GOP bytes by (level,t) — for client thumbnail decoding
             async getRawIndex(level: number, fromMs: number, toMs: number) { requireAuth(); return getRawIndex(level, fromMs, toMs); },
             async listThumbs(fromMs: number, toMs: number) { requireAuth(); return listThumbs(fromMs, toMs); }, // pre-rendered activity thumbnails
-            async getThumb(t: number, a: number) { requireAuth(); return readThumb(t, a); },
+            async getThumb(t: number, a: number, w?: number) { requireAuth(); return readThumb(t, a, w || 240); },
 
             async serverInfo() { requireAuth(); return { ip, port: SERVER_PORT }; },
             async getStats() { requireAuth(); return { system: await getSystemStats(DATA_DIR), encoder: await readEncoderStats(), control: await readControl() }; },
