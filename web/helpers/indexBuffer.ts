@@ -8,7 +8,7 @@
 // time of the GOP whose last frame it repeats.
 export const ACT_SCALE = 65535;
 // dts[i] = ms offset of frame i from t (exact per-frame timing; dts[i] => frame i wall = t + dts[i]).
-export type IndexGop = { t: number; e: number; n: number; acts: Uint16Array; dts: Uint16Array; aMax: number; noChange: boolean; ref: number };
+export type IndexGop = { t: number; e: number; n: number; acts: Uint16Array; dts: Uint16Array; aMax: number; noChange: boolean; ref: number; bytes: number };
 
 // Record: [u32 len][f64 t,e,o,l,n][u16 act×n][u16 dt×n][u32 len], len = 40 + 4*n. (see src/storage.ts)
 export function decodeIndex(u8: Uint8Array): IndexGop[] {
@@ -31,7 +31,7 @@ export function decodeIndex(u8: Uint8Array): IndexGop[] {
         for (let i = 0; i < na; i++) { const v = dv.getUint16(p + 44 + i * 2, true); acts[i] = v; if (v > mx) mx = v; }
         for (let i = 0; i < na; i++) dts[i] = dv.getUint16(p + 44 + na * 2 + i * 2, true);
         const noChange = l === 0;
-        out.push({ t, e, n, acts, dts, aMax: mx / ACT_SCALE, noChange, ref: noChange ? o : 0 });
+        out.push({ t, e, n, acts, dts, aMax: mx / ACT_SCALE, noChange, ref: noChange ? o : 0, bytes: l });
         p += 4 + len + 4;
     }
     out.sort((x, y) => x.t - y.t);

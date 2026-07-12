@@ -20,7 +20,7 @@ function firstLanIp(): string {
     return "127.0.0.1";
 }
 import { createRpc, Channel, Rpc } from "./rpc";
-import { listChildren, combineHour, readGopBytes, getAvailableDays, getDayCoverage, latestIdxFile, readIdxIncremental, dataReady, daySignature, getLevelsInfo, getLevelCoverage, readLevelGops, readLevelGopData, getRawIndex, listThumbs, readThumb, listSections } from "./storage";
+import { listChildren, combineHour, readGopBytes, getAvailableDays, getDayCoverage, latestIdxFile, readIdxIncremental, dataReady, readIdxRawIncremental, idxFileSize, getLevelsInfo, getLevelCoverage, readLevelGops, readLevelGopData, getRawIndex, listThumbs, readThumb, listSections } from "./storage";
 import { getPassword, checkPassword, isBlacklisted, recordFailedAttempt } from "./auth";
 import { getSystemStats, readEncoderStats } from "./stats";
 import { readControl, writeControl } from "./control";
@@ -95,7 +95,9 @@ async function start(): Promise<void> {
         let rpc: Rpc;
         let streamTimer: ReturnType<typeof setInterval> | undefined;
         let stream: { parts: string[]; file: string; offset: number } | undefined;
-        const watched = new Map<string, string>(); // "Y/M/D" -> last signature
+        // Day watch: per day, the latest idx file + the byte offset we've already pushed. We push only
+        // the NEW raw index records appended since then (~160 B/GOP) — NOT the whole index.
+        const watched = new Map<string, { parts: string[]; file: string; byte: number }>();
         let watchTimer: ReturnType<typeof setInterval> | undefined;
 
         function stopStream(): void {
@@ -126,13 +128,12 @@ async function start(): Promise<void> {
             if (watchPolling) return;
             watchPolling = true;
             try {
-                for (const day of watched.keys()) {
-                    const parts = day.split("/");
-                    const sig = await daySignature(parts);
-                    if (sig !== watched.get(day)) {
-                        watched.set(day, sig);
-                        rpc.call("onRangesUpdated", day, await getDayCoverage(parts)).catch(() => { /* */ });
-                    }
+                for (const [day, w] of watched) {
+                    const latest = await latestIdxFile(w.parts);
+                    if (!latest) continue;
+                    if (latest !== w.file) { w.file = latest; w.byte = 0; } // hour rolled / restart -> read the new file from 0
+                    const { bytes, nextByte } = await readIdxRawIncremental(w.parts, w.file, w.byte);
+                    if (bytes.length) { w.byte = nextByte; rpc.call("onIndexAppend", day, bytes).catch(() => { /* */ }); }
                 }
             } finally { watchPolling = false; }
         }
@@ -202,11 +203,16 @@ async function start(): Promise<void> {
             },
             async stopStream() { stopStream(); if (streaming) { streaming = false; liveCount--; syncLive(); } return { ok: true }; },
 
-            // ---- watch a day for growing coverage ----
+            // ---- watch a day: push the tiny NEW index records as capture appends them ----
             async watchDay(day: string) {
                 requireAuth();
-                watched.set(day, await daySignature(day.split("/")));
-                if (!watchTimer) watchTimer = setInterval(() => void pollWatched(), 2000);
+                const parts = day.split("/");
+                const file = await latestIdxFile(parts);
+                // Start from the current end — the client already loaded the full index once (if in
+                // viewing mode), so it only wants records appended AFTER now.
+                const byte = file ? await idxFileSize(parts, file) : 0;
+                watched.set(day, { parts, file: file || "", byte });
+                if (!watchTimer) watchTimer = setInterval(() => void pollWatched(), 1000);
                 return { ok: true };
             },
             async unwatchDay(day: string) { watched.delete(day); return { ok: true }; },

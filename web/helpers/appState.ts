@@ -52,6 +52,7 @@ export const state = observable({
     activityPanelOpen: true,         // is the activity-region panel expanded (default open); restored from ?ar
     activitySort: "time" as "peak" | "time", // order activity events chronologically (default) or by highest peak; restored from ?as
     videoStarted: false,             // has the user engaged the video yet? until then (default load, no ?t=) we DON'T fetch/seek a GOP — only activity+thumbnails load, which are tiny
+    sectionsVersion: 0,              // bumped when the day watch reports new activity, to refetch the tiny section list
     loopStart: 0,                    // loop region start (wall ms); 0 = no loop
     loopEnd: 0,                      // loop region end (wall ms); 0 = no loop
 }, undefined, { deep: false });

@@ -37,7 +37,7 @@ export class CameraApi {
     onReconnect: (() => void) | undefined;
     // Server-push routing.
     private streamCb: ((meta: any, bytes: Uint8Array) => void) | undefined;
-    private watchCbs = new Map<string, (cov: DayCoverage) => void>();
+    private watchCbs = new Map<string, (bytes: Uint8Array) => void>();
     // Inbound-data accounting: total bytes ever received + a 60s sliding log for rate.
     private bytesTotal = 0;
     private byteLog: { t: number; n: number }[] = [];
@@ -98,8 +98,9 @@ export class CameraApi {
                 if (this.streamCb) { this.gopsLoaded++; this.streamCb(meta, bytes); }
                 else this.rpc?.call("stopStream").catch(() => { /* */ }); // never get stuck streaming
             },
-            // Server pushes a day's new coverage as capture grows it.
-            onRangesUpdated: async (day: string, cov: DayCoverage) => { this.watchCbs.get(day)?.(cov); },
+            // Server pushes the tiny NEW index records (raw bytes) as capture appends them — the
+            // client appends them to its index instead of reloading the whole thing.
+            onIndexAppend: async (day: string, bytes: Uint8Array) => { this.watchCbs.get(day)?.(bytes); },
         });
         await rpc.call("login", this.password); // rejects on wrong password / blacklist
         this.rpc = rpc;
@@ -217,8 +218,8 @@ export class CameraApi {
         if (this.rpc) await this.call("stopStream");
     }
 
-    // ---- watch a day for growing coverage ----
-    async watchDay(day: string, cb: (cov: DayCoverage) => void): Promise<void> {
+    // ---- watch a day: cb receives the raw NEW index bytes appended since the last push ----
+    async watchDay(day: string, cb: (bytes: Uint8Array) => void): Promise<void> {
         this.watchCbs.set(day, cb);
         await this.call("watchDay", day);
     }

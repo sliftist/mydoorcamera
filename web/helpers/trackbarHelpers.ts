@@ -3,7 +3,7 @@
 import { runInAction } from "mobx";
 import { state } from "./appState";
 import { player } from "./session";
-import { saveUrlPosition, markVideoStarted } from "./navigation";
+import { saveUrlPosition, markVideoStarted, enterViewing, scrollToPlayer } from "./navigation";
 import { bucketActivity } from "./indexBuffer";
 
 let trackEl: HTMLElement | null = null;
@@ -151,8 +151,11 @@ export function zoomToRegion(start: number, end: number): void {
 // Clicking an activity region: zoom to it and set the loop to its exact range. Seek to the
 // peak-activity frame when paused (so you see the moment, without starting playback) or to the
 // activity start when playing (so it plays the event on a loop). Never changes play/pause state.
-export function goToActivity(startWall: number, endWall: number, peakWall: number): void {
-    markVideoStarted();
+export async function goToActivity(startWall: number, endWall: number, peakWall: number): Promise<void> {
+    // From the activity-only view this is the entry into viewing mode: load the index/player and
+    // scroll to it. If already viewing, just markVideoStarted (no reload).
+    if (!state.videoStarted || !state.index) await enterViewing(peakWall);
+    else markVideoStarted();
     zoomToRegion(startWall, endWall);
     const playing = !!player && player.wantsPlay;
     const target = playing ? startWall : peakWall;
@@ -160,6 +163,7 @@ export function goToActivity(startWall: number, endWall: number, peakWall: numbe
     player?.setLoop(startWall, endWall);
     player?.seekTo(target);
     saveUrlPosition(target);
+    scrollToPlayer();
 }
 export function clearLoopRegion(): void {
     runInAction(() => { state.loopStart = 0; state.loopEnd = 0; });

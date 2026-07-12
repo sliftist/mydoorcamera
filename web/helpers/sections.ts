@@ -9,8 +9,9 @@ import { api } from "./session";
 
 export type Section = { s: number; e: number; t: number; a: number }; // startMs, endMs, peakMs, peak 0..1
 
-// Reactive list of activity sections for a period (read inside an @observer render()).
-export const getSectionList = asyncCache(async ({ fromMs, toMs }: { fromMs: number; toMs: number }): Promise<Section[]> => {
+// Reactive list of activity sections for a period (read inside an @observer render()). Pass the
+// current state.sectionsVersion so bumping it (when the day watch reports new activity) refetches.
+export const getSectionList = asyncCache(async ({ fromMs, toMs }: { fromMs: number; toMs: number; version?: number }): Promise<Section[]> => {
     if (!api) return [];
     try { return await api.getActivitySections(fromMs, toMs); } catch { return []; }
 });

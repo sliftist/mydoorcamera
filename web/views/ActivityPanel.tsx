@@ -40,7 +40,7 @@ export class ActivityPanel extends preact.Component<{}, { scrollTop: number; vie
 
         // The recorded sections for the day (tiny list, reactive). "Total" = every recorded section;
         // the threshold filters this list by peak activity — it does NOT recompute the sections.
-        const all = getSectionList({ fromMs: state.coverage.dayStartMs, toMs: state.coverage.dayEndMs }) || [];
+        const all = getSectionList({ fromMs: state.coverage.dayStartMs, toMs: state.coverage.dayEndMs, version: state.sectionsVersion }) || [];
         let sections = all.filter(x => x.a >= state.activityThreshold);
         if (state.activitySort === "peak") sections = [...sections].sort((a, b) => b.a - a.a);
         else sections = [...sections].sort((a, b) => a.s - b.s);
@@ -124,7 +124,7 @@ export class ActivityPanel extends preact.Component<{}, { scrollTop: number; vie
         const url = getThumbUrl({ t: sec.t, a: sec.a }); // undefined while loading, "" on failure/none
         const looped = state.loopStart === sec.s && state.loopEnd === sec.e;
         return (
-            <div key={sec.s} onMouseDown={(e: any) => { if (e.button !== 0) return; goToActivity(sec.s, sec.e, sec.t); }} title="Click to zoom in and loop this activity region"
+            <div key={sec.s} onMouseDown={(e: any) => { if (e.button !== 0) return; void goToActivity(sec.s, sec.e, sec.t); }} title="Click to enter viewing mode, zoom in, and loop this activity"
                 className={css.vbox(3)} style={{ position: "absolute", top: (row * cardH) + "px", left: (col * colW) + "%", width: colW + "%", height: cardH + "px", padding: CARD_PAD + "px", boxSizing: "border-box", cursor: "pointer" }}>
                 <div className={css.hsl(220, 15, 6).relative} style={{ width: "100%", height: thumbH + "px", flexShrink: 0, overflow: "hidden", outline: looped ? "2px solid hsl(40,80%,55%)" : "1px solid hsl(220,15%,22%)", outlineOffset: "-1px" }}>
                     {url ? <img src={url} style={{ width: "100%", height: "100%", objectFit: "contain", display: "block" }} />

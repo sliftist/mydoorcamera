@@ -455,6 +455,29 @@ export async function dataReady(parts: string[], dataFile: string, o: number, l:
     return (await sizeOf(path.join(DATA_DIR, ...parts, dataFile))) >= o + l;
 }
 
+// Raw index bytes appended to `idxFile` since `fromByte` (whole valid records only), for the day
+// watch: the server pushes these ~160-byte-per-GOP tails to the client, which decodes + appends
+// them to its index. This is "watching" — the minuscule new records (activity + whether video
+// exists, l>0) — NOT re-reading the whole index. Returns the raw on-disk framing decodeIndex parses.
+export async function readIdxRawIncremental(parts: string[], idxFile: string, fromByte: number): Promise<{ bytes: Buffer; nextByte: number }> {
+    const p = path.join(DATA_DIR, ...parts, idxFile);
+    const size = await sizeOf(p);
+    if (size < 0 || size <= fromByte) return { bytes: Buffer.alloc(0), nextByte: fromByte };
+    const fh = await fsp.open(p, "r");
+    try {
+        const buf = Buffer.allocUnsafe(size - fromByte);
+        await fh.read(buf, 0, size - fromByte, fromByte);
+        const { consumed } = decodeRecords(buf, idxFile.slice(0, -4) + ".data"); // trim any partial trailing record
+        return { bytes: consumed === buf.length ? buf : buf.subarray(0, consumed), nextByte: fromByte + consumed };
+    } finally { await fh.close(); }
+}
+
+// Current byte size of the day's latest index file (the watch starts pushing from here, so the
+// client — which already loaded the full index once — only receives records appended afterwards).
+export async function idxFileSize(parts: string[], idxFile: string): Promise<number> {
+    return Math.max(0, await sizeOf(path.join(DATA_DIR, ...parts, idxFile)));
+}
+
 export async function daySignature(parts: string[]): Promise<string> {
     const dir = path.join(DATA_DIR, ...parts);
     let sig = "";

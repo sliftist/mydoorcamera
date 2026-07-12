@@ -144,12 +144,14 @@ export class Trackbar extends preact.Component {
                     {state.hoverWall != null && inView(state.hoverWall, state.hoverWall) && (() => {
                         // Activity + the GOP's effective frame rate at the hovered point (its frames
                         // span [t,e], so fps = n / (e-t) — reveals where the ladder lowered the rate).
-                        let act = -1, fps = -1;
-                        if (state.index) for (const g of state.index) { if (g.t <= state.hoverWall! && state.hoverWall! < g.e) { act = g.aMax; const dur = g.e - g.t; if (dur > 0 && g.n > 0) fps = (g.n * 1000) / dur; break; } }
+                        // Also the GOP's total encoded byte size, to spot bloated GOPs (bytes = index `l`).
+                        let act = -1, fps = -1, bytes = -1;
+                        if (state.index) for (const g of state.index) { if (g.t <= state.hoverWall! && state.hoverWall! < g.e) { act = g.aMax; bytes = g.bytes; const dur = g.e - g.t; if (dur > 0 && g.n > 0) fps = (g.n * 1000) / dur; break; } }
+                        const sizeStr = bytes < 0 ? "" : bytes >= 1048576 ? `${(bytes / 1048576).toFixed(2)}MB` : bytes >= 1024 ? `${(bytes / 1024).toFixed(1)}KB` : `${bytes}B`;
                         return (
                             <div style={{ position: "absolute", top: 0, bottom: 0, left: pct(state.hoverWall), width: "1px", background: "rgba(255,255,255,0.6)" }}>
                                 <div style={{ position: "absolute", bottom: "2px", transform: "translateX(-50%)", background: "#000", padding: "2px 6px", fontSize: "11px", whiteSpace: "nowrap", border: "1px solid hsl(220,15%,35%)" }}>
-                                    {clockHMS(state.hoverWall)}{act >= 0 ? ` · act ${act.toFixed(4)}` : ""}{fps >= 0 ? ` · ${fps.toFixed(fps >= 10 ? 0 : 1)}fps` : ""}
+                                    {clockHMS(state.hoverWall)}{act >= 0 ? ` · act ${act.toFixed(4)}` : ""}{fps >= 0 ? ` · ${fps.toFixed(fps >= 10 ? 0 : 1)}fps` : ""}{sizeStr ? ` · ${sizeStr}` : ""}
                                 </div>
                             </div>
                         );

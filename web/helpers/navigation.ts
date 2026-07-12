@@ -230,6 +230,29 @@ export async function selectPeriod(startMs: number, push = true, positionWall?: 
     const { start, end } = periodBounds(state.level, startMs);
     const key = periodKey(state.level, start);
     if (push) setUrlDay(key);
+    // Always establish the day + its bounds so the activity list (the tiny recorded section list)
+    // can load. On a plain default load we STOP here — no per-GOP index download, no trackbar, no
+    // player. The index/trackbar/player load only in viewing mode (state.videoStarted), entered via
+    // the play button or by clicking an activity (see enterViewing).
+    runInAction(() => {
+        state.day = key;
+        state.pickerAnchorMs = start;
+        state.hoverWall = null;
+    });
+    lastPeriodStart[state.level] = start;
+    if (state.level === 0) watchSelectedDay(key);
+    else if (lastWatchedDay) { api.unwatchDay(lastWatchedDay); lastWatchedDay = ""; }
+
+    if (!state.videoStarted) {
+        runInAction(() => {
+            state.index = null;
+            state.coverage = { dayStartMs: start, dayEndMs: end, ranges: [], badRanges: [], activity: [] };
+            state.viewStart = start; state.viewEnd = end;
+        });
+        return;
+    }
+
+    // Viewing mode: download the index once and derive coverage/trackbar/player from it.
     let gops: IndexGop[] = [];
     try { gops = decodeIndex(await api.getRawIndex(state.level, start, end)); } catch { gops = []; }
     const ranges = deriveRanges(gops, joinMsFor(state.level));
@@ -237,18 +260,43 @@ export async function selectPeriod(startMs: number, push = true, positionWall?: 
     if (positionWall == null && !push) { const t = getUrlT(); if (t != null) pos = t; } // absolute wall-clock ms
     pos = Math.max(start, Math.min(end - 1, pos));
     runInAction(() => {
-        state.day = key;
         state.index = gops;
         state.coverage = { dayStartMs: start, dayEndMs: end, ranges, badRanges: [], activity: [] };
-        state.pickerAnchorMs = start;
-        state.playWall = pos; state.desiredWall = pos; state.hoverWall = null;
+        state.playWall = pos; state.desiredWall = pos;
         state.viewStart = start; state.viewEnd = end;
         state.viewActivity = { fromMs: start, toMs: end, activity: bucketActivity(gops, start, end, 1440) };
     });
-    lastPeriodStart[state.level] = start; lastPosition[state.level] = pos;
+    lastPosition[state.level] = pos;
     maybeStartDayPlayer();
-    if (state.level === 0) watchSelectedDay(key);
-    else if (lastWatchedDay) { api.unwatchDay(lastWatchedDay); lastWatchedDay = ""; }
+}
+
+// Enter viewing mode from the activity-only default view: flip videoStarted, load the current day's
+// index/trackbar/player (skipped on the default load), seek (to `positionWall`, else the latest
+// recorded moment), and scroll down to the player. Called by the play button and by clicking an activity.
+export async function enterViewing(positionWall?: number): Promise<void> {
+    if (!api || !state.coverage) return;
+    const wasViewing = state.videoStarted && !!state.index;
+    markVideoStarted();
+    if (!wasViewing) await selectPeriod(state.pickerAnchorMs, false, positionWall);
+    if (positionWall == null && state.coverage && state.coverage.ranges.length) {
+        const pos = state.coverage.ranges[state.coverage.ranges.length - 1].end - 1; // latest recorded moment
+        runInAction(() => { state.desiredWall = pos; state.playWall = pos; });
+        maybeStartDayPlayer();
+        player?.seekTo(pos);
+        saveUrlPosition(pos);
+    } else if (positionWall != null) {
+        const pos = Math.max(state.coverage.dayStartMs, Math.min(state.coverage.dayEndMs - 1, positionWall));
+        runInAction(() => { state.desiredWall = pos; state.playWall = pos; });
+        maybeStartDayPlayer();
+        player?.seekTo(pos);
+        saveUrlPosition(pos);
+    }
+    scrollToPlayer();
+}
+
+// Scroll the player into view (after a tick so it has rendered once videoStarted flipped).
+export function scrollToPlayer(): void {
+    try { setTimeout(() => document.getElementById("mdc-player")?.scrollIntoView({ behavior: "smooth", block: "start" }), 60); } catch { /* */ }
 }
 
 // Re-download the current period's index (after a reconnect, or when the live day grows).
@@ -259,16 +307,39 @@ export async function reloadIndex(): Promise<void> {
 }
 
 // ---- day watch (L0 live-grow) ----
+// The server pushes the tiny NEW index records (raw bytes, ~160 B/GOP) as capture appends them.
+// We APPEND them — never reload the whole index. (The prior code reloaded the entire day index
+// every ~1.5s; that's polling, not watching.)
 let lastWatchedDay = "";
-let watchReloadTimer: ReturnType<typeof setTimeout> | undefined;
+let lastSectionBump = 0;
+export function applyIndexAppend(bytes: Uint8Array): void {
+    // A new index record arrived (every GOP, active or static). Refresh the tiny activity-section
+    // list at most every few seconds — a section only finalizes after a motion gap, so there's no
+    // point refetching it on every single-GOP append.
+    const now = Date.now();
+    if (now - lastSectionBump > 4000) { lastSectionBump = now; runInAction(() => { state.sectionsVersion++; }); }
+
+    // Only maintain the per-GOP index in viewing mode (the activity-only view never loaded it).
+    if (!state.index || !state.coverage) return;
+    let add: IndexGop[] = [];
+    try { add = decodeIndex(bytes); } catch { return; }
+    const seen = new Set(state.index.map(g => g.t));
+    const fresh = add.filter(g => !seen.has(g.t));
+    if (!fresh.length) return;
+    const merged = state.index.concat(fresh).sort((a, b) => a.t - b.t);
+    const ranges = deriveRanges(merged, joinMsFor(state.level));
+    const vs = state.viewStart || state.coverage.dayStartMs, ve = state.viewEnd || state.coverage.dayEndMs;
+    runInAction(() => {
+        state.index = merged;
+        state.coverage = { ...state.coverage!, ranges };
+        state.viewActivity = { fromMs: vs, toMs: ve, activity: bucketActivity(merged, vs, ve, 1440) };
+    });
+    if (player) { player.ranges = ranges; player.invalidateIndex(); }
+}
 export function watchSelectedDay(dayKey: string): void {
     if (!api) return;
     if (lastWatchedDay && lastWatchedDay !== dayKey) api.unwatchDay(lastWatchedDay);
     lastWatchedDay = dayKey;
-    api.watchDay(dayKey, () => {
-        if (state.day !== dayKey) return;
-        if (watchReloadTimer) clearTimeout(watchReloadTimer);
-        watchReloadTimer = setTimeout(() => void reloadIndex(), 1500); // debounced: index grows as capture appends
-    }).catch(() => { /* */ });
+    api.watchDay(dayKey, (bytes) => { if (state.day === dayKey) applyIndexAppend(bytes); }).catch(() => { /* */ });
 }
 export function rewatchDay(dayKey: string): void { lastWatchedDay = ""; watchSelectedDay(dayKey); }
