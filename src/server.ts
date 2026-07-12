@@ -20,7 +20,7 @@ function firstLanIp(): string {
     return "127.0.0.1";
 }
 import { createRpc, Channel, Rpc } from "./rpc";
-import { listChildren, combineHour, readGopBytes, getAvailableDays, getDayCoverage, latestIdxFile, readIdxIncremental, dataReady, daySignature, getLevelsInfo, getLevelCoverage, readLevelGops, readLevelGopData, getRawIndex, listThumbs, readThumb } from "./storage";
+import { listChildren, combineHour, readGopBytes, getAvailableDays, getDayCoverage, latestIdxFile, readIdxIncremental, dataReady, daySignature, getLevelsInfo, getLevelCoverage, readLevelGops, readLevelGopData, getRawIndex, listThumbs, readThumb, listSections } from "./storage";
 import { getPassword, checkPassword, isBlacklisted, recordFailedAttempt } from "./auth";
 import { getSystemStats, readEncoderStats } from "./stats";
 import { readControl, writeControl } from "./control";
@@ -165,6 +165,9 @@ async function start(): Promise<void> {
             async getRawIndex(level: number, fromMs: number, toMs: number) { requireAuth(); return getRawIndex(level, fromMs, toMs); },
             async listThumbs(fromMs: number, toMs: number) { requireAuth(); return listThumbs(fromMs, toMs); }, // pre-rendered activity thumbnails
             async getThumb(t: number, a: number, w?: number) { requireAuth(); return readThumb(t, a, w || 240); },
+            // Just the activity sections (start/end/peak/thumb key) for a range — tiny. The activity
+            // list uses ONLY this; it must never load the per-frame index to rebuild sections.
+            async getActivitySections(fromMs: number, toMs: number) { requireAuth(); return listSections(fromMs, toMs); },
 
             async serverInfo() { requireAuth(); return { ip, port: SERVER_PORT }; },
             async getStats() { requireAuth(); return { system: await getSystemStats(DATA_DIR), encoder: await readEncoderStats(), control: await readControl() }; },

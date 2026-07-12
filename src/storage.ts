@@ -375,6 +375,28 @@ export async function readThumb(t: number, a: number, w = 240): Promise<Buffer |
     return null;
 }
 
+// ---- activity sections (written by the recorder in-pipeline, one JSON line per section under
+// sections/YYYY/MM/DD.jsonl). This is the ONLY thing the activity list loads: start/end wall ms,
+// the peak-frame time + peak activity (the thumbnail key). The per-frame index is never sent for it.
+const SECTION_DIR = path.join(path.dirname(DATA_DIR), "sections");
+export type ActivitySection = { s: number; e: number; t: number; a: number }; // start, end, peakT (ms), peak activity 0..1
+export async function listSections(fromMs: number, toMs: number): Promise<ActivitySection[]> {
+    const out: ActivitySection[] = [];
+    for (let d = new Date(fromMs).setHours(0, 0, 0, 0); d <= toMs; d += 86_400_000) {
+        const [y, mo, day] = dayPartsOf(d);
+        let text: string;
+        try { text = await fsp.readFile(path.join(SECTION_DIR, y, mo, `${day}.jsonl`), "utf8"); } catch { continue; }
+        for (const line of text.split("\n")) {
+            if (!line) continue;
+            let r: { s: number; e: number; t: number; a: number };
+            try { r = JSON.parse(line); } catch { continue; }
+            // overlap test against [fromMs, toMs]; `a` is stored as the u16 the thumbnail filename uses.
+            if (r.e >= fromMs && r.s <= toMs) out.push({ s: r.s, e: r.e, t: r.t, a: r.a / 65535 });
+        }
+    }
+    return out.sort((x, y) => x.s - y.s);
+}
+
 export async function getDayCoverage(parts: string[]): Promise<DayCoverage> {
     const [y, mo, d] = parts;
     const dayStartMs = new Date(Number(y), Number(mo) - 1, Number(d), 0, 0, 0, 0).getTime();

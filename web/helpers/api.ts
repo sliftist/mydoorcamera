@@ -201,6 +201,11 @@ export class CameraApi {
     getThumb(t: number, a: number, w = 240): Promise<Uint8Array | null> {
         return this.call<Uint8Array | null>("getThumb", t, a, w);
     }
+    // Activity sections only: { s: startMs, e: endMs, t: peakMs, a: peak 0..1 }. Tiny — the activity
+    // list uses ONLY this, never the per-frame index (which is for the trackbar).
+    getActivitySections(fromMs: number, toMs: number): Promise<{ s: number; e: number; t: number; a: number }[]> {
+        return this.call("getActivitySections", fromMs, toMs);
+    }
 
     // ---- live streaming ----
     async startStream(day: string, cb: (meta: any, bytes: Uint8Array) => void): Promise<void> {

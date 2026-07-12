@@ -34,6 +34,7 @@ const CONTROL_FILE: &str = "/var/lib/mydoorcamera/control.json";
 const ACTIVITY_THRESHOLD: f64 = 0.0001;
 const MOTION_COOLDOWN_MS: i64 = 12_000; // keep recording this long after the last above-threshold GOP (hysteresis)
 const THUMB_DIR: &str = "/var/lib/mydoorcamera/thumbs";
+const SECTION_DIR: &str = "/var/lib/mydoorcamera/sections";
 const THUMB_SECTION_GAP_MS: i64 = 3_000; // no activity for this long ends a thumbnail section
 const MAX_RUNG: usize = 5;
 const RECOVER_SECS: u64 = 8;
@@ -103,6 +104,21 @@ fn encode_jpeg(rgb: &[u8], w: usize, h: usize) -> Vec<u8> {
     let enc = jpeg_encoder::Encoder::new(&mut buf, 80);
     if enc.encode(rgb, w as u16, h as u16, jpeg_encoder::ColorType::Rgb).is_err() { return Vec::new(); }
     buf
+}
+
+// Append one activity-section record: start/end wall ms, peak-frame time, and peak activity (u16,
+// matching the thumbnail filename so the client can fetch the thumb by (t, a)). One JSON line per
+// section under sections/YYYY/MM/DD.jsonl. This tiny list is ALL the activity UI loads — it never
+// pulls the per-frame index to rebuild sections; that granular data is only for the trackbar.
+fn write_section(start: i64, end: i64, peak_t: i64, peak_act: f32) {
+    let dt = match Local.timestamp_millis_opt(start).single() { Some(d) => d, None => return };
+    let dir = format!("{}/{:04}/{:02}", SECTION_DIR, dt.year(), dt.month());
+    if std::fs::create_dir_all(&dir).is_err() { return; }
+    let line = format!("{{\"s\":{},\"e\":{},\"t\":{},\"a\":{}}}\n", start, end, peak_t, act_to_u16(peak_act));
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(format!("{}/{:02}.jsonl", dir, dt.day())) {
+        use std::io::Write as _;
+        let _ = f.write_all(line.as_bytes());
+    }
 }
 
 // Write the section's peak frame at every resolution: `full` = the raw camera JPEG; 480/240/120/60
@@ -266,6 +282,7 @@ fn capture_loop_hw(session: u64, thin_tx: &mpsc::SyncSender<thin::Frame>) -> std
     let mut sec_active = false;
     let mut sec_peak_act = 0f32;
     let mut sec_peak_t = 0i64;
+    let mut sec_start_t = 0i64; // wall ms of the section's first active frame
     let mut sec_peak_jpeg: Vec<u8> = Vec::new(); // raw camera JPEG of the peak frame ("full")
     let mut sec_peak_rgb: Vec<u8> = Vec::new();  // 480px RGB of the peak frame (for the small sizes)
     let mut sec_last_active = 0i64;
@@ -317,7 +334,7 @@ fn capture_loop_hw(session: u64, thin_tx: &mpsc::SyncSender<thin::Frame>) -> std
             ACT_CNT.fetch_add(1, Ordering::Relaxed);
             // Activity-thumbnail section tracking (in-pipeline, from the raw camera JPEG).
             if (act as f64) >= ACTIVITY_THRESHOLD {
-                if !sec_active { sec_active = true; sec_peak_act = 0.0; }
+                if !sec_active { sec_active = true; sec_peak_act = 0.0; sec_start_t = ct; }
                 sec_last_active = ct;
                 if act >= sec_peak_act && !jpeg_owned.is_empty() {
                     let rgb = nv12_to_rgb(&nv12, 480, 270);
@@ -328,6 +345,7 @@ fn capture_loop_hw(session: u64, thin_tx: &mpsc::SyncSender<thin::Frame>) -> std
                     }
                 }
             } else if sec_active && ct - sec_last_active > THUMB_SECTION_GAP_MS {
+                write_section(sec_start_t, sec_last_active, sec_peak_t, sec_peak_act);
                 write_thumbnails(sec_peak_t, sec_peak_act, &sec_peak_jpeg, &sec_peak_rgb);
                 sec_active = false; sec_peak_jpeg = Vec::new(); sec_peak_rgb = Vec::new();
             }
