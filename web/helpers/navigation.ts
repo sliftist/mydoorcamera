@@ -13,6 +13,7 @@ import { state } from "./appState";
 import { SPEEDS } from "./format";
 import { api, player, maybeStartDayPlayer, exitLive } from "./session";
 import { decodeIndex, deriveRanges, bucketActivity, IndexGop } from "./indexBuffer";
+import { refreshSections } from "./sections";
 import { levelPeriod, levelGopSpanSec } from "../../src/config";
 
 function pad(n: number): string { return String(n).padStart(2, "0"); }
@@ -249,6 +250,7 @@ export async function selectPeriod(startMs: number, push = true, positionWall?: 
             state.coverage = { dayStartMs: start, dayEndMs: end, ranges: [], badRanges: [], activity: [] };
             state.viewStart = start; state.viewEnd = end;
         });
+        void refreshSections();
         return;
     }
 
@@ -268,6 +270,7 @@ export async function selectPeriod(startMs: number, push = true, positionWall?: 
     });
     lastPosition[state.level] = pos;
     maybeStartDayPlayer();
+    void refreshSections();
 }
 
 // Enter viewing mode from the activity-only default view: flip videoStarted, load the current day's
@@ -311,13 +314,13 @@ export async function reloadIndex(): Promise<void> {
 // We APPEND them — never reload the whole index. (The prior code reloaded the entire day index
 // every ~1.5s; that's polling, not watching.)
 let lastWatchedDay = "";
-let lastSectionBump = 0;
+let lastSectionRefresh = 0;
 export function applyIndexAppend(bytes: Uint8Array): void {
     // A new index record arrived (every GOP, active or static). Refresh the tiny activity-section
     // list at most every few seconds — a section only finalizes after a motion gap, so there's no
     // point refetching it on every single-GOP append.
     const now = Date.now();
-    if (now - lastSectionBump > 4000) { lastSectionBump = now; runInAction(() => { state.sectionsVersion++; }); }
+    if (now - lastSectionRefresh > 4000) { lastSectionRefresh = now; void refreshSections(); }
 
     // Only maintain the per-GOP index in viewing mode (the activity-only view never loaded it).
     if (!state.index || !state.coverage) return;

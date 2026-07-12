@@ -7,7 +7,7 @@ import { formatDateTime } from "socket-function/src/formatting/format";
 import { state } from "../helpers/appState";
 import { saveUrlPosition } from "../helpers/navigation";
 import { goToActivity } from "../helpers/trackbarHelpers";
-import { getSectionList, Section } from "../helpers/sections";
+import { Section } from "../helpers/sections";
 import { getThumbUrl } from "../helpers/thumbnails";
 import { fmtDur } from "../helpers/format";
 
@@ -40,7 +40,10 @@ export class ActivityPanel extends preact.Component<{}, { scrollTop: number; vie
 
         // The recorded sections for the day (tiny list, reactive). "Total" = every recorded section;
         // the threshold filters this list by peak activity — it does NOT recompute the sections.
-        const all = getSectionList({ fromMs: state.coverage.dayStartMs, toMs: state.coverage.dayEndMs, version: state.sectionsVersion }) || [];
+        // Read the observable section list (refreshed imperatively on day change + on watch activity).
+        // Only show it when it's for the current day — on a day switch the old list is stale until the
+        // new fetch resolves; the list is replaced only on a successful fetch, so it never flashes empty.
+        const all = state.sectionsDay === state.day ? state.sections : [];
         let sections = all.filter(x => x.a >= state.activityThreshold);
         if (state.activitySort === "peak") sections = [...sections].sort((a, b) => b.a - a.a);
         else sections = [...sections].sort((a, b) => a.s - b.s);
