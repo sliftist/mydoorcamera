@@ -13,6 +13,10 @@ export const getThumbList = asyncCache(async ({ fromMs, toMs }: { fromMs: number
 });
 
 // Blob URL for one pre-rendered thumbnail (undefined while loading, "" on failure).
+// If getThumb returns nothing, we return "" and show NOTHING. Do NOT fall back here to
+// fetching a GOP and decoding it in the browser — that would be retarded and would lag the
+// entire server: a GOP is megabytes, and doing it per activity tile downloads tens of MB/s.
+// Thumbnails are ONLY the tiny pre-rendered JPEGs the recorder writes in-pipeline.
 export const getThumbUrl = asyncCache(async ({ t, a }: { t: number; a: number }): Promise<string> => {
     if (!api) return "";
     try {

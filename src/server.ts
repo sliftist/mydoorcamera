@@ -20,7 +20,7 @@ function firstLanIp(): string {
     return "127.0.0.1";
 }
 import { createRpc, Channel, Rpc } from "./rpc";
-import { listChildren, combineHour, readGopBytes, getAvailableDays, getDayCoverage, latestIdxFile, readIdxIncremental, dataReady, daySignature, getLevelsInfo, getLevelCoverage, readLevelGops, readLevelGopData, getGopBytesAt, getRawIndex, listThumbs, readThumb } from "./storage";
+import { listChildren, combineHour, readGopBytes, getAvailableDays, getDayCoverage, latestIdxFile, readIdxIncremental, dataReady, daySignature, getLevelsInfo, getLevelCoverage, readLevelGops, readLevelGopData, getRawIndex, listThumbs, readThumb } from "./storage";
 import { getPassword, checkPassword, isBlacklisted, recordFailedAttempt } from "./auth";
 import { getSystemStats, readEncoderStats } from "./stats";
 import { readControl, writeControl } from "./control";
@@ -159,7 +159,9 @@ async function start(): Promise<void> {
             async getLevelCoverage(level: number, fromMs: number, toMs: number, buckets?: number) { requireAuth(); return getLevelCoverage(level, fromMs, toMs, buckets || 1440); },
             async getLevelIndex(level: number, fromMs: number, toMs: number) { requireAuth(); return { gops: await readLevelGops(level, fromMs, toMs), badRanges: [] }; },
             async getLevelGopData(level: number, t: number, file: string, off: number, len: number) { requireAuth(); return readLevelGopData(level, t, file, off, len); },
-            async getGopBytesAt(level: number, t: number) { requireAuth(); return getGopBytesAt(level, t); }, // GOP bytes by (level,t) — for client thumbnail decoding
+            // NOTE: no getGopBytesAt endpoint — clients must NEVER fetch a full GOP to decode a
+            // thumbnail in the browser (megabytes per tile → tens of MB/s, lags the whole server).
+            // Thumbnails are served ONLY as the tiny pre-rendered JPEGs below (getThumb/listThumbs).
             async getRawIndex(level: number, fromMs: number, toMs: number) { requireAuth(); return getRawIndex(level, fromMs, toMs); },
             async listThumbs(fromMs: number, toMs: number) { requireAuth(); return listThumbs(fromMs, toMs); }, // pre-rendered activity thumbnails
             async getThumb(t: number, a: number, w?: number) { requireAuth(); return readThumb(t, a, w || 240); },

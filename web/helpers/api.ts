@@ -185,10 +185,11 @@ export class CameraApi {
     getLevelGopData(level: number, t: number, file: string, off: number, len: number, opt?: { cancellable?: boolean }): Promise<Uint8Array> {
         return this.fetchGop("getLevelGopData", [level, t, file, off, len], !!opt?.cancellable);
     }
-    // GOP bytes by (level, t) — used for client-side thumbnail keyframe decoding.
-    getGopBytesAt(level: number, t: number): Promise<Uint8Array> {
-        return this.call<Uint8Array>("getGopBytesAt", level, t);
-    }
+    // NOTE: there is deliberately NO getGopBytesAt / client-side thumbnail decode here.
+    // Do NOT fall back to fetching a full GOP and decoding it in the browser to make a
+    // thumbnail — a GOP is megabytes, and doing it per activity tile downloads tens of MB/s
+    // and lags the entire server. Thumbnails are ONLY the tiny pre-rendered JPEGs the recorder
+    // writes in-pipeline (getThumb/listThumbs). If a thumbnail is missing, show nothing.
     // Raw on-disk index bytes for a period — parsed client-side (see indexBuffer.ts).
     getRawIndex(level: number, fromMs: number, toMs: number): Promise<Uint8Array> {
         return this.call("getRawIndex", level, fromMs, toMs);

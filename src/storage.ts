@@ -341,16 +341,9 @@ export function readLevelGopAt(level: number, g: GopEntry): Promise<Buffer> {
     return readLevelGopData(level, g.t, g.f, g.o, g.l);
 }
 
-// Bytes of the GOP active at wall time `t` for a level (the GOP with g.t <= t).
-// Bucket/hour-scoped (cheap) so it can back per-thumbnail fetches from the client.
-export async function getGopBytesAt(level: number, t: number): Promise<Buffer> {
-    const { dir, stem } = bucketOf(level, t);
-    const { gops } = await combineBucket(level, dir, stem);
-    let g: GopEntry | undefined;
-    for (const x of gops) { if (x.t <= t) g = x; else break; }
-    if (!g && gops.length) g = gops[0];
-    return g ? readLevelGopAt(level, g) : Buffer.alloc(0);
-}
+// NOTE: no getGopBytesAt here — we deliberately do NOT let clients fetch a full GOP to decode a
+// thumbnail in the browser. That would download megabytes per activity tile (tens of MB/s) and lag
+// the whole server. Thumbnails are ONLY the tiny pre-rendered JPEGs written by the recorder below.
 
 // ---- activity thumbnails (written by the recorder in-pipeline at multiple resolutions:
 // thumbs/{full,480,240,120,60}/YYYY/MM/DD/<t>_<actU16>.jpg). Legacy: thumbs/YYYY/MM/DD/... (full only).
