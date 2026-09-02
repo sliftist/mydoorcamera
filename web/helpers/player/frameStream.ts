@@ -1,7 +1,6 @@
 import { observable, runInAction } from "mobx";
 import { GopEntry } from "./types";
 import { GopSource } from "./gopSource";
-import { clockHMS } from "../format";
 import { accessUnitsFromGop, codecFromSps, AccessUnit } from "../h264";
 
 const MAX_WINDOW = 60;
@@ -11,15 +10,7 @@ const EXTEND_DRY_RETRY_MS = 2000;
 
 type PlanGop = { gop: GopEntry; units: AccessUnit[]; walls: number[]; codec: string };
 type Buffered = { gopT: number; fi: number; frame: VideoFrame };
-type FedMeta = { gopT: number; fi: number; fedAt: number };
-
-if (typeof PerformanceObserver !== "undefined") {
-    try {
-        new PerformanceObserver(list => {
-            for (const e of list.getEntries()) console.log(`[jank] ${Math.round(e.duration)}ms main-thread task @${Math.round(e.startTime)}`);
-        }).observe({ entryTypes: ["longtask"] });
-    } catch { /* */ }
-}
+type FedMeta = { gopT: number; fi: number };
 
 let decoder: VideoDecoder | undefined;
 let decoderCodec = "";
@@ -39,8 +30,6 @@ let lastPlanned: GopEntry | undefined;
 let extendGen = -1;
 let extendDryAt = 0;
 let flushGen = -1;
-
-const gopStats = new Map<number, { t0: number; first: number; out: number; n: number; latSum: number; latMax: number }>();
 
 const decodedKeys = observable.set<string>();
 const keyOf = (level: number, gopT: number): string => level + ":" + gopT;
@@ -66,10 +55,10 @@ export async function getFrame(src: GopSource, gop: GopEntry, index: number): Pr
         if (current && current.gopT === gop.t && current.fi === fi) return current.frame;
         const pos = buf.findIndex(b => b.gopT === gop.t && b.fi === fi);
         if (pos >= 0) { serveFromBuf(pos); pump(); return current!.frame; }
-        if (stillComing(gop.t, fi)) return waitFor(gop.t, fi, "starved");
+        if (stillComing(gop.t, fi)) return waitFor(gop.t, fi);
     }
     restart(src, gop, want);
-    return waitFor(gop.t, want, "seek");
+    return waitFor(gop.t, want);
 }
 
 export function releaseStream(src: GopSource): void {
@@ -88,7 +77,6 @@ function clearSession(): void {
     buf = [];
     fedMap.clear();
     unitCounts.clear();
-    gopStats.clear();
     plan = []; feedGop = 0; feedUnit = 0;
     lastPlanned = undefined;
     extendDryAt = 0;
@@ -101,7 +89,6 @@ function restart(src: GopSource, gop: GopEntry, fi: number): void {
     sessionSource = src;
     if (decoder && decoder.state !== "closed") { try { decoder.reset(); } catch { /* */ } }
     syncDecodedKeys();
-    console.log(`[decode] seek ${clockHMS(gop.t)} #${fi}`);
     void (async () => {
         try {
             const bytes = await src.getBytes(gop, true);
@@ -162,17 +149,10 @@ function trimForWaiter(): void {
     }
 }
 
-function waitFor(gopT: number, fi: number, why: "starved" | "seek"): Promise<VideoFrame | undefined> {
+function waitFor(gopT: number, fi: number): Promise<VideoFrame | undefined> {
     if (waiter) waiter.resolve(undefined);
-    const t0 = performance.now();
     return new Promise(res => {
-        waiter = {
-            gopT, fi,
-            resolve: f => {
-                if (f) console.log(`[decode] ${why} ${Math.round(performance.now() - t0)}ms for ${clockHMS(gopT)}#${fi}`);
-                res(f);
-            },
-        };
+        waiter = { gopT, fi, resolve: res };
         trimForWaiter();
         pump();
     });
@@ -193,7 +173,6 @@ function ensureDecoder(codec: string): void {
         });
     }
     if (decoder.state === "unconfigured" || decoderCodec !== codec) {
-        if (decoderCodec !== codec) console.log(`[decode] configure ${codec}`);
         decoder.configure({ codec, optimizeForLatency: true });
         decoderCodec = codec;
     }
@@ -203,17 +182,6 @@ function onOutput(f: VideoFrame): void {
     const meta = fedMap.get(f.timestamp);
     fedMap.delete(f.timestamp);
     if (!meta) { try { f.close(); } catch { /* */ } return; }
-    const s = gopStats.get(meta.gopT);
-    if (s) {
-        s.out++;
-        const lat = performance.now() - meta.fedAt;
-        s.latSum += lat; if (lat > s.latMax) s.latMax = lat;
-        if (!s.first) s.first = Date.now() - s.t0;
-        if (s.out >= s.n) {
-            console.log(`[decode] ${clockHMS(meta.gopT)} ${s.n}f: first ${s.first}ms, per-frame avg ${(s.latSum / s.out).toFixed(1)}ms max ${Math.round(s.latMax)}ms`);
-            gopStats.delete(meta.gopT);
-        }
-    }
     buf.push({ gopT: meta.gopT, fi: meta.fi, frame: f });
     trimForWaiter();
     if (waiter && buf.length && buf[0].gopT === waiter.gopT && buf[0].fi === waiter.fi) {
@@ -236,7 +204,6 @@ function pump(): void {
         }
         if (feedUnit === 0) {
             try { ensureDecoder(p.codec); } catch (e) { console.warn("[decode] configure failed", e); return; }
-            gopStats.set(p.gop.t, { t0: Date.now(), first: 0, out: 0, n: p.units.length, latSum: 0, latMax: 0 });
         }
         if (!decoder) return;
         const u = p.units[feedUnit];
@@ -247,7 +214,7 @@ function pump(): void {
             console.warn("[decode] decode failed", e);
             return;
         }
-        fedMap.set(ts, { gopT: p.gop.t, fi: feedUnit, fedAt: performance.now() });
+        fedMap.set(ts, { gopT: p.gop.t, fi: feedUnit });
         feedUnit++;
     }
     maybeExtend();

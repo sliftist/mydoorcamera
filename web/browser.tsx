@@ -6,6 +6,7 @@ import { setFileAPIKey, usePrivateFileSystem } from "sliftutils/storage/FileFold
 setFileAPIKey("mydoorcamera");
 usePrivateFileSystem();
 
+import "./helpers/watchdog";
 import * as preact from "preact";
 import { runInAction } from "mobx";
 import { configureMobxNextFrameScheduler } from "sliftutils/render-utils/mobxTyped";
