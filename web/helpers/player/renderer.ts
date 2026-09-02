@@ -1,12 +1,12 @@
-// RENDER — paints an ImageBitmap (a decoded frame, or the "No video" card) onto a 2D canvas.
-// Plain canvas 2D: it retains its content between draws, so pausing or waiting between frames
-// just keeps showing the last frame (no flashing). The decode-side fix — caching ImageBitmaps
-// instead of holding VideoFrames open — is what made playback fast; rendering was never the
-// bottleneck, so there's no need for WebGPU here.
+// RENDER — paints a decoded frame (a live VideoFrame from frameStream, or an ImageBitmap
+// from the live path) or the "No video" card onto a 2D canvas. Plain canvas 2D: it retains
+// its content between draws, so pausing or waiting between frames just keeps showing the
+// last frame (no flashing), and a VideoFrame may be closed after the draw returns. Drawing
+// a VideoFrame is a GPU-side blit; rendering was never the bottleneck, so no WebGPU here.
 
 import { clockHMS, dateYMD } from "../format";
 
-type Drawable = ImageBitmap | OffscreenCanvas;
+type Drawable = ImageBitmap | OffscreenCanvas | VideoFrame;
 
 export class Renderer {
     private c2d: CanvasRenderingContext2D | null;
@@ -21,7 +21,11 @@ export class Renderer {
     // stored frame time). `note` adds context (e.g. "no activity") next to the clock.
     drawImage(source: Drawable, wall?: number, note?: string): void {
         if (!this.c2d) return;
-        if (!this.sized) { this.canvas.width = source.width; this.canvas.height = source.height; this.sized = true; }
+        if (!this.sized) {
+            this.canvas.width = "displayWidth" in source ? source.displayWidth : source.width;
+            this.canvas.height = "displayWidth" in source ? source.displayHeight : source.height;
+            this.sized = true;
+        }
         try { this.c2d.drawImage(source as any, 0, 0, this.canvas.width, this.canvas.height); } catch { /* */ }
         if (wall != null) this.drawClock(wall, note);
     }

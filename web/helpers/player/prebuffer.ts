@@ -1,14 +1,12 @@
-// PRE-RENDER (best-effort). Walks GOPs ahead of the playhead and asks the cache to decode
-// the nearest few (so the renderer finds them instantly) and to prefetch raw bytes a little
-// further ahead. Purely additive — getFrame/getBytes dedupe internally, errors are swallowed,
-// and a re-entry guard keeps one pass at a time. If it does nothing, playback still works
-// (the clock decodes on demand and skips if it can't keep up).
+// PREFETCH (best-effort). Walks GOPs ahead of the playhead and warms the raw-bytes cache,
+// so when frameStream's feed plan reaches them it never waits on the network. Decode-ahead
+// itself lives in frameStream's look-ahead window — this fetches bytes only. Purely
+// additive: getBytes dedupes internally, errors are swallowed, and a re-entry guard keeps
+// one pass at a time. If it does nothing, playback still works (just with network waits).
 
 import { GopEntry } from "./types";
 import { GopSource } from "./gopSource";
-import { getFrame } from "./frameCache";
 
-const DECODE_AHEAD_GOPS = 3;
 const BYTES_AHEAD_GOPS = 12;
 
 export class Prebuffer {
@@ -26,11 +24,9 @@ export class Prebuffer {
         let gops: GopEntry[] = [];
         try { gops = await this.source.gopsFrom(playWall, BYTES_AHEAD_GOPS); }
         catch { return; }
-        let decoded = 0;
         for (const g of gops) {
-            if (this.source.isNoChange(g)) continue; // static span: no bytes to fetch/decode
-            if (decoded < DECODE_AHEAD_GOPS) { try { await getFrame(this.source, g, 0); decoded++; } catch { /* */ } }
-            else if (!this.source.hasBytes(g)) void this.source.getBytes(g, false).catch(() => { /* */ });
+            if (this.source.isNoChange(g)) continue; // static span: no bytes to fetch
+            if (!this.source.hasBytes(g)) void this.source.getBytes(g, false).catch(() => { /* */ });
         }
     }
 }

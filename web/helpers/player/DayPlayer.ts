@@ -15,7 +15,7 @@ import { PlayStatus, GapMode } from "./types";
 import { GopSource } from "./gopSource";
 import { Prebuffer } from "./prebuffer";
 import { Renderer } from "./renderer";
-import { getFrame } from "./frameCache";
+import { getFrame, releaseStream } from "./frameStream";
 import { pushFsmEntry } from "../playerLog";
 
 const MAX_WAIT_MS = 5000;       // give up on a frame's render after this, show "missing"
@@ -95,6 +95,7 @@ export class DayPlayer {
     teardown(): void {
         this.destroyed = true;
         this.renderToken++;
+        releaseStream(this.source);
         if (this.rafId != null && typeof cancelAnimationFrame !== "undefined") { try { cancelAnimationFrame(this.rafId); } catch { /* */ } }
         this.rafId = undefined;
     }
@@ -168,8 +169,10 @@ export class DayPlayer {
         void this.drawFrameAt(target).then(hit => { if (token === this.renderToken && !this.destroyed) this.completeRender(hit); });
     }
 
-    // Resolve the GOP + frame index for `wall` and draw it. Async: the cache decodes on a
-    // miss, which is exactly the wait the clock paces around. Returns whether a frame drew.
+    // Resolve the GOP + frame index for `wall` and draw it. Async: the frame stream decodes
+    // ahead, so this usually resolves from its window immediately; a seek or an un-buffered
+    // GOP is exactly the wait the clock paces around. Returns whether a frame drew. The
+    // VideoFrame stays owned by frameStream (valid until the next getFrame) — never close it.
     private async drawFrameAt(wall: number): Promise<boolean> {
         const gop = await this.source.gopForWall(wall);
         if (!gop) return false;
@@ -185,9 +188,9 @@ export class DayPlayer {
             }
             const ref = await this.source.gopForWall(this.source.refOf(gop));
             if (!ref || this.source.isNoChange(ref)) return false;
-            const bmp = await getFrame(this.source, ref, ref.n - 1);
-            if (!bmp) return false;
-            this.renderer.drawImage(bmp, wall, "no activity");
+            const frame = await getFrame(this.source, ref, ref.n - 1);
+            if (!frame) return false;
+            this.renderer.drawImage(frame, wall, "no activity");
             return true;
         }
         const walls = this.source.frameWalls(gop, gop.n);

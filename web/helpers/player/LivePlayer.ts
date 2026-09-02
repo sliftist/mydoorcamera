@@ -7,7 +7,7 @@
 import { CameraApi } from "../api";
 import { FPS } from "../../../src/config";
 import { Renderer } from "./renderer";
-import { decodeGop } from "./frameCache";
+import { decodeGop } from "./liveDecode";
 
 type LiveGop = { meta: { t: number; e: number; n: number; dts?: number[] }; bytes: Uint8Array };
 
