@@ -18,6 +18,7 @@ import { Prebuffer } from "./prebuffer";
 import { Renderer } from "./renderer";
 import { getFrame, releaseStream } from "./frameStream";
 import { pushFsmEntry } from "../playerLog";
+import { clockHMS } from "../format";
 
 const MAX_WAIT_MS = 5000;       // give up on a frame's render after this, show "missing"
 const SKIP_AFTER_MISSES = 2;    // slow renders in a row before SKIP
@@ -47,6 +48,7 @@ export class DayPlayer {
     private lastTick = 0;
 
     private rafId: number | undefined;
+    private lastLoggedGopT = -1;
     private lastEmittedWall = -1;
     private lastStatus: PlayStatus = "paused";
     private lastSeeking = false;
@@ -195,6 +197,12 @@ export class DayPlayer {
             return true;
         }
         const walls = this.source.frameWalls(gop, gop.n);
+        // One line per GOP as playback enters it: per-frame times as offsets (ms) from the
+        // GOP's first frame, so uneven / reduced-rate spans are visible at a glance.
+        if (gop.t !== this.lastLoggedGopT && walls.length) {
+            this.lastLoggedGopT = gop.t;
+            console.log(`[gop] ${clockHMS(gop.t)} ${walls.length}f offsets ${walls.map(w => Math.round(w - walls[0])).join(",")}`);
+        }
         let fi = 0;
         for (let i = 0; i < walls.length; i++) {
             if (walls[i] <= wall) fi = i;
