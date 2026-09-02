@@ -3,6 +3,7 @@
 // raw GOP-bytes cache. Everything that needs "where is the footage" or "give me the bytes
 // for this GOP" goes through here. Decoded frames are NOT here — those live in FrameCache.
 
+import { measureBlock } from "socket-function/src/profiling/measure";
 import { CameraApi, GopEntry } from "../api";
 import { FPS } from "../../../src/config";
 import { pad2 } from "../format";
@@ -168,7 +169,7 @@ export class GopSource {
             const data = this.level > 0
                 ? await this.api.getLevelGopData(this.level, gop.t, gop.f, gop.o, gop.l, opt)
                 : await this.api.getGopData(this.dayParts, gop.f, gop.o, gop.l, opt);
-            return Buffer.from(data);
+            return measureBlock(() => Buffer.from(data), "gopSource|bytesCopy");
         } finally { this.pending.delete(gop.t); this.firePending(); }
     }
     hasBytes(gop: GopEntry): boolean { return this.bytesCache.has(gop.t); }

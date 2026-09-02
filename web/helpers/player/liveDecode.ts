@@ -1,6 +1,7 @@
 // LIVE-path GOP decode — decode one arriving GOP into ImageBitmaps (presentation order).
 // Only LivePlayer uses this; review playback streams VideoFrames via frameStream.ts.
 
+import { measureBlock } from "socket-function/src/profiling/measure";
 import { clockHMS } from "../format";
 import { accessUnitsFromGop, codecFromSps } from "../h264";
 
@@ -34,7 +35,7 @@ export function decodeGop(bytes: Buffer, walls: number[]): Promise<ImageBitmap[]
 
 async function decodeOne(bytes: Buffer, walls: number[]): Promise<ImageBitmap[]> {
     if (typeof VideoDecoder === "undefined" || typeof createImageBitmap === "undefined") return [];
-    const { nals, units } = accessUnitsFromGop(bytes);
+    const { nals, units } = measureBlock(() => accessUnitsFromGop(bytes), "liveDecode|parse");
     if (!units.length) return [];
     try { ensureDecoder(codecFromSps(nals)); } catch (e) { console.warn("[live-decode] configure failed", e); return []; }
     if (!decoder) return [];
@@ -56,13 +57,15 @@ async function decodeOne(bytes: Buffer, walls: number[]): Promise<ImageBitmap[]>
 
     let flushed = false;
     try {
-        for (let i = 0; i < units.length; i++) {
-            decoder.decode(new EncodedVideoChunk({
-                type: units[i].key ? "key" : "delta",
-                timestamp: Math.round((walls[i] ?? 0) * 1000),
-                data: units[i].data,
-            }));
-        }
+        measureBlock(() => {
+            for (let i = 0; i < units.length; i++) {
+                decoder!.decode(new EncodedVideoChunk({
+                    type: units[i].key ? "key" : "delta",
+                    timestamp: Math.round((walls[i] ?? 0) * 1000),
+                    data: units[i].data,
+                }));
+            }
+        }, "liveDecode|feed");
         await Promise.race([
             decoder.flush().then(() => { flushed = true; }, () => { /* */ }),
             new Promise<void>(res => setTimeout(res, 8000)),

@@ -2,6 +2,7 @@
 // a 2D canvas. The canvas retains its content between draws, so pausing or waiting between
 // frames keeps showing the last frame, and a VideoFrame may be closed after the draw returns.
 
+import { measureBlock } from "socket-function/src/profiling/measure";
 import { clockHMS, dateYMD } from "../format";
 
 type Drawable = ImageBitmap | OffscreenCanvas | VideoFrame;
@@ -19,13 +20,15 @@ export class Renderer {
     // stored frame time). `note` adds context (e.g. "no activity") next to the clock.
     drawImage(source: Drawable, wall?: number, note?: string): void {
         if (!this.c2d) return;
-        if (!this.sized) {
-            this.canvas.width = "displayWidth" in source ? source.displayWidth : source.width;
-            this.canvas.height = "displayWidth" in source ? source.displayHeight : source.height;
-            this.sized = true;
-        }
-        try { this.c2d.drawImage(source as any, 0, 0, this.canvas.width, this.canvas.height); } catch { /* */ }
-        if (wall != null) this.drawClock(wall, note);
+        measureBlock(() => {
+            if (!this.sized) {
+                this.canvas.width = "displayWidth" in source ? source.displayWidth : source.width;
+                this.canvas.height = "displayWidth" in source ? source.displayHeight : source.height;
+                this.sized = true;
+            }
+            try { this.c2d!.drawImage(source as any, 0, 0, this.canvas.width, this.canvas.height); } catch { /* */ }
+            if (wall != null) this.drawClock(wall, note);
+        }, "Renderer|drawImage");
     }
 
     // Compact top-left chip: date line over time line (mirrors the old burned-in overlay).

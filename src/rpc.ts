@@ -11,6 +11,7 @@
 // nodeWsChannel / browserWsChannel helpers).
 
 import { encode, decode } from "cbor-x";
+import { measureBlock } from "socket-function/src/profiling/measure";
 
 export type Handlers = Record<string, (...args: any[]) => Promise<any> | any>;
 
@@ -47,7 +48,7 @@ export function createRpc(channel: Channel, handlers: Handlers = {}): Rpc {
 
     channel.onMessage(async (data) => {
         let pkt: Packet;
-        try { pkt = decode(data as any) as Packet; }
+        try { pkt = measureBlock(() => decode(data as any) as Packet, "rpc|decode"); }
         catch { return; }
 
         if (pkt.type === "cancel") {          // mark for skip only if still handling it (else it already replied)
@@ -73,7 +74,7 @@ export function createRpc(channel: Channel, handlers: Handlers = {}): Rpc {
             inProgress.delete(pkt.id);
             if (cancelled.delete(pkt.id)) { rpcLog("→", "return", pkt.method + " (cancelled, skipped)"); return; } // caller bailed — don't send
             rpcLog("→", "return", pkt.method);            // sending the result back
-            try { channel.send(encode(reply)); } catch { /* socket gone */ }
+            try { channel.send(measureBlock(() => encode(reply), "rpc|encode")); } catch { /* socket gone */ }
             return;
         }
 
@@ -100,7 +101,7 @@ export function createRpc(channel: Channel, handlers: Handlers = {}): Rpc {
     const send = (method: string, args: any[], id: number, resolve: (v: any) => void, reject: (e: any) => void) => {
         pending.set(id, { resolve, reject, method });
         rpcLog("→", "call", method);
-        try { channel.send(encode({ type: "call", id, method, args })); }
+        try { channel.send(measureBlock(() => encode({ type: "call", id, method, args }), "rpc|encode")); }
         catch (e) { pending.delete(id); reject(e); }
     };
     return {

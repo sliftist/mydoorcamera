@@ -9,6 +9,7 @@
 // if a render is slow). Two slow renders in a row -> SKIP: advance by real elapsed time
 // (dropping frames, red border) until SMOOTH_AFTER_HITS on-time renders recover SMOOTH.
 
+import { measureBlock } from "socket-function/src/profiling/measure";
 import { CameraApi } from "../api";
 import { FPS } from "../../../src/config";
 import { PlayStatus, GapMode } from "./types";
@@ -113,7 +114,7 @@ export class DayPlayer {
     // ============================ the loop ============================
     private tick = (): void => {
         if (this.destroyed) return;
-        try { this.step(); } catch (e) { console.error("[player] step error", e); }
+        try { measureBlock(() => this.step(), "DayPlayer|step"); } catch (e) { console.error("[player] step error", e); }
         this.rafId = requestAnimationFrame(this.tick);
     };
 
