@@ -1,50 +1,24 @@
-// STREAMING DECODE for REVIEW playback — replaces the whole-GOP→ImageBitmap cache.
-//
-//   getFrame(source, gop, frameIndex) -> Promise<VideoFrame | undefined>
-//
-// ONE module-level VideoDecoder is kept alive across GOPs (reconfigured only on a codec
-// change or after a seek reset — never per frame). It is fed access units a few at a time
-// under backpressure, and the decoded frames are held as live VideoFrames in a small
-// look-ahead window. The hardware decoder only has ~10-16 output surfaces, so the window
-// plus the one on-screen frame stays well under that, and every frame is closed the
-// moment it is superseded. This is what makes playback smooth: instead of materializing a
-// whole GOP into bitmaps in one main-thread burst (N createImageBitmap copies back to
-// back), steady-state per-frame work is a buffered-frame handoff, and decode-ahead
-// trickles on between frames.
-//
-// OWNERSHIP: the returned VideoFrame belongs to this module and is valid until the next
-// getFrame call — draw it immediately (the canvas retains the pixels after that). Callers
-// never close frames.
-//
-// Sequential requests (a later frame of a planned GOP, or a following GOP — the feed plan
-// auto-extends forward, skipping no-change spans) are served from the window or awaited.
-// Anything else is a SEEK: decoder.reset() aborts all queued work — nothing keeps decoding
-// for a GOP nobody wants — and a fresh feed starts from the target GOP's IDR. Frames
-// before a mid-GOP target still decode (H.264 requires it) but are closed on arrival.
-
 import { observable, runInAction } from "mobx";
 import { GopEntry } from "./types";
 import { GopSource } from "./gopSource";
 import { clockHMS } from "../format";
 import { accessUnitsFromGop, codecFromSps, AccessUnit } from "../h264";
 
-const MAX_WINDOW = 8;         // buffered frames + frames still inside the decoder, ahead of current
-const PLAN_AHEAD_GOPS = 3;    // GOPs kept queued (bytes fetched + parsed) ahead of the feed point
+const MAX_WINDOW = 60;
+const PLAN_AHEAD_GOPS = 3;
 const FLUSH_TIMEOUT_MS = 8000;
-const EXTEND_DRY_RETRY_MS = 2000; // after "no more GOPs ahead", wait this long before asking again
+const EXTEND_DRY_RETRY_MS = 2000;
 
 type PlanGop = { gop: GopEntry; units: AccessUnit[]; walls: number[]; codec: string };
 type Buffered = { gopT: number; fi: number; frame: VideoFrame };
 type FedMeta = { gopT: number; fi: number; fedAt: number };
 
-// Jank witness: any main-thread task over 50ms is a candidate cause of a dropped frame.
-// Logged so stutter can be correlated (by timestamp) with the [decode]/[render] lines.
 if (typeof PerformanceObserver !== "undefined") {
     try {
         new PerformanceObserver(list => {
             for (const e of list.getEntries()) console.log(`[jank] ${Math.round(e.duration)}ms main-thread task @${Math.round(e.startTime)}`);
         }).observe({ entryTypes: ["longtask"] });
-    } catch { /* longtask unsupported */ }
+    } catch { /* */ }
 }
 
 let decoder: VideoDecoder | undefined;
@@ -52,27 +26,22 @@ let decoderCodec = "";
 
 let sessionSource: GopSource | undefined;
 let generation = 0;
-let plan: PlanGop[] = [];     // pruned as GOPs finish feeding, so it stays small
-let feedGop = 0;              // plan index being fed
-let feedUnit = 0;             // next unit within plan[feedGop] (unit index === frame index)
-let fedSeq = 1;               // monotonic chunk timestamp — identity only, not a time
-const fedMap = new Map<number, FedMeta>();     // ts -> meta for fed-but-not-yet-output chunks
-const unitCounts = new Map<number, number>();  // gopT -> decodable frame count (for index clamping)
+let plan: PlanGop[] = [];
+let feedGop = 0;
+let feedUnit = 0;
+let fedSeq = 1;
+const fedMap = new Map<number, FedMeta>();
+const unitCounts = new Map<number, number>();
 let buf: Buffered[] = [];
-let current: Buffered | undefined;             // the handed-out frame; closed when superseded
+let current: Buffered | undefined;
 let waiter: { gopT: number; fi: number; resolve: (f: VideoFrame | undefined) => void } | undefined;
-let lastPlanned: GopEntry | undefined; // survives plan pruning — the anchor to extend from
-let extendGen = -1;           // generation with an extend in flight (-1: none)
+let lastPlanned: GopEntry | undefined;
+let extendGen = -1;
 let extendDryAt = 0;
-let flushGen = -1;            // generation with a flush in flight (-1: none)
+let flushGen = -1;
 
-// Per-GOP decode timing, logged when the GOP's last frame comes out. NOTE the feed is
-// paced by playback consumption (backpressure), so wall-clock GOP duration is meaningless;
-// what's measured is per-chunk latency: feed of unit i -> output of frame i, with a queue
-// that backpressure keeps shallow. That approximates true decode time per frame.
 const gopStats = new Map<number, { t0: number; first: number; out: number; n: number; latSum: number; latMax: number }>();
 
-// Observable set of GOPs with frames currently in the window — colours trackbar markers.
 const decodedKeys = observable.set<string>();
 const keyOf = (level: number, gopT: number): string => level + ":" + gopT;
 export function isGopDecoded(level: number, gopT: number): boolean { return decodedKeys.has(keyOf(level, gopT)); }
@@ -88,11 +57,9 @@ function syncDecodedKeys(): void {
     });
 }
 
-// ============================ public API ============================
-
 export async function getFrame(src: GopSource, gop: GopEntry, index: number): Promise<VideoFrame | undefined> {
     if (typeof VideoDecoder === "undefined") return undefined;
-    if (src.isNoChange(gop)) return undefined; // static span carries no video of its own
+    if (src.isNoChange(gop)) return undefined;
     const want = Math.max(0, index);
     if (sessionSource === src) {
         const fi = clampFi(gop.t, want);
@@ -105,7 +72,6 @@ export async function getFrame(src: GopSource, gop: GopEntry, index: number): Pr
     return waitFor(gop.t, want, "seek");
 }
 
-// Drop this source's session (a player teardown): close every frame and abort queued decodes.
 export function releaseStream(src: GopSource): void {
     if (sessionSource !== src) return;
     generation++;
@@ -115,8 +81,6 @@ export function releaseStream(src: GopSource): void {
     if (decoder && decoder.state !== "closed") { try { decoder.reset(); } catch { /* */ } }
     syncDecodedKeys();
 }
-
-// ============================ session ============================
 
 function clearSession(): void {
     closeFrame(current); current = undefined;
@@ -135,9 +99,6 @@ function restart(src: GopSource, gop: GopEntry, fi: number): void {
     const gen = generation;
     clearSession();
     sessionSource = src;
-    // reset() aborts every queued decode — the whole point: a seek never waits for (or
-    // wastes time finishing) the previous GOP. The decoder object itself is kept; reset
-    // leaves it unconfigured, so the next feed reconfigures it (cheap, and required).
     if (decoder && decoder.state !== "closed") { try { decoder.reset(); } catch { /* */ } }
     syncDecodedKeys();
     console.log(`[decode] seek ${clockHMS(gop.t)} #${fi}`);
@@ -173,7 +134,6 @@ function clampFi(gopT: number, fi: number): number {
     return n ? Math.min(fi, n - 1) : fi;
 }
 
-// Is (gopT, fi) still going to come out of the feed (queued in the decoder or unfed in the plan)?
 function stillComing(gopT: number, fi: number): boolean {
     for (const m of fedMap.values()) if (m.gopT === gopT && m.fi === fi) return true;
     for (let i = feedGop; i < plan.length; i++) {
@@ -184,14 +144,10 @@ function stillComing(gopT: number, fi: number): boolean {
     return false;
 }
 
-// ============================ window ============================
-
 function closeFrame(b: Buffered | undefined): void {
     if (b) { try { b.frame.close(); } catch { /* */ } }
 }
 
-// Hand out buf[pos] as the current frame; everything older (the skipped-over frames and the
-// previous current) is closed, freeing decoder surfaces.
 function serveFromBuf(pos: number): void {
     closeFrame(current);
     for (let i = 0; i < pos; i++) closeFrame(buf[i]);
@@ -200,19 +156,14 @@ function serveFromBuf(pos: number): void {
     syncDecodedKeys();
 }
 
-// While a specific frame is awaited, buffered frames OLDER than it are dead weight (the
-// playhead moved past them) — close them so the window can never wedge the feed shut.
 function trimForWaiter(): void {
     while (waiter && buf.length && !(buf[0].gopT === waiter.gopT && buf[0].fi === waiter.fi)) {
         closeFrame(buf.shift());
     }
 }
 
-// "starved": playback wanted a frame the window didn't have yet — these waits ARE the
-// player-side stalls, so every one is logged. "seek": a deliberate jump; logged too, but
-// expected to take a fetch+decode.
 function waitFor(gopT: number, fi: number, why: "starved" | "seek"): Promise<VideoFrame | undefined> {
-    if (waiter) waiter.resolve(undefined); // superseded by this newer request
+    if (waiter) waiter.resolve(undefined);
     const t0 = performance.now();
     return new Promise(res => {
         waiter = {
@@ -226,8 +177,6 @@ function waitFor(gopT: number, fi: number, why: "starved" | "seek"): Promise<Vid
         pump();
     });
 }
-
-// ============================ decoder ============================
 
 function ensureDecoder(codec: string): void {
     if (!decoder || decoder.state === "closed") {
@@ -253,7 +202,7 @@ function ensureDecoder(codec: string): void {
 function onOutput(f: VideoFrame): void {
     const meta = fedMap.get(f.timestamp);
     fedMap.delete(f.timestamp);
-    if (!meta) { try { f.close(); } catch { /* */ } return; } // stale (post-reset) output
+    if (!meta) { try { f.close(); } catch { /* */ } return; }
     const s = gopStats.get(meta.gopT);
     if (s) {
         s.out++;
@@ -276,17 +225,13 @@ function onOutput(f: VideoFrame): void {
     pump();
 }
 
-// ============================ the feed ============================
-
-// Feed the decoder while the look-ahead window has room. Re-entered from every event that
-// frees a slot or adds input (frame served, frame output, plan extended).
 function pump(): void {
     while (buf.length + fedMap.size < MAX_WINDOW) {
         const p = plan[feedGop];
         if (!p) break;
         if (feedUnit >= p.units.length) {
             feedGop++; feedUnit = 0;
-            while (feedGop > 0) { plan.shift(); feedGop--; } // prune fully-fed GOPs
+            while (feedGop > 0) { plan.shift(); feedGop--; }
             continue;
         }
         if (feedUnit === 0) {
@@ -316,14 +261,11 @@ function inputRemaining(): boolean {
     return false;
 }
 
-// Keep the plan topped up ahead of the feed point, skipping no-change spans (they have no
-// bytes; DayPlayer shows their referenced frame separately) — so read-ahead flows straight
-// across a static stretch into the next active GOP.
 function maybeExtend(): void {
     if (extendGen === generation || !sessionSource) return;
     if (plan.length - feedGop > PLAN_AHEAD_GOPS) return;
     const last = lastPlanned;
-    if (!last) return; // a restart's first GOP hasn't landed yet
+    if (!last) return;
     if (extendDryAt && Date.now() - extendDryAt < EXTEND_DRY_RETRY_MS) return;
     const src = sessionSource;
     const gen = generation;
@@ -336,20 +278,18 @@ function maybeExtend(): void {
             for (const g of gops) {
                 if (gen !== generation) return;
                 if (src.isNoChange(g) || plan.some(p => p.gop.t === g.t)) continue;
-                const bytes = await src.getBytes(g, false); // cancellable: dropped on a seek
+                const bytes = await src.getBytes(g, false);
                 if (gen !== generation) return;
                 if (pushPlanGop(src, g, bytes)) pushed++;
                 if (plan.length - feedGop > PLAN_AHEAD_GOPS) break;
             }
-            extendDryAt = pushed ? 0 : Date.now(); // nothing ahead (yet) — back off briefly
+            extendDryAt = pushed ? 0 : Date.now();
             pump();
-        } catch { /* transient (or cancelled) — retried on a later pump */ }
+        } catch { /* */ }
         finally { if (extendGen === gen) extendGen = -1; }
     })();
 }
 
-// End of the plan with frames still inside the decoder and someone waiting: flush to get the
-// tail out. Guarded by a timeout — a hung flush means a wedged decoder, so rebuild it.
 function maybeFlushTail(): void {
     if (!decoder || !waiter || flushGen === generation) return;
     if (!fedMap.size || inputRemaining()) return;

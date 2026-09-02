@@ -1,8 +1,6 @@
-// RENDER — paints a decoded frame (a live VideoFrame from frameStream, or an ImageBitmap
-// from the live path) or the "No video" card onto a 2D canvas. Plain canvas 2D: it retains
-// its content between draws, so pausing or waiting between frames just keeps showing the
-// last frame (no flashing), and a VideoFrame may be closed after the draw returns. Drawing
-// a VideoFrame is a GPU-side blit; rendering was never the bottleneck, so no WebGPU here.
+// RENDER — paints a decoded frame (VideoFrame or ImageBitmap) or the "No video" card onto
+// a 2D canvas. The canvas retains its content between draws, so pausing or waiting between
+// frames keeps showing the last frame, and a VideoFrame may be closed after the draw returns.
 
 import { clockHMS, dateYMD } from "../format";
 
@@ -29,7 +27,7 @@ export class Renderer {
         const t0 = performance.now();
         try { this.c2d.drawImage(source as any, 0, 0, this.canvas.width, this.canvas.height); } catch { /* */ }
         const ms = performance.now() - t0;
-        if (ms > 8) console.log(`[render] slow draw ${Math.round(ms)}ms`); // VideoFrame->2D-canvas can hide a conversion
+        if (ms > 8) console.log(`[render] slow draw ${Math.round(ms)}ms`);
         if (wall != null) this.drawClock(wall, note);
     }
 

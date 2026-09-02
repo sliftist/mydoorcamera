@@ -1,9 +1,5 @@
 // LIVE-path GOP decode — decode one arriving GOP into ImageBitmaps (presentation order).
-// Only LivePlayer uses this: its playout queue holds ~1.5s of frames, far more than the
-// hardware decoder's output-surface pool allows as live VideoFrames, so each frame is
-// copied to an ImageBitmap and its VideoFrame closed right away (freeing the surface —
-// which also lets the decode finish). REVIEW playback does NOT go through here anymore;
-// it streams live VideoFrames incrementally via frameStream.ts.
+// Only LivePlayer uses this; review playback streams VideoFrames via frameStream.ts.
 
 import { clockHMS } from "../format";
 import { accessUnitsFromGop, codecFromSps } from "../h264";
