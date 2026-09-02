@@ -49,6 +49,8 @@ export class DayPlayer {
 
     private rafId: number | undefined;
     private lastLoggedGopT = -1;
+    private shownGopT = -1;
+    private shownTimes: number[] = [];
     private lastEmittedWall = -1;
     private lastStatus: PlayStatus = "paused";
     private lastSeeking = false;
@@ -96,6 +98,7 @@ export class DayPlayer {
     seekTarget(): number { return this.playWall; }
     currentWall(): number { return this.playWall; }
     teardown(): void {
+        this.flushShownLog();
         this.destroyed = true;
         this.renderToken++;
         releaseStream(this.source);
@@ -210,6 +213,7 @@ export class DayPlayer {
         }
         const frame = await getFrame(this.source, gop, fi);
         if (!frame) return false;
+        this.recordShown(gop.t);
         this.renderer.drawImage(frame, walls[fi]);
         return true;
     }
@@ -245,12 +249,32 @@ export class DayPlayer {
         if (this.source.nextRangeStart(this.playWall) == null && !this.source.hasFootageAhead(this.playWall)) { this.playing = false; this.log("END"); }
     }
 
+    // Track when each frame of a GOP actually hits the canvas; once playback moves to the
+    // next GOP, log the display times as offsets (ms) from that GOP's first shown frame —
+    // lining up against the planned `[gop] ... offsets` line shows the real cadence.
+    private recordShown(gopT: number): void {
+        if (gopT !== this.shownGopT) {
+            this.flushShownLog();
+            this.shownGopT = gopT;
+            this.shownTimes = [];
+        }
+        this.shownTimes.push(performance.now());
+    }
+    private flushShownLog(): void {
+        if (this.shownGopT === -1 || !this.shownTimes.length) return;
+        const t0 = this.shownTimes[0];
+        console.log(`[gop-shown] ${clockHMS(this.shownGopT)} ${this.shownTimes.length}f shown ${this.shownTimes.map(t => Math.round(t - t0)).join(",")}`);
+        this.shownGopT = -1;
+        this.shownTimes = [];
+    }
+
     private enterSkip(): void { this.mode = "skip"; this.consecHit = 0; this.log("SKIP"); }
     private exitSkip(): void { this.mode = "smooth"; this.consecMiss = 0; this.consecHit = 0; this.shownWall = this.playWall; this.log("SMOOTH"); }
 
     // A seek / loop-wrap / gap-skip: move the playhead, abandon any outstanding render, and
     // render the new target immediately. The cache keeps decoded GOPs, so seeking back is fast.
     private jump(wall: number): void {
+        this.flushShownLog(); // the GOP won't finish — log what was shown so far
         this.playWall = this.clampWall(wall);
         this.shownWall = this.playWall - this.frameStep;
         this.seekPending = true;
