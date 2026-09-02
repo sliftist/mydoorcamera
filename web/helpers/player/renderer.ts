@@ -26,7 +26,10 @@ export class Renderer {
             this.canvas.height = "displayWidth" in source ? source.displayHeight : source.height;
             this.sized = true;
         }
+        const t0 = performance.now();
         try { this.c2d.drawImage(source as any, 0, 0, this.canvas.width, this.canvas.height); } catch { /* */ }
+        const ms = performance.now() - t0;
+        if (ms > 8) console.log(`[render] slow draw ${Math.round(ms)}ms`); // VideoFrame->2D-canvas can hide a conversion
         if (wall != null) this.drawClock(wall, note);
     }
 

@@ -35,7 +35,17 @@ const EXTEND_DRY_RETRY_MS = 2000; // after "no more GOPs ahead", wait this long 
 
 type PlanGop = { gop: GopEntry; units: AccessUnit[]; walls: number[]; codec: string };
 type Buffered = { gopT: number; fi: number; frame: VideoFrame };
-type FedMeta = { gopT: number; fi: number };
+type FedMeta = { gopT: number; fi: number; fedAt: number };
+
+// Jank witness: any main-thread task over 50ms is a candidate cause of a dropped frame.
+// Logged so stutter can be correlated (by timestamp) with the [decode]/[render] lines.
+if (typeof PerformanceObserver !== "undefined") {
+    try {
+        new PerformanceObserver(list => {
+            for (const e of list.getEntries()) console.log(`[jank] ${Math.round(e.duration)}ms main-thread task @${Math.round(e.startTime)}`);
+        }).observe({ entryTypes: ["longtask"] });
+    } catch { /* longtask unsupported */ }
+}
 
 let decoder: VideoDecoder | undefined;
 let decoderCodec = "";
@@ -56,8 +66,11 @@ let extendGen = -1;           // generation with an extend in flight (-1: none)
 let extendDryAt = 0;
 let flushGen = -1;            // generation with a flush in flight (-1: none)
 
-// Per-GOP decode timing, logged when the GOP's last frame comes out.
-const gopStats = new Map<number, { t0: number; first: number; out: number; n: number }>();
+// Per-GOP decode timing, logged when the GOP's last frame comes out. NOTE the feed is
+// paced by playback consumption (backpressure), so wall-clock GOP duration is meaningless;
+// what's measured is per-chunk latency: feed of unit i -> output of frame i, with a queue
+// that backpressure keeps shallow. That approximates true decode time per frame.
+const gopStats = new Map<number, { t0: number; first: number; out: number; n: number; latSum: number; latMax: number }>();
 
 // Observable set of GOPs with frames currently in the window — colours trackbar markers.
 const decodedKeys = observable.set<string>();
@@ -86,10 +99,10 @@ export async function getFrame(src: GopSource, gop: GopEntry, index: number): Pr
         if (current && current.gopT === gop.t && current.fi === fi) return current.frame;
         const pos = buf.findIndex(b => b.gopT === gop.t && b.fi === fi);
         if (pos >= 0) { serveFromBuf(pos); pump(); return current!.frame; }
-        if (stillComing(gop.t, fi)) return waitFor(gop.t, fi);
+        if (stillComing(gop.t, fi)) return waitFor(gop.t, fi, "starved");
     }
     restart(src, gop, want);
-    return waitFor(gop.t, want);
+    return waitFor(gop.t, want, "seek");
 }
 
 // Drop this source's session (a player teardown): close every frame and abort queued decodes.
@@ -195,10 +208,20 @@ function trimForWaiter(): void {
     }
 }
 
-function waitFor(gopT: number, fi: number): Promise<VideoFrame | undefined> {
+// "starved": playback wanted a frame the window didn't have yet — these waits ARE the
+// player-side stalls, so every one is logged. "seek": a deliberate jump; logged too, but
+// expected to take a fetch+decode.
+function waitFor(gopT: number, fi: number, why: "starved" | "seek"): Promise<VideoFrame | undefined> {
     if (waiter) waiter.resolve(undefined); // superseded by this newer request
+    const t0 = performance.now();
     return new Promise(res => {
-        waiter = { gopT, fi, resolve: res };
+        waiter = {
+            gopT, fi,
+            resolve: f => {
+                if (f) console.log(`[decode] ${why} ${Math.round(performance.now() - t0)}ms for ${clockHMS(gopT)}#${fi}`);
+                res(f);
+            },
+        };
         trimForWaiter();
         pump();
     });
@@ -234,9 +257,11 @@ function onOutput(f: VideoFrame): void {
     const s = gopStats.get(meta.gopT);
     if (s) {
         s.out++;
+        const lat = performance.now() - meta.fedAt;
+        s.latSum += lat; if (lat > s.latMax) s.latMax = lat;
         if (!s.first) s.first = Date.now() - s.t0;
         if (s.out >= s.n) {
-            console.log(`[decode] ${clockHMS(meta.gopT)} ${s.n}f in ${Date.now() - s.t0}ms (first frame ${s.first}ms)`);
+            console.log(`[decode] ${clockHMS(meta.gopT)} ${s.n}f: first ${s.first}ms, per-frame avg ${(s.latSum / s.out).toFixed(1)}ms max ${Math.round(s.latMax)}ms`);
             gopStats.delete(meta.gopT);
         }
     }
@@ -266,7 +291,7 @@ function pump(): void {
         }
         if (feedUnit === 0) {
             try { ensureDecoder(p.codec); } catch (e) { console.warn("[decode] configure failed", e); return; }
-            gopStats.set(p.gop.t, { t0: Date.now(), first: 0, out: 0, n: p.units.length });
+            gopStats.set(p.gop.t, { t0: Date.now(), first: 0, out: 0, n: p.units.length, latSum: 0, latMax: 0 });
         }
         if (!decoder) return;
         const u = p.units[feedUnit];
@@ -277,7 +302,7 @@ function pump(): void {
             console.warn("[decode] decode failed", e);
             return;
         }
-        fedMap.set(ts, { gopT: p.gop.t, fi: feedUnit });
+        fedMap.set(ts, { gopT: p.gop.t, fi: feedUnit, fedAt: performance.now() });
         feedUnit++;
     }
     maybeExtend();
