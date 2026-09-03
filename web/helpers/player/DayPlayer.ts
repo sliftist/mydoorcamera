@@ -49,9 +49,9 @@ export class DayPlayer {
     private lastTick = 0;
 
     private rafId: number | undefined;
-    private lastLoggedGopT = -1;
     private shownGopT = -1;
-    private shownTimes: number[] = [];
+    private gapWarns: string[] = [];
+    private lastShown: { t: number; wall: number } | undefined; // cleared on seek/pause
     private gapMeasure: ReturnType<typeof startMeasure> | undefined;
     private gapValid = false; // false across seeks/pauses — those gaps aren't stutter
     private lastDrawAt = 0;
@@ -91,7 +91,7 @@ export class DayPlayer {
     // ============================ public API ============================
     seekTo(wall: number): void { if (this.destroyed) return; this.jump(wall); this.log("SEEK", Math.round(this.playWall)); }
     play(): void { if (!this.destroyed && !this.playing) { this.playing = true; this.log("PLAY"); } }
-    pause(): void { if (this.playing) { this.playing = false; this.gapValid = false; this.log("PAUSE"); } }
+    pause(): void { if (this.playing) { this.playing = false; this.gapValid = false; this.lastShown = undefined; this.log("PAUSE"); } }
     togglePlay(): void { if (this.playing) this.pause(); else this.play(); }
     setSpeed(s: number): void { this.speed = s > 0 ? s : 1; }
     setLoop(start: number, end: number): void { this.loopVal = { start, end }; }
@@ -102,7 +102,7 @@ export class DayPlayer {
     seekTarget(): number { return this.playWall; }
     currentWall(): number { return this.playWall; }
     teardown(): void {
-        this.flushShownLog();
+        this.flushGapLog();
         // Unfinished measures leak (they capture all future measures) — always finish.
         if (this.gapMeasure) { this.gapMeasure.finish(); this.gapMeasure = undefined; }
         this.destroyed = true;
@@ -206,12 +206,6 @@ export class DayPlayer {
             return true;
         }
         const walls = this.source.frameWalls(gop, gop.n);
-        // One line per GOP as playback enters it: per-frame times as offsets (ms) from the
-        // GOP's first frame, so uneven / reduced-rate spans are visible at a glance.
-        if (gop.t !== this.lastLoggedGopT && walls.length) {
-            this.lastLoggedGopT = gop.t;
-            console.log(`[gop] ${clockHMS(gop.t)} ${walls.length}f offsets ${walls.map(w => Math.round(w - walls[0])).join(",")}`);
-        }
         let fi = 0;
         for (let i = 0; i < walls.length; i++) {
             if (walls[i] <= wall) fi = i;
@@ -219,7 +213,7 @@ export class DayPlayer {
         }
         const frame = await getFrame(this.source, gop, fi);
         if (!frame) return false;
-        this.recordShown(gop.t);
+        this.recordShown(gop.t, walls[fi]);
         this.renderer.drawImage(frame, walls[fi]);
         return true;
     }
@@ -255,17 +249,23 @@ export class DayPlayer {
         if (this.source.nextRangeStart(this.playWall) == null && !this.source.hasFootageAhead(this.playWall)) { this.playing = false; this.log("END"); }
     }
 
-    // Track when each frame of a GOP actually hits the canvas; once playback moves to the
-    // next GOP, log the display times as offsets (ms) from that GOP's first shown frame —
-    // lining up against the planned `[gop] ... offsets` line shows the real cadence.
-    private recordShown(gopT: number): void {
+    // Compare each frame-to-frame display gap against the intended gap (from the frames'
+    // wall times, scaled to real time by comp×speed). Gaps more than double the intended
+    // are collected and logged once per GOP.
+    private recordShown(gopT: number, frameWall: number): void {
         if (gopT !== this.shownGopT) {
-            this.flushShownLog();
+            this.flushGapLog();
             this.shownGopT = gopT;
-            this.shownTimes = [];
         }
         const now = performance.now();
-        this.shownTimes.push(now);
+        if (this.lastShown) {
+            const actual = now - this.lastShown.t;
+            const intended = Math.max(this.cadence, (frameWall - this.lastShown.wall) / (this.comp * this.speed));
+            if (actual > intended * 2) {
+                this.gapWarns.push(`${Math.round(actual)}ms vs ${Math.round(intended)}ms (+${Math.round((actual / intended - 1) * 100)}%)`);
+            }
+        }
+        this.lastShown = { t: now, wall: frameWall };
         // Profile the gap between displayed frames: a measure runs from each draw to the
         // next, and if the gap was a stutter (> STUTTER_LOG_MS during continuous play),
         // dump what ran during it.
@@ -284,12 +284,12 @@ export class DayPlayer {
         this.gapMeasure = startMeasure();
         this.gapValid = this.playing;
     }
-    private flushShownLog(): void {
-        if (this.shownGopT === -1 || !this.shownTimes.length) return;
-        const t0 = this.shownTimes[0];
-        console.log(`[gop-shown] ${clockHMS(this.shownGopT)} ${this.shownTimes.length}f shown ${this.shownTimes.map(t => Math.round(t - t0)).join(",")}`);
+    private flushGapLog(): void {
+        if (this.shownGopT !== -1 && this.gapWarns.length) {
+            console.log(`[gop-stutter] ${clockHMS(this.shownGopT)} ${this.gapWarns.length} slow: ${this.gapWarns.join(", ")}`);
+        }
         this.shownGopT = -1;
-        this.shownTimes = [];
+        this.gapWarns = [];
     }
 
     private enterSkip(): void { this.mode = "skip"; this.consecHit = 0; this.log("SKIP"); }
@@ -298,8 +298,9 @@ export class DayPlayer {
     // A seek / loop-wrap / gap-skip: move the playhead, abandon any outstanding render, and
     // render the new target immediately. The cache keeps decoded GOPs, so seeking back is fast.
     private jump(wall: number): void {
-        this.flushShownLog(); // the GOP won't finish — log what was shown so far
+        this.flushGapLog(); // the GOP won't finish — log any gaps collected so far
         this.gapValid = false;
+        this.lastShown = undefined;
         this.playWall = this.clampWall(wall);
         this.shownWall = this.playWall - this.frameStep;
         this.seekPending = true;
