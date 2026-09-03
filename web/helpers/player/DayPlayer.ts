@@ -9,7 +9,7 @@
 // if a render is slow). Two slow renders in a row -> SKIP: advance by real elapsed time
 // (dropping frames, red border) until SMOOTH_AFTER_HITS on-time renders recover SMOOTH.
 
-import { measureBlock } from "socket-function/src/profiling/measure";
+import { measureBlock, startMeasure, logMeasureTable } from "socket-function/src/profiling/measure";
 import { CameraApi } from "../api";
 import { FPS } from "../../../src/config";
 import { PlayStatus, GapMode } from "./types";
@@ -21,6 +21,7 @@ import { pushFsmEntry } from "../playerLog";
 import { clockHMS } from "../format";
 
 const MAX_WAIT_MS = 5000;       // give up on a frame's render after this, show "missing"
+const STUTTER_LOG_MS = 250;     // gap between displayed frames that triggers a profile dump
 const SKIP_AFTER_MISSES = 2;    // slow renders in a row before SKIP
 const SMOOTH_AFTER_HITS = 10;   // on-time renders in a row before leaving SKIP
 
@@ -51,6 +52,9 @@ export class DayPlayer {
     private lastLoggedGopT = -1;
     private shownGopT = -1;
     private shownTimes: number[] = [];
+    private gapMeasure: ReturnType<typeof startMeasure> | undefined;
+    private gapValid = false; // false across seeks/pauses — those gaps aren't stutter
+    private lastDrawAt = 0;
     private lastEmittedWall = -1;
     private lastStatus: PlayStatus = "paused";
     private lastSeeking = false;
@@ -87,7 +91,7 @@ export class DayPlayer {
     // ============================ public API ============================
     seekTo(wall: number): void { if (this.destroyed) return; this.jump(wall); this.log("SEEK", Math.round(this.playWall)); }
     play(): void { if (!this.destroyed && !this.playing) { this.playing = true; this.log("PLAY"); } }
-    pause(): void { if (this.playing) { this.playing = false; this.log("PAUSE"); } }
+    pause(): void { if (this.playing) { this.playing = false; this.gapValid = false; this.log("PAUSE"); } }
     togglePlay(): void { if (this.playing) this.pause(); else this.play(); }
     setSpeed(s: number): void { this.speed = s > 0 ? s : 1; }
     setLoop(start: number, end: number): void { this.loopVal = { start, end }; }
@@ -99,6 +103,8 @@ export class DayPlayer {
     currentWall(): number { return this.playWall; }
     teardown(): void {
         this.flushShownLog();
+        // Unfinished measures leak (they capture all future measures) — always finish.
+        if (this.gapMeasure) { this.gapMeasure.finish(); this.gapMeasure = undefined; }
         this.destroyed = true;
         this.renderToken++;
         releaseStream(this.source);
@@ -258,7 +264,25 @@ export class DayPlayer {
             this.shownGopT = gopT;
             this.shownTimes = [];
         }
-        this.shownTimes.push(performance.now());
+        const now = performance.now();
+        this.shownTimes.push(now);
+        // Profile the gap between displayed frames: a measure runs from each draw to the
+        // next, and if the gap was a stutter (> STUTTER_LOG_MS during continuous play),
+        // dump what ran during it.
+        if (this.gapMeasure) {
+            const profile = this.gapMeasure.finish();
+            const gap = now - this.lastDrawAt;
+            if (this.gapValid && gap > STUTTER_LOG_MS) {
+                logMeasureTable(profile, {
+                    name: `stutter ${Math.round(gap)}ms between frames`,
+                    minTimeToLog: 0,
+                    thresholdInTable: 0,
+                });
+            }
+        }
+        this.lastDrawAt = now;
+        this.gapMeasure = startMeasure();
+        this.gapValid = this.playing;
     }
     private flushShownLog(): void {
         if (this.shownGopT === -1 || !this.shownTimes.length) return;
@@ -275,6 +299,7 @@ export class DayPlayer {
     // render the new target immediately. The cache keeps decoded GOPs, so seeking back is fast.
     private jump(wall: number): void {
         this.flushShownLog(); // the GOP won't finish — log what was shown so far
+        this.gapValid = false;
         this.playWall = this.clampWall(wall);
         this.shownWall = this.playWall - this.frameStep;
         this.seekPending = true;
