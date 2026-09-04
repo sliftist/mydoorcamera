@@ -7,7 +7,7 @@ import { state } from "../helpers/appState";
 import { clockHMS, fmtDur } from "../helpers/format";
 import { isGopDecoded } from "../helpers/videoHelpers";
 import { navBtnCss } from "../helpers/styles";
-import { setTrackRef, onTrackDown, onTrackHover, onTrackLeave, resetZoom, clearLoopRegion, addLoopAtView, startLoopDrag, goToActivity } from "../helpers/trackbarHelpers";
+import { setTrackRef, onTrackDown, onTrackHover, onTrackLeave, resetZoom, clearLoopRegion, addLoopAtView, startLoopDrag, goToActivity, downloadLoop } from "../helpers/trackbarHelpers";
 import { computeRegions } from "../helpers/activityRegions";
 import { saveUrlPosition, nudgeBucket } from "../helpers/navigation";
 import { frameCount } from "../helpers/indexBuffer";
@@ -209,7 +209,10 @@ export class Trackbar extends preact.Component {
                                 style={{ width: "52px", fontSize: "11px", padding: "1px 4px", background: "hsl(220,15%,16%)", color: "inherit", border: "1px solid hsl(220,15%,30%)" }} />
                         </span>
                         {!!(state.loopStart && state.loopEnd > state.loopStart)
-                            ? <button className={navBtnCss} style={{ fontSize: "11px", padding: "2px 8px", color: "hsl(40,100%,70%)" }} onClick={clearLoopRegion} title="Clear the loop">✕ loop {fmtDur((state.loopEnd - state.loopStart) / 1000)} ({Math.max(1, Math.round((state.loopEnd - state.loopStart) / (levelGopSpanSec(state.level) * 1000)))} GOPs)</button>
+                            ? <span className={css.hbox(6).alignItems("center")}>
+                                <button className={navBtnCss} style={{ fontSize: "11px", padding: "2px 8px", color: "hsl(40,100%,70%)" }} onClick={clearLoopRegion} title="Clear the loop">✕ loop {fmtDur((state.loopEnd - state.loopStart) / 1000)} ({Math.max(1, Math.round((state.loopEnd - state.loopStart) / (levelGopSpanSec(state.level) * 1000)))} GOPs)</button>
+                                <button className={navBtnCss} style={{ fontSize: "11px", padding: "2px 8px" }} disabled={state.mp4Downloading} onClick={downloadLoop} title="Download the looped span as an MP4">{state.mp4Downloading ? "…" : "⬇ mp4"}</button>
+                            </span>
                             : <button className={navBtnCss} style={{ fontSize: "11px", padding: "2px 8px" }} onClick={addLoopAtView} title="Loop the middle of the current view">↻ loop</button>}
                         {zoomed
                             ? <button className={navBtnCss} style={{ fontSize: "11px", padding: "2px 8px" }} onClick={resetZoom} title="Reset zoom (show the whole period)">⤢ reset zoom</button>

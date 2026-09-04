@@ -56,4 +56,5 @@ export const state = observable({
     sectionsDay: "",                 // which day (period key) `sections` is for; only replaced on a successful fetch (no flash)
     loopStart: 0,                    // loop region start (wall ms); 0 = no loop
     loopEnd: 0,                      // loop region end (wall ms); 0 = no loop
+    mp4Downloading: false,           // loop-region MP4 export in progress (disables the button)
 }, undefined, { deep: false });

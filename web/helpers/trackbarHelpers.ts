@@ -4,6 +4,7 @@ import { runInAction } from "mobx";
 import { state } from "./appState";
 import { player } from "./session";
 import { saveUrlPosition, markVideoStarted, enterViewing, scrollToPlayer } from "./navigation";
+import { downloadRangeMp4 } from "./player/downloadMp4";
 import { bucketActivity } from "./indexBuffer";
 
 let trackEl: HTMLElement | null = null;
@@ -169,6 +170,19 @@ export function clearLoopRegion(): void {
     runInAction(() => { state.loopStart = 0; state.loopEnd = 0; });
     player?.clearLoop();
     saveUrlPosition(state.playWall);
+}
+// Mux the looped span's GOPs into an MP4 and save it as a file.
+export async function downloadLoop(): Promise<void> {
+    if (!player || !(state.loopStart && state.loopEnd > state.loopStart) || state.mp4Downloading) return;
+    runInAction(() => { state.mp4Downloading = true; });
+    try {
+        await downloadRangeMp4(player.videoSource, state.loopStart, state.loopEnd);
+    } catch (e) {
+        console.warn("[mp4] download failed", e);
+        alert("MP4 download failed: " + ((e as any)?.message || e));
+    } finally {
+        runInAction(() => { state.mp4Downloading = false; });
+    }
 }
 // Manually add a loop spanning the middle half of the current zoom window.
 export function addLoopAtView(): void {

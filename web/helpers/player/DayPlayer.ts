@@ -112,6 +112,7 @@ export class DayPlayer {
         this.rafId = undefined;
     }
 
+    get videoSource(): GopSource { return this.source; }
     get playStatus(): PlayStatus { return this.lastStatus; }
     get wantsPlay(): boolean { return this.playing; }
     get compression(): number { return this.comp; }
