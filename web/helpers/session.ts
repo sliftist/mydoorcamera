@@ -128,6 +128,15 @@ export function maybeStartDayPlayer(): void {
 
 export function teardownPlayer(): void { if (player) { player.teardown(); player = undefined; } playerKey = ""; }
 
+// Return to the connect screen (to change the IP / password). Tears the session down;
+// the Connect button builds a fresh one from the editable saved values.
+export async function openConnectScreen(): Promise<void> {
+    if (livePlayer) { runInAction(() => { state.live = false; }); setUrlLive(false); try { await livePlayer.stop(); } catch { /* */ } livePlayer = undefined; }
+    teardownPlayer();
+    if (api) { api.onStatus = undefined; api.onReconnect = undefined; try { api.close(); } catch { /* */ } api = undefined; }
+    runInAction(() => { state.view = "connect"; state.error = ""; state.showCertLink = false; state.connecting = false; state.stats = null; state.online = true; });
+}
+
 // ---- live mode (full-res real-time only) — a separate LivePlayer on the shared canvas ----
 export async function enterLive(): Promise<void> {
     if (!api || !renderer) return;

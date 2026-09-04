@@ -7,7 +7,7 @@ import { connect } from "../helpers/session";
 import { inputCss, btnCss } from "../helpers/styles";
 
 @observer
-export class ConnectView extends preact.Component {
+export class ConnectView extends preact.Component<{}, { showPw: boolean }> {
     render() {
         return (
             <div className={css.vbox(14).width("100%").maxWidth(440)}>
@@ -20,9 +20,15 @@ export class ConnectView extends preact.Component {
                 </label>
                 <label className={css.vbox(4)}>
                     <span className={css.fontSize(12).opacity(0.7)}>Password (4 words)</span>
-                    <input className={inputCss} type="text" autoComplete="off" placeholder="four words" value={state.password}
-                        onInput={e => runInAction(() => { state.password = (e.target as HTMLInputElement).value; })}
-                        onKeyDown={e => { if (e.key === "Enter") void connect(); }} />
+                    <div className={css.hbox(6).alignItems("stretch")}>
+                        <input className={inputCss + " " + css.flexGrow(1).minWidth(0)} type={this.state.showPw ? "text" : "password"} autoComplete="off" placeholder="four words" value={state.password}
+                            onInput={e => runInAction(() => { state.password = (e.target as HTMLInputElement).value; })}
+                            onKeyDown={e => { if (e.key === "Enter") void connect(); }} />
+                        <button className={btnCss} type="button" title={this.state.showPw ? "Hide the password" : "Show the password"}
+                            onClick={() => this.setState({ showPw: !this.state.showPw })}>
+                            {this.state.showPw ? "🙈" : "👁"}
+                        </button>
+                    </div>
                 </label>
                 <button className={btnCss} disabled={state.connecting || !state.ip.trim()} onClick={() => void connect()}>
                     {state.connecting ? "Connecting…" : "Connect"}

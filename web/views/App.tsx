@@ -4,7 +4,7 @@ import { observer } from "sliftutils/render-utils/observer";
 import { css } from "typesafecss";
 import { formatDateTime } from "socket-function/src/formatting/format";
 import { state } from "../helpers/appState";
-import { api } from "../helpers/session";
+import { api, openConnectScreen } from "../helpers/session";
 import { fmtBytes, bps, formatStats } from "../helpers/format";
 import { downloadDebugInfo } from "../helpers/playerLog";
 import { BUILD_TIMESTAMP } from "../../buildVersion";
@@ -39,6 +39,12 @@ export class App extends preact.Component {
                                 </button>
                             );
                         })()}
+                        {state.view === "browse" && (
+                            <button onClick={() => void openConnectScreen()} title="Change the server IP / password"
+                                style={{ pointerEvents: "auto", cursor: "pointer", font: "inherit", fontSize: "11px", color: "inherit", background: "rgba(255,255,255,0.12)", border: "1px solid rgba(255,255,255,0.25)", padding: "1px 6px" }}>
+                                ⚙ connection
+                            </button>
+                        )}
                         <button onClick={() => downloadDebugInfo()} title="Download playback state-machine log"
                             style={{ pointerEvents: "auto", cursor: "pointer", font: "inherit", fontSize: "11px", color: "inherit", background: "rgba(255,255,255,0.12)", border: "1px solid rgba(255,255,255,0.25)", padding: "1px 6px" }}>
                             ⤓ debug
